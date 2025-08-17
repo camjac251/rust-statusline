@@ -1,0 +1,661 @@
+use chrono::{DateTime, Local, Timelike};
+use std::env;
+
+#[cfg(feature = "colors")]
+use owo_colors::OwoColorize;
+
+// Provide a no-op color shim when "colors" feature is disabled
+#[cfg(not(feature = "colors"))]
+pub mod color_shim {
+    use std::fmt::{self, Display, Formatter};
+
+    #[derive(Clone)]
+    pub struct Plain(pub String);
+
+    impl Display for Plain {
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    pub trait ColorizeShim {
+        fn as_str(&self) -> &str;
+
+        fn bright_black(&self) -> Plain {
+            Plain(self.as_str().to_string())
+        }
+        fn bright_white(&self) -> Plain {
+            Plain(self.as_str().to_string())
+        }
+        fn bright_blue(&self) -> Plain {
+            Plain(self.as_str().to_string())
+        }
+        fn bright_cyan(&self) -> Plain {
+            Plain(self.as_str().to_string())
+        }
+        fn bright_magenta(&self) -> Plain {
+            Plain(self.as_str().to_string())
+        }
+        fn bright_yellow(&self) -> Plain {
+            Plain(self.as_str().to_string())
+        }
+        fn bright_red(&self) -> Plain {
+            Plain(self.as_str().to_string())
+        }
+        fn bright_green(&self) -> Plain {
+            Plain(self.as_str().to_string())
+        }
+        fn red(&self) -> Plain {
+            Plain(self.as_str().to_string())
+        }
+        fn yellow(&self) -> Plain {
+            Plain(self.as_str().to_string())
+        }
+        fn green(&self) -> Plain {
+            Plain(self.as_str().to_string())
+        }
+        fn white(&self) -> Plain {
+            Plain(self.as_str().to_string())
+        }
+        fn bold(&self) -> Plain {
+            Plain(self.as_str().to_string())
+        }
+        fn dimmed(&self) -> Plain {
+            Plain(self.as_str().to_string())
+        }
+        fn truecolor(&self, _r: u8, _g: u8, _b: u8) -> Plain {
+            // No-op truecolor in shim; returns plain string
+            Plain(self.as_str().to_string())
+        }
+        fn cyan(&self) -> Plain {
+            Plain(self.as_str().to_string())
+        }
+    }
+
+    impl ColorizeShim for &str {
+        fn as_str(&self) -> &str {
+            self
+        }
+    }
+    impl ColorizeShim for String {
+        fn as_str(&self) -> &str {
+            self.as_str()
+        }
+    }
+    impl ColorizeShim for Plain {
+        fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+}
+
+#[cfg(not(feature = "colors"))]
+use color_shim::ColorizeShim as OwoColorize;
+
+use crate::cli::{Args, LabelsArg, TimeFormatArg};
+use crate::models::{Block, GitInfo, HookJson};
+use crate::utils::{
+    context_limit_for_model_display, deduce_provider_from_model, format_currency, format_path,
+    format_tokens,
+};
+use crate::window::window_bounds;
+
+fn is_truecolor_enabled(args: &Args) -> bool {
+    if let Ok(v) = env::var("CLAUDE_TRUECOLOR") {
+        if v.trim() == "1" {
+            return true;
+        }
+    }
+    args.truecolor
+}
+
+pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String {
+    // Respect NO_COLOR if set: return plain string
+    if env::var("NO_COLOR").is_ok() {
+        return display.to_string();
+    }
+    let lower = model_id.to_lowercase();
+    let use_true = is_truecolor_enabled(args);
+    if lower.contains("opus") {
+        if use_true {
+            format!("{}", display.truecolor(168, 85, 247))
+        } else {
+            format!("{}", display.bright_magenta())
+        }
+    } else if lower.contains("sonnet") {
+        if use_true {
+            format!("{}", display.truecolor(245, 158, 11))
+        } else {
+            format!("{}", display.bright_yellow())
+        }
+    } else if lower.contains("haiku") {
+        if use_true {
+            format!("{}", display.truecolor(6, 182, 212))
+        } else {
+            format!("{}", display.bright_cyan())
+        }
+    } else {
+        format!("{}", display.bright_white())
+    }
+}
+
+pub fn print_header(
+    hook: &HookJson,
+    git_info: Option<&GitInfo>,
+    args: &Args,
+    api_key_source: Option<&str>,
+) {
+    let dir_fmt = format_path(&hook.workspace.current_dir);
+    let mdisp = model_colored_name(&hook.model.id, &hook.model.display_name, args);
+
+    // Build header segments: git (minimal) + model + output_style + optional provider hints
+    let mut header_parts: Vec<String> = Vec::new();
+
+    // Git info from project_dir or current_dir
+    if let Some(gi) = git_info {
+        let mut git_seg = String::new();
+        // worktree indicator
+        if gi.is_linked_worktree == Some(true) {
+            git_seg.push_str("wt ");
+        }
+        if let (Some(br), Some(sc)) = (gi.branch.as_ref(), gi.short_commit.as_ref()) {
+            // branch and short sha
+            git_seg.push_str("⎇ ");
+            git_seg.push_str(&format!("{}@{}", br, sc));
+        } else if let Some(sc) = gi.short_commit.as_ref() {
+            git_seg.push_str(&format!("(detached@{})", sc));
+        }
+        // dirty marker
+        if gi.is_clean == Some(false) {
+            git_seg.push('*');
+        }
+        // ahead/behind
+        if let (Some(a), Some(b)) = (gi.ahead, gi.behind) {
+            if a > 0 {
+                git_seg.push(' ');
+                git_seg.push_str(&format!("↑{}", a));
+            }
+            if b > 0 {
+                if a == 0 {
+                    git_seg.push(' ');
+                }
+                git_seg.push_str(&format!("↓{}", b));
+            }
+        }
+        if !git_seg.is_empty() {
+            header_parts.push(format!(
+                "{}{}{}",
+                "[".bright_black(),
+                git_seg.bright_white(),
+                "]".bright_black()
+            ));
+        }
+    }
+
+    // Model segment
+    header_parts.push(format!(
+        "{}{}{}{}",
+        "[".bright_black(),
+        "model:".bright_black(),
+        mdisp,
+        "]".bright_black(),
+    ));
+
+    // Output style segment (if present)
+    if let Some(ref output_style) = hook.output_style {
+        header_parts.push(format!(
+            "{}{}{}{}",
+            "[".bright_black(),
+            "style:".bright_black(),
+            output_style.name.bright_blue(),
+            "]".bright_black(),
+        ));
+    }
+
+    // Optional provider hints grouped (only when --show-provider is set)
+    if args.show_provider {
+        let mut prov_hint_parts: Vec<String> = Vec::new();
+        if let Some(src) = api_key_source {
+            prov_hint_parts.push(format!("{}{}", "key:".bright_black(), src.bright_white()));
+        }
+        // Provider hint from env or deduced from model id
+        let prov_disp = if let Ok(provider_env) = env::var("CLAUDE_PROVIDER") {
+            match provider_env.to_lowercase().as_str() {
+                "firstparty" => "anthropic".to_string(),
+                other => other.to_string(),
+            }
+        } else {
+            deduce_provider_from_model(&hook.model.id).to_string()
+        };
+        prov_hint_parts.push(format!(
+            "{}{}",
+            "prov:".bright_black(),
+            prov_disp.bright_white()
+        ));
+        if !prov_hint_parts.is_empty() {
+            header_parts.push(format!(
+                "{}{}{}",
+                "[".bright_black(),
+                prov_hint_parts.join(" "),
+                "]".bright_black()
+            ));
+        }
+    }
+
+    // Print header line: cwd then segments
+    println!(
+        "{} {}",
+        dir_fmt.bright_blue(),
+        header_parts.join(" ")
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn print_text_output(
+    args: &Args,
+    session_cost: f64,
+    today_cost: f64,
+    total_cost: f64,
+    usage_percent: Option<f64>,
+    projected_percent: Option<f64>,
+    remaining_minutes: f64,
+    active_block: Option<&Block>,
+    latest_reset: Option<DateTime<chrono::Utc>>,
+    _tpm: f64,
+    tpm_indicator: f64,
+    cost_per_hour: f64,
+    context: Option<(u64, u32)>,
+    tokens_input: u64,
+    tokens_output: u64,
+    tokens_cache_create: u64,
+    tokens_cache_read: u64,
+    web_search_requests: u64,
+) {
+    // Line 2
+    print!("{} ", "❯".bright_cyan());
+
+    // Labels preference
+    let long_labels = matches!(args.labels, LabelsArg::Long);
+
+    // session
+    let session_label = "session:";
+    print!(
+        "{}{}{} ",
+        session_label.bright_black(),
+        "$".bold().bright_white(),
+        format_currency(session_cost).bold().bright_white()
+    );
+    print!("{} ", "·".bright_black().dimmed());
+
+    // today
+    let today_label = "today:";
+    print!(
+        "{}{}{} ",
+        today_label.bright_black(),
+        "$".bold().white(),
+        format_currency(today_cost).bold().white()
+    );
+    print!("{} ", "·".bright_black().dimmed());
+
+    // window (formerly block)
+    let window_label = if long_labels {
+        "current window:"
+    } else {
+        "window:"
+    };
+    print!(
+        "{}{}{} ",
+        window_label.bright_black(),
+        "$".bright_white().bold(),
+        format_currency(total_cost).bright_white().bold()
+    );
+    print!("{} ", "·".bright_black().dimmed());
+
+    // usage (only if a plan/window max is configured)
+    if let (Some(usage_percent), Some(projected_percent)) = (usage_percent, projected_percent) {
+        let usage_colored = if usage_percent >= 95.0 {
+            format!("{:.1}%", usage_percent).red().bold().to_string()
+        } else if usage_percent >= 80.0 {
+            format!("{:.1}%", usage_percent).yellow().bold().to_string()
+        } else {
+            format!("{:.1}%", usage_percent).green().to_string()
+        };
+        let proj_colored = if projected_percent >= 95.0 {
+            format!("{:.1}%", projected_percent)
+                .red()
+                .bold()
+                .to_string()
+        } else if projected_percent >= 80.0 {
+            format!("{:.1}%", projected_percent)
+                .yellow()
+                .bold()
+                .to_string()
+        } else {
+            format!("{:.1}%", projected_percent).green().to_string()
+        };
+        print!(
+            "{}{}{}{} ",
+            "usage:".bright_black(),
+            usage_colored,
+            "→".bright_black(),
+            proj_colored
+        );
+        print!("{} ", "·".bright_black().dimmed());
+    }
+
+    // countdown and reset time
+    let rem_h = (remaining_minutes as i64) / 60;
+    let rem_m = (remaining_minutes as i64) % 60;
+    let countdown = if rem_h > 0 {
+        format!("{}h{}m", rem_h, rem_m)
+    } else {
+        format!("{}m", rem_m)
+    };
+    let countdown_colored = if remaining_minutes < 15.0 {
+        countdown.red().bold().to_string()
+    } else if remaining_minutes < 60.0 {
+        countdown.yellow().to_string()
+    } else {
+        countdown.white().to_string()
+    };
+    print!("{}{} ", "⏳ ".bright_black(), countdown_colored);
+    print!("{} ", "·".bright_black().dimmed());
+
+    // Reset clock at window end (active end if available; else computed using shared window_bounds)
+    let window_end_local = if let Some(b) = active_block {
+        b.end.with_timezone(&Local)
+    } else {
+        // Use shared window_bounds function for consistent window calculation
+        let now_utc = chrono::Utc::now();
+        let (_start, end) = window_bounds(now_utc, latest_reset);
+        end.with_timezone(&Local)
+    };
+
+    let use_12h = match args.time_fmt {
+        TimeFormatArg::H12 => true,
+        TimeFormatArg::H24 => false,
+        TimeFormatArg::Auto => {
+            if let Ok(forced) = env::var("CLAUDE_TIME_FORMAT") {
+                forced.trim() == "12"
+            } else {
+                let lc = env::var("LC_TIME")
+                    .or_else(|_| env::var("LANG"))
+                    .unwrap_or_default()
+                    .to_lowercase();
+                lc.contains("en_us")
+            }
+        }
+    };
+
+    let fmt = if use_12h { "%-I:%M %p" } else { "%H:%M" };
+    let reset_disp = window_end_local.format(fmt).to_string();
+    let midnight = window_end_local.hour() == 0 && window_end_local.minute() == 0;
+    if !use_12h && midnight {
+        // 24h mode hint for next day
+        print!(
+            "{}{}{} ",
+            "↻ ".bright_black(),
+            reset_disp.white(),
+            " (+1d)".bright_black()
+        );
+    } else {
+        print!("{}{} ", "↻ ".bright_black(), reset_disp.white());
+    }
+    print!("{} ", "·".bright_black().dimmed());
+
+    // burn: show non-cache tokens per minute (aligns with usage% basis)
+    let burn_val = format!("{}/m", format_tokens(tpm_indicator.round() as u64));
+    let burn_colored = if tpm_indicator >= 5000.0 {
+        format!("{}", burn_val.red().bold())
+    } else if tpm_indicator >= 2000.0 {
+        format!("{}", burn_val.yellow())
+    } else {
+        format!("{}", burn_val.green())
+    };
+    // Color cost/hour: green < $1/h, yellow $1–$5/h, red ≥ $5/h
+    let cph_str = format!("${}/h", format_currency(cost_per_hour));
+    let cph_colored = if cost_per_hour >= 5.0 {
+        cph_str.red().bold().to_string()
+    } else if cost_per_hour >= 1.0 {
+        cph_str.yellow().to_string()
+    } else {
+        cph_str.green().to_string()
+    };
+    print!(
+        "{}{} {} ",
+        "burn:".bright_black(),
+        burn_colored,
+        cph_colored
+    );
+    print!("{} ", "·".bright_black().dimmed());
+
+    // tokens breakdown (optional)
+    if args.show_breakdown {
+        let ti = format_tokens(tokens_input);
+        let to = format_tokens(tokens_output);
+        let tcc = format_tokens(tokens_cache_create);
+        let tcr = format_tokens(tokens_cache_read);
+        let ws = web_search_requests;
+        print!(
+            "{}{} {}{} {}{} ",
+            "tok:".bright_black(),
+            format!("{}/{}", ti, to).bright_white(),
+            " ".bright_black(),
+            format!("{}/{}", tcc, tcr).bright_white(),
+            " ws:".bright_black(),
+            ws.to_string().bright_white()
+        );
+        print!("{} ", "·".bright_black().dimmed());
+    }
+
+    // context
+    print!("{}", "context:".bright_black());
+    if let Some((tokens, pct)) = context {
+        let pct_colored = if pct as f64 >= 85.0 {
+            format!("{}%", pct).red().bold().to_string()
+        } else if pct as f64 >= 60.0 {
+            format!("{}%", pct).yellow().bold().to_string()
+        } else {
+            format!("{}%", pct).green().to_string()
+        };
+        print!("{} ({})", format_tokens(tokens), pct_colored);
+    }
+    println!();
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_json_output(
+    hook: &HookJson,
+    session_cost: f64,
+    today_cost: f64,
+    total_cost: f64,
+    total_tokens: f64,
+    noncache_tokens: f64,
+    tokens_input: u64,
+    tokens_output: u64,
+    tokens_cache_create: u64,
+    tokens_cache_read: u64,
+    web_search_requests: u64,
+    service_tier: Option<String>,
+    usage_percent: Option<f64>,
+    projected_percent: Option<f64>,
+    remaining_minutes: f64,
+    active_block: Option<&Block>,
+    latest_reset: Option<DateTime<chrono::Utc>>,
+    tpm: f64,
+    tpm_indicator: f64,
+    session_nc_tpm: f64,
+    global_nc_tpm: f64,
+    cost_per_hour: f64,
+    context: Option<(u64, u32)>,
+    context_source: Option<&'static str>,
+    api_key_source: Option<String>,
+    plan_tier: Option<String>,
+    plan_max: Option<f64>,
+    git_info: Option<GitInfo>,
+) -> serde_json::Value {
+    // Provider from env or deduced from model id
+    let provider_env = env::var("CLAUDE_PROVIDER").ok().map(|s| {
+        if s.eq_ignore_ascii_case("firstParty") {
+            "anthropic".to_string()
+        } else {
+            s
+        }
+    });
+    let provider_final = provider_env
+        .clone()
+        .unwrap_or_else(|| deduce_provider_from_model(&hook.model.id).to_string());
+
+    let reset_iso = latest_reset.map(|d| d.to_rfc3339());
+    let (ctx_tokens, ctx_pct) = context
+        .map(|(t, p)| (Some(t), Some(p)))
+        .unwrap_or((None, None));
+    let ctx_limit = context_limit_for_model_display(&hook.model.id, &hook.model.display_name);
+
+    // Git json fields (present even if nulls to keep schema stable)
+    let (
+        git_branch,
+        git_short,
+        git_clean,
+        git_ahead,
+        git_behind,
+        git_on_remote,
+        git_remote_url,
+        git_wt_count,
+        git_is_wt,
+    ) = if let Some(gi) = git_info {
+        (
+            gi.branch,
+            gi.short_commit,
+            gi.is_clean,
+            gi.ahead,
+            gi.behind,
+            gi.is_head_on_remote,
+            gi.remote_url,
+            gi.worktree_count,
+            gi.is_linked_worktree,
+        )
+    } else {
+        (None, None, None, None, None, None, None, None, None)
+    };
+
+    let block_json = serde_json::json!({
+        "cost_usd": (total_cost * 100.0).round() / 100.0,
+        "total_tokens": (total_tokens as u64),
+        "noncache_tokens": (noncache_tokens as u64),
+        "input_tokens": tokens_input,
+        "output_tokens": tokens_output,
+        "cache_creation_input_tokens": tokens_cache_create,
+        "cache_read_input_tokens": tokens_cache_read,
+        "web_search_requests": web_search_requests,
+        "service_tier": service_tier,
+        "start": active_block.map(|b| b.start.to_rfc3339()),
+        "end": active_block.map(|b| b.end.to_rfc3339()),
+        "end_epoch": active_block.map(|b| b.end.timestamp()),
+        "reset_anchor_epoch": latest_reset.map(|d| d.timestamp()),
+        "remaining_minutes": (remaining_minutes as i64).max(0),
+        "usage_percent": usage_percent.map(|v| (v * 10.0).round()/10.0),
+        "projected_percent": projected_percent.map(|v| (v * 10.0).round()/10.0),
+        "tokens_per_minute": (tpm * 10.0).round()/10.0,
+        "tokens_per_minute_indicator": (tpm_indicator * 10.0).round()/10.0,
+        "tokens_per_minute_noncache_session": (session_nc_tpm * 10.0).round()/10.0,
+        "tokens_per_minute_noncache_global": (global_nc_tpm * 10.0).round()/10.0,
+        "cost_per_hour": (cost_per_hour * 100.0).round()/100.0,
+    });
+
+    serde_json::json!({
+        "model": {"id": hook.model.id.clone(), "display_name": hook.model.display_name.clone()},
+        "cwd": hook.workspace.current_dir.clone(),
+        "project_dir": hook.workspace.project_dir.clone(),
+        "version": hook.version.clone(),
+        "output_style": hook.output_style.as_ref().map(|s| serde_json::json!({"name": s.name.clone()})),
+        "provider": {"apiKeySource": api_key_source, "env": provider_final},
+        "plan": {"tier": plan_tier, "max_tokens": plan_max},
+        "reset_at": reset_iso,
+        "session": {"cost_usd": (session_cost * 100.0).round() / 100.0},
+        "today": {"cost_usd": (today_cost * 100.0).round() / 100.0},
+        "block": block_json.clone(),
+        "window": block_json,
+        "context": {
+            "tokens": ctx_tokens,
+            "percent": ctx_pct,
+            "limit": ctx_limit,
+            "source": context_source
+        },
+        "git": {
+            "branch": git_branch,
+            "short_commit": git_short,
+            "is_clean": git_clean,
+            "ahead": git_ahead,
+            "behind": git_behind,
+            "is_head_on_remote": git_on_remote,
+            "remote_url": git_remote_url,
+            "worktree_count": git_wt_count,
+            "is_linked_worktree": git_is_wt
+        }
+    })
+}
+#[allow(clippy::too_many_arguments)]
+pub fn print_json_output(
+    hook: &HookJson,
+    session_cost: f64,
+    today_cost: f64,
+    total_cost: f64,
+    total_tokens: f64,
+    noncache_tokens: f64,
+    tokens_input: u64,
+    tokens_output: u64,
+    tokens_cache_create: u64,
+    tokens_cache_read: u64,
+    web_search_requests: u64,
+    service_tier: Option<String>,
+    usage_percent: Option<f64>,
+    projected_percent: Option<f64>,
+    remaining_minutes: f64,
+    active_block: Option<&Block>,
+    latest_reset: Option<DateTime<chrono::Utc>>,
+    tpm: f64,
+    tpm_indicator: f64,
+    session_nc_tpm: f64,
+    global_nc_tpm: f64,
+    cost_per_hour: f64,
+    context: Option<(u64, u32)>,
+    context_source: Option<&'static str>,
+    api_key_source: Option<String>,
+    plan_tier: Option<String>,
+    plan_max: Option<f64>,
+    git_info: Option<GitInfo>,
+) -> anyhow::Result<()> {
+    let json = build_json_output(
+        hook,
+        session_cost,
+        today_cost,
+        total_cost,
+        total_tokens,
+        noncache_tokens,
+        tokens_input,
+        tokens_output,
+        tokens_cache_create,
+        tokens_cache_read,
+        web_search_requests,
+        service_tier,
+        usage_percent,
+        projected_percent,
+        remaining_minutes,
+        active_block,
+        latest_reset,
+        tpm,
+        tpm_indicator,
+        session_nc_tpm,
+        global_nc_tpm,
+        cost_per_hour,
+        context,
+        context_source,
+        api_key_source,
+        plan_tier,
+        plan_max,
+        git_info,
+    );
+    println!("{}", serde_json::to_string(&json)?);
+    Ok(())
+}

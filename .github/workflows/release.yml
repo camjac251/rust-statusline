@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-release:
+    name: Build and Release (default features)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --all-features --release
+
+      - name: Build
+        run: cargo build --release
+
+      # Package artifacts (non-Windows)
+      - name: Package artifact (tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="claude_statusline-${{ runner.os }}"
+          bin="target/release/claude_statusline"
+          archive="$name.tar.gz"
+          tar -czf "$archive" -C "$(dirname "$bin")" "$(basename "$bin")"
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+          
+          # Generate checksum
+          sha256sum "$archive" > "$archive.sha256"
+          echo "CHECKSUM=$archive.sha256" >> "$GITHUB_ENV"
+
+      # Package artifacts (Windows)
+      - name: Package artifact (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "claude_statusline-${{ runner.os }}"
+          $bin  = "target\\release\\claude_statusline.exe"
+          $archive = "$name.zip"
+          Compress-Archive -Path $bin -DestinationPath $archive
+          echo "ARCHIVE=$archive" >> $env:GITHUB_ENV
+          
+          # Generate checksum
+          $checksum = "$archive.sha256"
+          (Get-FileHash -Path $archive -Algorithm SHA256).Hash + "  $archive" | Out-File -FilePath $checksum -Encoding ascii
+          echo "CHECKSUM=$checksum" >> $env:GITHUB_ENV
+
+      - name: Create GitHub Release and upload asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.ARCHIVE }}
+            ${{ env.CHECKSUM }}
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
