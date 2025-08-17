@@ -1,0 +1,14 @@
+# Build artifacts
+/target/
+
+# Byproducts and backups
+**/*.rs.bk
+*.log
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
