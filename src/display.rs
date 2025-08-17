@@ -194,9 +194,8 @@ pub fn print_header(
 
     // Model segment
     header_parts.push(format!(
-        "{}{}{}{}",
+        "{}{}{}",
         "[".bright_black(),
-        "model:".bright_black(),
         mdisp,
         "]".bright_black(),
     ));
@@ -206,7 +205,7 @@ pub fn print_header(
         header_parts.push(format!(
             "{}{}{}{}",
             "[".bright_black(),
-            "style:".bright_black(),
+            "style:".bright_black().dimmed(),
             output_style.name.bright_blue(),
             "]".bright_black(),
         ));
@@ -216,7 +215,7 @@ pub fn print_header(
     if args.show_provider {
         let mut prov_hint_parts: Vec<String> = Vec::new();
         if let Some(src) = api_key_source {
-            prov_hint_parts.push(format!("{}{}", "key:".bright_black(), src.bright_white()));
+            prov_hint_parts.push(format!("{}{}", "key:".bright_black().dimmed(), src.white()));
         }
         // Provider hint from env or deduced from model id
         let prov_disp = if let Ok(provider_env) = env::var("CLAUDE_PROVIDER") {
@@ -229,8 +228,8 @@ pub fn print_header(
         };
         prov_hint_parts.push(format!(
             "{}{}",
-            "prov:".bright_black(),
-            prov_disp.bright_white()
+            "prov:".bright_black().dimmed(),
+            prov_disp.white()
         ));
         if !prov_hint_parts.is_empty() {
             header_parts.push(format!(
@@ -281,7 +280,7 @@ pub fn print_text_output(
     let session_label = "session:";
     print!(
         "{}{}{} ",
-        session_label.bright_black(),
+        session_label.bright_black().dimmed(),
         "$".bold().bright_white(),
         format_currency(session_cost).bold().bright_white()
     );
@@ -289,11 +288,20 @@ pub fn print_text_output(
 
     // today
     let today_label = "today:";
+    let today_cost_color = if today_cost >= 100.0 {
+        format_currency(today_cost).bold().red().to_string()
+    } else if today_cost >= 50.0 {
+        format_currency(today_cost).bold().yellow().to_string()
+    } else if today_cost >= 20.0 {
+        format_currency(today_cost).yellow().to_string()
+    } else {
+        format_currency(today_cost).white().to_string()
+    };
     print!(
         "{}{}{} ",
-        today_label.bright_black(),
-        "$".bold().white(),
-        format_currency(today_cost).bold().white()
+        today_label.bright_black().dimmed(),
+        "$".white(),
+        today_cost_color
     );
     print!("{} ", "·".bright_black().dimmed());
 
@@ -303,11 +311,20 @@ pub fn print_text_output(
     } else {
         "window:"
     };
+    let window_cost_color = if total_cost >= 50.0 {
+        format_currency(total_cost).bold().red().to_string()
+    } else if total_cost >= 20.0 {
+        format_currency(total_cost).bold().yellow().to_string()
+    } else if total_cost >= 10.0 {
+        format_currency(total_cost).yellow().to_string()
+    } else {
+        format_currency(total_cost).bright_white().to_string()
+    };
     print!(
         "{}{}{} ",
-        window_label.bright_black(),
-        "$".bright_white().bold(),
-        format_currency(total_cost).bright_white().bold()
+        window_label.bright_black().dimmed(),
+        "$".bright_white(),
+        window_cost_color
     );
     print!("{} ", "·".bright_black().dimmed());
 
@@ -335,9 +352,9 @@ pub fn print_text_output(
         };
         print!(
             "{}{}{}{} ",
-            "usage:".bright_black(),
+            "usage:".bright_black().dimmed(),
             usage_colored,
-            "→".bright_black(),
+            "→".bright_black().dimmed(),
             proj_colored
         );
         print!("{} ", "·".bright_black().dimmed());
@@ -347,18 +364,18 @@ pub fn print_text_output(
     let rem_h = (remaining_minutes as i64) / 60;
     let rem_m = (remaining_minutes as i64) % 60;
     let countdown = if rem_h > 0 {
-        format!("{}h{}m", rem_h, rem_m)
+        format!("{}h {}m left", rem_h, rem_m)
     } else {
-        format!("{}m", rem_m)
+        format!("{}m left", rem_m)
     };
-    let countdown_colored = if remaining_minutes < 15.0 {
+    let countdown_colored = if remaining_minutes < 60.0 {
         countdown.red().bold().to_string()
-    } else if remaining_minutes < 60.0 {
+    } else if remaining_minutes < 180.0 {
         countdown.yellow().to_string()
     } else {
         countdown.white().to_string()
     };
-    print!("{}{} ", "⏳ ".bright_black(), countdown_colored);
+    print!("{}{} ", "time:".bright_black().dimmed(), countdown_colored);
     print!("{} ", "·".bright_black().dimmed());
 
     // Reset clock at window end (active end if available; else computed using shared window_bounds)
@@ -399,7 +416,7 @@ pub fn print_text_output(
             " (+1d)".bright_black()
         );
     } else {
-        print!("{}{} ", "↻ ".bright_black(), reset_disp.white());
+        print!("{}{} ", "reset:".bright_black().dimmed(), reset_disp.white());
     }
     print!("{} ", "·".bright_black().dimmed());
 
@@ -423,7 +440,7 @@ pub fn print_text_output(
     };
     print!(
         "{}{} {} ",
-        "burn:".bright_black(),
+        "burn:".bright_black().dimmed(),
         burn_colored,
         cph_colored
     );
@@ -438,27 +455,29 @@ pub fn print_text_output(
         let ws = web_search_requests;
         print!(
             "{}{} {}{} {}{} ",
-            "tok:".bright_black(),
-            format!("{}/{}", ti, to).bright_white(),
-            " ".bright_black(),
-            format!("{}/{}", tcc, tcr).bright_white(),
-            " ws:".bright_black(),
-            ws.to_string().bright_white()
+            "tok:".bright_black().dimmed(),
+            format!("{}/{}", ti, to).white(),
+            "cache:".bright_black().dimmed(),
+            format!("{}/{}", tcc, tcr).white(),
+            "ws:".bright_black().dimmed(),
+            ws.to_string().white()
         );
         print!("{} ", "·".bright_black().dimmed());
     }
 
     // context
-    print!("{}", "context:".bright_black());
+    print!("{}", "context:".bright_black().dimmed());
     if let Some((tokens, pct)) = context {
-        let pct_colored = if pct as f64 >= 85.0 {
+        let pct_colored = if pct as f64 >= 80.0 {
             format!("{}%", pct).red().bold().to_string()
-        } else if pct as f64 >= 60.0 {
-            format!("{}%", pct).yellow().bold().to_string()
+        } else if pct as f64 >= 50.0 {
+            format!("{}%", pct).yellow().to_string()
         } else {
             format!("{}%", pct).green().to_string()
         };
         print!("{} ({})", format_tokens(tokens), pct_colored);
+    } else {
+        print!("{}", "N/A".bright_black().dimmed());
     }
     println!();
 }
