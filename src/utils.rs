@@ -194,7 +194,9 @@ pub fn resolve_plan_config(args: &Args) -> (Option<String>, Option<f64>) {
     let (env_tier, env_max_tokens) = plan_from_env();
     let settings = read_settings_overrides();
     // Plan profile from CLI or env (CLAUDE_PLAN_PROFILE)
-    let plan_profile_env = env::var("CLAUDE_PLAN_PROFILE").ok().map(|s| s.to_lowercase());
+    let plan_profile_env = env::var("CLAUDE_PLAN_PROFILE")
+        .ok()
+        .map(|s| s.to_lowercase());
     let plan_profile_settings = settings.as_ref().and_then(|s| s.plan_profile.clone());
     let plan_profile_cli: Option<String> = args.plan_profile.map(|p| match p {
         PlanProfileArg::Standard => "standard".to_string(),
@@ -217,37 +219,37 @@ pub fn resolve_plan_config(args: &Args) -> (Option<String>, Option<f64>) {
         .or(env_max_tokens)
         .or(plan_max_settings)
         .or_else(|| {
-        if let Some(ref t) = plan_tier_final {
-            match plan_profile_final.as_str() {
-                // Standard mapping: 200k base * {1,5,20}
-                "standard" => {
-                    let mult = match t.as_str() {
-                        "pro" => 1.0,
-                        "max5x" => 5.0,
-                        "max20x" => 20.0,
-                        _ => 0.0,
-                    };
-                    if mult > 0.0 {
-                        return Some(BASE_TOKEN_LIMIT * mult);
+            if let Some(ref t) = plan_tier_final {
+                match plan_profile_final.as_str() {
+                    // Standard mapping: 200k base * {1,5,20}
+                    "standard" => {
+                        let mult = match t.as_str() {
+                            "pro" => 1.0,
+                            "max5x" => 5.0,
+                            "max20x" => 20.0,
+                            _ => 0.0,
+                        };
+                        if mult > 0.0 {
+                            return Some(BASE_TOKEN_LIMIT * mult);
+                        }
                     }
-                }
-                // Monitor mapping: fixed caps per tier (≈19k/88k/220k)
-                "monitor" => {
-                    let val = match t.as_str() {
-                        "pro" => Some(19_000.0),
-                        "max5x" => Some(88_000.0),
-                        "max20x" => Some(220_000.0),
-                        _ => None,
-                    };
-                    if let Some(v) = val {
-                        return Some(v);
+                    // Monitor mapping: fixed caps per tier (≈19k/88k/220k)
+                    "monitor" => {
+                        let val = match t.as_str() {
+                            "pro" => Some(19_000.0),
+                            "max5x" => Some(88_000.0),
+                            "max20x" => Some(220_000.0),
+                            _ => None,
+                        };
+                        if let Some(v) = val {
+                            return Some(v);
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
-        None
-    });
+            None
+        });
     (plan_tier_final, plan_max)
 }
 
@@ -275,19 +277,37 @@ fn read_settings_overrides() -> Option<SettingsOverrides> {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 if let Ok(mut s) = parse_settings_overrides(&content) {
                     // args-like overrides (arrays/strings)
-                    if s.plan_tier.is_none() || s.plan_profile.is_none() || s.plan_max_tokens.is_none() {
+                    if s.plan_tier.is_none()
+                        || s.plan_profile.is_none()
+                        || s.plan_max_tokens.is_none()
+                    {
                         if let Some((tier, profile, max)) = parse_args_like_overrides(&content) {
-                            if s.plan_tier.is_none() { s.plan_tier = tier; }
-                            if s.plan_profile.is_none() { s.plan_profile = profile; }
-                            if s.plan_max_tokens.is_none() { s.plan_max_tokens = max; }
+                            if s.plan_tier.is_none() {
+                                s.plan_tier = tier;
+                            }
+                            if s.plan_profile.is_none() {
+                                s.plan_profile = profile;
+                            }
+                            if s.plan_max_tokens.is_none() {
+                                s.plan_max_tokens = max;
+                            }
                         }
                     }
                     // statusLine.command overrides (a full command string)
-                    if s.plan_tier.is_none() || s.plan_profile.is_none() || s.plan_max_tokens.is_none() {
+                    if s.plan_tier.is_none()
+                        || s.plan_profile.is_none()
+                        || s.plan_max_tokens.is_none()
+                    {
                         if let Some((tier, profile, max)) = parse_command_line_overrides(&content) {
-                            if s.plan_tier.is_none() { s.plan_tier = tier; }
-                            if s.plan_profile.is_none() { s.plan_profile = profile; }
-                            if s.plan_max_tokens.is_none() { s.plan_max_tokens = max; }
+                            if s.plan_tier.is_none() {
+                                s.plan_tier = tier;
+                            }
+                            if s.plan_profile.is_none() {
+                                s.plan_profile = profile;
+                            }
+                            if s.plan_max_tokens.is_none() {
+                                s.plan_max_tokens = max;
+                            }
                         }
                     }
                     return Some(s);
@@ -309,23 +329,53 @@ fn parse_settings_overrides(content: &str) -> anyhow::Result<SettingsOverrides> 
     for key in sections {
         if let Some(obj) = v.get(key).and_then(|x| x.as_object()) {
             return Ok(SettingsOverrides {
-                plan_tier: get_string_any(obj, &["plan_tier", "planTier", "plan-tier", "tier"]).map(|s| s.to_lowercase()),
-                plan_profile: get_string_any(obj, &["plan_profile", "planProfile", "plan-profile", "profile"]).map(|s| s.to_lowercase()),
-                plan_max_tokens: get_number_any(obj, &["plan_max_tokens", "planMaxTokens", "plan-max-tokens", "max_tokens", "maxTokens"]),
+                plan_tier: get_string_any(obj, &["plan_tier", "planTier", "plan-tier", "tier"])
+                    .map(|s| s.to_lowercase()),
+                plan_profile: get_string_any(
+                    obj,
+                    &["plan_profile", "planProfile", "plan-profile", "profile"],
+                )
+                .map(|s| s.to_lowercase()),
+                plan_max_tokens: get_number_any(
+                    obj,
+                    &[
+                        "plan_max_tokens",
+                        "planMaxTokens",
+                        "plan-max-tokens",
+                        "max_tokens",
+                        "maxTokens",
+                    ],
+                ),
             });
         }
     }
     if let Some(obj) = v.as_object() {
         return Ok(SettingsOverrides {
-            plan_tier: get_string_any(obj, &["plan_tier", "planTier", "plan-tier", "tier"]).map(|s| s.to_lowercase()),
-            plan_profile: get_string_any(obj, &["plan_profile", "planProfile", "plan-profile", "profile"]).map(|s| s.to_lowercase()),
-            plan_max_tokens: get_number_any(obj, &["plan_max_tokens", "planMaxTokens", "plan-max-tokens", "max_tokens", "maxTokens"]),
+            plan_tier: get_string_any(obj, &["plan_tier", "planTier", "plan-tier", "tier"])
+                .map(|s| s.to_lowercase()),
+            plan_profile: get_string_any(
+                obj,
+                &["plan_profile", "planProfile", "plan-profile", "profile"],
+            )
+            .map(|s| s.to_lowercase()),
+            plan_max_tokens: get_number_any(
+                obj,
+                &[
+                    "plan_max_tokens",
+                    "planMaxTokens",
+                    "plan-max-tokens",
+                    "max_tokens",
+                    "maxTokens",
+                ],
+            ),
         });
     }
     Ok(SettingsOverrides::default())
 }
 
-fn parse_args_like_overrides(content: &str) -> Option<(Option<String>, Option<String>, Option<f64>)> {
+fn parse_args_like_overrides(
+    content: &str,
+) -> Option<(Option<String>, Option<String>, Option<f64>)> {
     let v: serde_json::Value = serde_json::from_str(content).ok()?;
     let mut args_vec: Vec<String> = Vec::new();
     let cand = [
@@ -349,12 +399,16 @@ fn parse_args_like_overrides(content: &str) -> Option<(Option<String>, Option<St
                 }
             } else if let Some(s) = val.as_str() {
                 for part in s.split_whitespace() {
-                    if !part.is_empty() { args_vec.push(part.to_string()); }
+                    if !part.is_empty() {
+                        args_vec.push(part.to_string());
+                    }
                 }
             }
         }
     }
-    if args_vec.is_empty() { return None; }
+    if args_vec.is_empty() {
+        return None;
+    }
     let mut tier: Option<String> = None;
     let mut profile: Option<String> = None;
     let mut max_tok: Option<f64> = None;
@@ -362,13 +416,21 @@ fn parse_args_like_overrides(content: &str) -> Option<(Option<String>, Option<St
     while let Some(tok) = it.next() {
         match tok.as_str() {
             "--plan-tier" => {
-                if let Some(v) = it.next() { tier = Some(v.to_lowercase()); }
+                if let Some(v) = it.next() {
+                    tier = Some(v.to_lowercase());
+                }
             }
             "--plan-profile" => {
-                if let Some(v) = it.next() { profile = Some(v.to_lowercase()); }
+                if let Some(v) = it.next() {
+                    profile = Some(v.to_lowercase());
+                }
             }
             "--plan-max-tokens" => {
-                if let Some(v) = it.next() { if let Ok(n) = v.parse::<f64>() { max_tok = Some(n); } }
+                if let Some(v) = it.next() {
+                    if let Ok(n) = v.parse::<f64>() {
+                        max_tok = Some(n);
+                    }
+                }
             }
             _ => {}
         }
@@ -376,7 +438,9 @@ fn parse_args_like_overrides(content: &str) -> Option<(Option<String>, Option<St
     Some((tier, profile, max_tok))
 }
 
-fn parse_command_line_overrides(content: &str) -> Option<(Option<String>, Option<String>, Option<f64>)> {
+fn parse_command_line_overrides(
+    content: &str,
+) -> Option<(Option<String>, Option<String>, Option<f64>)> {
     let v: serde_json::Value = serde_json::from_str(content).ok()?;
     // Look for statusLine.command (Claude Code style), and fallback to statusline.command
     let cmd_val = v
@@ -386,7 +450,9 @@ fn parse_command_line_overrides(content: &str) -> Option<(Option<String>, Option
     let cmd = cmd_val.as_str()?;
     // naive split; acceptable for typical flags; drop the binary path (first token)
     let mut parts: Vec<&str> = cmd.split_whitespace().collect();
-    if parts.is_empty() { return None; }
+    if parts.is_empty() {
+        return None;
+    }
     let mut it = parts.iter();
     // skip binary
     it.next();
@@ -396,24 +462,39 @@ fn parse_command_line_overrides(content: &str) -> Option<(Option<String>, Option
     while let Some(tok) = it.next() {
         match *tok {
             "--plan-tier" => {
-                if let Some(v) = it.next() { tier = Some(v.to_string().to_lowercase()); }
+                if let Some(v) = it.next() {
+                    tier = Some(v.to_string().to_lowercase());
+                }
             }
             "--plan-profile" => {
-                if let Some(v) = it.next() { profile = Some(v.to_string().to_lowercase()); }
+                if let Some(v) = it.next() {
+                    profile = Some(v.to_string().to_lowercase());
+                }
             }
             "--plan-max-tokens" => {
-                if let Some(v) = it.next() { if let Ok(n) = v.parse::<f64>() { max_tok = Some(n); } }
+                if let Some(v) = it.next() {
+                    if let Ok(n) = v.parse::<f64>() {
+                        max_tok = Some(n);
+                    }
+                }
             }
             _ => {}
         }
     }
-    if tier.is_none() && profile.is_none() && max_tok.is_none() { return None; }
+    if tier.is_none() && profile.is_none() && max_tok.is_none() {
+        return None;
+    }
     Some((tier, profile, max_tok))
 }
 
-fn get_string_any<'a>(obj: &'a serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<String> {
+fn get_string_any<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<String> {
     for k in keys {
-        if let Some(s) = obj.get(*k).and_then(|v| v.as_str()) { return Some(s.to_string()); }
+        if let Some(s) = obj.get(*k).and_then(|v| v.as_str()) {
+            return Some(s.to_string());
+        }
     }
     None
 }
@@ -421,9 +502,17 @@ fn get_string_any<'a>(obj: &'a serde_json::Map<String, serde_json::Value>, keys:
 fn get_number_any(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<f64> {
     for k in keys {
         if let Some(n) = obj.get(*k) {
-            if let Some(i) = n.as_i64() { return Some(i as f64); }
-            if let Some(f) = n.as_f64() { return Some(f); }
-            if let Some(s) = n.as_str() { if let Ok(v) = s.parse::<f64>() { return Some(v); } }
+            if let Some(i) = n.as_i64() {
+                return Some(i as f64);
+            }
+            if let Some(f) = n.as_f64() {
+                return Some(f);
+            }
+            if let Some(s) = n.as_str() {
+                if let Ok(v) = s.parse::<f64>() {
+                    return Some(v);
+                }
+            }
         }
     }
     None

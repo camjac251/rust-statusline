@@ -54,8 +54,16 @@ pub fn calculate_window_metrics(
     burn_scope: BurnScope,
     plan_max: Option<f64>,
 ) -> WindowMetrics {
-    // Calculate window start and end using shared helper
-    let (start, end) = window_bounds(now_utc, latest_reset);
+    // Calculate window start and end: prefer provider reset anchor; otherwise use
+    // a heuristic active-block finder similar to ccstatusline/claude-powerline.
+    let (start, end) = if latest_reset.is_some() {
+        window_bounds(now_utc, latest_reset)
+    } else if let Some((hs, he)) = heuristic_active_block_bounds(entries, now_utc) {
+        (hs, he)
+    } else {
+        // Fallback: rolling 5-hour window ending now
+        window_bounds(now_utc, None)
+    };
 
     // Filter entries for the window
     let mut window_entries: Vec<&Entry> = entries
@@ -160,13 +168,11 @@ pub fn calculate_window_metrics(
     };
 
     let remaining_minutes = ((end - now_utc).num_minutes()).max(0) as f64;
-    // Projected usage should be based on total tokens to match percentage basis
-    // Use overall tokens/minute (tpm), not the non-cache indicator
-    let projected_total_tokens = total_tokens + tpm * remaining_minutes;
-
-    // Usage percentage is now based on TOTAL tokens (input + output + cache create + cache read)
-    let usage_percent = plan_max.map(|pm| (total_tokens * 100.0 / pm).max(0.0));
-    let projected_percent = plan_max.map(|pm| (projected_total_tokens * 100.0 / pm).max(0.0));
+    // Usage percent should reflect plan caps which apply to non-cache tokens (input+output).
+    // Project using global non-cache rate to best approximate account-level consumption.
+    let projected_nc_tokens = noncache_tokens + global_nc_tpm * remaining_minutes;
+    let usage_percent = plan_max.map(|pm| (noncache_tokens * 100.0 / pm).max(0.0));
+    let projected_percent = plan_max.map(|pm| (projected_nc_tokens * 100.0 / pm).max(0.0));
 
     WindowMetrics {
         total_cost,
@@ -207,4 +213,47 @@ pub fn window_bounds(
         let start = now_utc - chrono::TimeDelta::hours(WINDOW_DURATION_HOURS);
         (start, now_utc)
     }
+}
+
+/// Heuristic active block bounds when no provider reset anchor is known.
+/// Algorithm:
+/// - Sort all entry timestamps ascending; walk backward from newest to find the
+///   earliest timestamp such that no gap >= window duration occurs.
+/// - Floor the earliest timestamp to the hour to form the block start.
+/// - End = start + window duration. If now is past end, keep end; remaining time may be 0.
+fn heuristic_active_block_bounds(
+    entries: &[Entry],
+    now_utc: DateTime<Utc>,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    if entries.is_empty() {
+        return None;
+    }
+    let mut ts: Vec<DateTime<Utc>> = entries.iter().map(|e| e.ts).collect();
+    ts.sort_unstable();
+    let session_dur = chrono::TimeDelta::hours(WINDOW_DURATION_HOURS);
+    // Start from the newest and walk backward until a gap >= session duration
+    let mut earliest = *ts.last()?;
+    for w in ts.windows(2).rev() {
+        let prev = w[0];
+        let next = w[1];
+        let gap = next - prev;
+        if gap >= session_dur {
+            // Boundary found; earliest is next segment start
+            break;
+        }
+        earliest = prev;
+    }
+    // Floor to the hour in UTC
+    let floored = earliest
+        .with_minute(0)
+        .and_then(|d| d.with_second(0))
+        .and_then(|d| d.with_nanosecond(0))
+        .unwrap_or(earliest);
+    let end = floored + chrono::TimeDelta::hours(WINDOW_DURATION_HOURS);
+    // If the latest activity is older than a window, consider no active block
+    if now_utc - *ts.last().unwrap() > session_dur {
+        // Still return bounds to compute historical block metrics; caller will compute remaining=0
+        return Some((floored, end));
+    }
+    Some((floored, end))
 }

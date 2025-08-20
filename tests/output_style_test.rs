@@ -21,6 +21,7 @@ fn test_output_style_in_json() {
         output_style: Some(OutputStyle {
             name: "verbose".to_string(),
         }),
+        cost: None,
     };
 
     let json: Value = build_json_output(
@@ -73,6 +74,7 @@ fn test_output_style_in_json() {
         },
         version: Some("1.0.0".to_string()),
         output_style: None,
+        cost: None,
     };
 
     let json_no_style: Value = build_json_output(
@@ -131,6 +133,7 @@ fn test_multiple_output_styles() {
             output_style: Some(OutputStyle {
                 name: style_name.to_string(),
             }),
+            cost: None,
         };
 
         let json: Value = build_json_output(

@@ -30,12 +30,19 @@ fn main() -> Result<()> {
 
     // Compute metrics
     let paths = claude_paths(args.claude_config_dir.as_deref());
-    let (session_cost, today_cost, entries, latest_reset, api_key_source) = scan_usage(
+    let (mut session_cost, today_cost, entries, latest_reset, api_key_source) = scan_usage(
         &paths,
         &hook.session_id,
         hook.workspace.project_dir.as_deref(),
     )
     .unwrap_or((0.0, 0.0, Vec::new(), None, None));
+
+    // If Claude Code supplied aggregate session cost, prefer it over our scan
+    if let Some(ref c) = hook.cost {
+        if let Some(v) = c.total_cost_usd {
+            session_cost = v;
+        }
+    }
     let mut context = calc_context_from_transcript(
         Path::new(&hook.transcript_path),
         &hook.model.id,
@@ -64,12 +71,7 @@ fn main() -> Result<()> {
     };
 
     if !args.json {
-        print_header(
-            &hook,
-            git_info.as_ref(),
-            &args,
-            api_key_source.as_deref(),
-        );
+        print_header(&hook, git_info.as_ref(), &args, api_key_source.as_deref());
     }
 
     // Plan resolution: CLI args override env; max_tokens overrides tier.
@@ -152,6 +154,31 @@ fn main() -> Result<()> {
             git_info,
         )?;
     } else {
+        // Compute session-level cost per hour and line deltas from Claude's provided cost
+        let (session_cph_opt, lines_delta_opt) = if let Some(ref c) = hook.cost {
+            let sess_cph = c
+                .total_duration_ms
+                .and_then(|ms| {
+                    if ms > 0 {
+                        Some((ms as f64) / 3_600_000.0)
+                    } else {
+                        None
+                    }
+                })
+                .and_then(|hrs| {
+                    if hrs > 0.0 {
+                        Some(session_cost / hrs)
+                    } else {
+                        None
+                    }
+                });
+            let la = c.total_lines_added.unwrap_or(0);
+            let lr = c.total_lines_removed.unwrap_or(0);
+            (sess_cph, Some((la, lr)))
+        } else {
+            (None, None)
+        };
+
         print_text_output(
             &args,
             &hook.model.id,
@@ -173,6 +200,8 @@ fn main() -> Result<()> {
             metrics.tokens_cache_create,
             metrics.tokens_cache_read,
             metrics.web_search_requests,
+            session_cph_opt,
+            lines_delta_opt,
         );
     }
     Ok(())

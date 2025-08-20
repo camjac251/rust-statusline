@@ -19,6 +19,7 @@ fn json_output_shape_minimal() {
         },
         version: Some("test".to_string()),
         output_style: None,
+        cost: None,
     };
 
     let json: Value = build_json_output(
@@ -107,6 +108,7 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         },
         version: Some("test".to_string()),
         output_style: None,
+        cost: None,
     };
 
     let json: Value = build_json_output(

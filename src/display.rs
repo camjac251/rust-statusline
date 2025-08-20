@@ -242,11 +242,7 @@ pub fn print_header(
     }
 
     // Print header line: cwd then segments
-    println!(
-        "{} {}",
-        dir_fmt.bright_blue(),
-        header_parts.join(" ")
-    );
+    println!("{} {}", dir_fmt.bright_blue(), header_parts.join(" "));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -271,6 +267,9 @@ pub fn print_text_output(
     tokens_cache_create: u64,
     tokens_cache_read: u64,
     web_search_requests: u64,
+    // Optional enrichments from Claude's provided cost block
+    session_cost_per_hour: Option<f64>,
+    lines_delta: Option<(i64, i64)>,
 ) {
     // Line 2
     print!("{} ", "❯".bright_cyan());
@@ -352,12 +351,23 @@ pub fn print_text_output(
         } else {
             format!("{:.1}%", projected_percent).green().to_string()
         };
+        // Also show remaining percentage for clarity (what's left in window)
+        let left = (100.0 - usage_percent).max(0.0);
+        let left_colored = if left <= 5.0 {
+            format!("{:.1}%", left).red().bold().to_string()
+        } else if left <= 20.0 {
+            format!("{:.1}%", left).yellow().bold().to_string()
+        } else {
+            format!("{:.1}%", left).green().to_string()
+        };
         print!(
-            "{}{}{}{} ",
-            "usage:".bright_black().dimmed(),
+            "{}{}{}{} {}{} ",
+            "usage (nc):".bright_black().dimmed(),
             usage_colored,
             "→".bright_black().dimmed(),
-            proj_colored
+            proj_colored,
+            "left:".bright_black().dimmed(),
+            left_colored
         );
         print!("{} ", "·".bright_black().dimmed());
 
@@ -366,7 +376,11 @@ pub fn print_text_output(
             // Show a friendly warning and a nudge to try /model when near cap
             let is_opus = model_id.to_lowercase().contains("opus");
             if usage_percent >= 95.0 {
-                let label = if is_opus { "Opus usage limit" } else { "usage limit" };
+                let label = if is_opus {
+                    "Opus usage limit"
+                } else {
+                    "usage limit"
+                };
                 print!(
                     "{}{} {} ",
                     "warn:".bright_black().dimmed(),
@@ -375,7 +389,11 @@ pub fn print_text_output(
                 );
                 print!("{} ", "·".bright_black().dimmed());
             } else if usage_percent >= 80.0 {
-                let label = if is_opus { "Opus usage limit" } else { "usage limit" };
+                let label = if is_opus {
+                    "Opus usage limit"
+                } else {
+                    "usage limit"
+                };
                 print!(
                     "{}{} {} ",
                     "warn:".bright_black().dimmed(),
@@ -439,7 +457,11 @@ pub fn print_text_output(
     let midnight = window_end_local.hour() == 0 && window_end_local.minute() == 0;
     // Prefer a more explicit "resets@" once close to window end (hints only)
     if args.hints && remaining_minutes <= 60.0 {
-        print!("{}{} ", "resets@".bright_black().dimmed(), reset_disp.white());
+        print!(
+            "{}{} ",
+            "resets@".bright_black().dimmed(),
+            reset_disp.white()
+        );
     } else if !use_12h && midnight {
         // 24h mode hint for next day
         print!(
@@ -449,7 +471,11 @@ pub fn print_text_output(
             " (+1d)".bright_black()
         );
     } else {
-        print!("{}{} ", "reset:".bright_black().dimmed(), reset_disp.white());
+        print!(
+            "{}{} ",
+            "reset:".bright_black().dimmed(),
+            reset_disp.white()
+        );
     }
     print!("{} ", "·".bright_black().dimmed());
 
@@ -477,6 +503,17 @@ pub fn print_text_output(
         burn_colored,
         cph_colored
     );
+    if let Some(sess_cph) = session_cost_per_hour {
+        let sess_str = format!("${}/h", format_currency(sess_cph));
+        let sess_colored = if sess_cph >= 5.0 {
+            sess_str.red().bold().to_string()
+        } else if sess_cph >= 1.0 {
+            sess_str.yellow().to_string()
+        } else {
+            sess_str.green().to_string()
+        };
+        print!(" {}{} ", "sess:".bright_black().dimmed(), sess_colored);
+    }
     print!("{} ", "·".bright_black().dimmed());
 
     // tokens breakdown (optional)
@@ -514,7 +551,8 @@ pub fn print_text_output(
             // Auto-compact hint: when context usage >= 40%, show headroom and ETA to full
             if pct >= 40 {
                 // Use true context limit based on model + display
-                let ctx_limit = context_limit_for_model_display(model_id, model_display_name) as f64;
+                let ctx_limit =
+                    context_limit_for_model_display(model_id, model_display_name) as f64;
                 let headroom_tokens = (ctx_limit - tokens as f64).max(0.0);
                 // Use tpm_indicator (non-cache) to estimate time until context fills
                 if tpm_indicator > 0.0 && headroom_tokens > 0.0 {
@@ -547,6 +585,23 @@ pub fn print_text_output(
         }
     } else {
         print!("{}", "N/A".bright_black().dimmed());
+    }
+    // Optional: show delta lines when available and non-zero
+    if let Some((added, removed)) = lines_delta {
+        if added != 0 || removed != 0 {
+            if matches!(args.labels, LabelsArg::Long) || args.hints {
+                let add_val = added.max(0) as i64;
+                let add_str = format!("+{}", add_val).green().to_string();
+                let rem_str = format!("-{}", removed.abs()).red().to_string();
+                print!(
+                    " {}{} {}",
+                    "Δlines:".bright_black().dimmed(),
+                    add_str,
+                    rem_str
+                );
+                print!("{} ", "·".bright_black().dimmed());
+            }
+        }
     }
     println!();
 }
@@ -655,13 +710,37 @@ pub fn build_json_output(
         "reset_anchor_epoch": latest_reset.map(|d| d.timestamp()),
         "remaining_minutes": (remaining_minutes as i64).max(0),
         "usage_percent": usage_percent.map(|v| (v * 10.0).round()/10.0),
+        "usage_percent_left": usage_percent.map(|v| ((100.0 - v).max(0.0) * 10.0).round()/10.0),
         "projected_percent": projected_percent.map(|v| (v * 10.0).round()/10.0),
+        "projected_percent_left": projected_percent.map(|v| ((100.0 - v).max(0.0) * 10.0).round()/10.0),
         "tokens_per_minute": (tpm * 10.0).round()/10.0,
         "tokens_per_minute_indicator": (tpm_indicator * 10.0).round()/10.0,
         "tokens_per_minute_noncache_session": (session_nc_tpm * 10.0).round()/10.0,
         "tokens_per_minute_noncache_global": (global_nc_tpm * 10.0).round()/10.0,
         "cost_per_hour": (cost_per_hour * 100.0).round()/100.0,
     });
+
+    // Augment session info with Claude-provided cost fields when present
+    let (sess_duration_ms, sess_api_ms, sess_lines_added, sess_lines_removed, sess_cph_json) =
+        if let Some(ref c) = hook.cost {
+            let dur = c.total_duration_ms;
+            let api = c.total_api_duration_ms;
+            let la = c.total_lines_added;
+            let lr = c.total_lines_removed;
+            let cph = if let Some(ms) = dur {
+                if ms > 0 {
+                    let hrs = (ms as f64) / 3_600_000.0;
+                    Some(((session_cost / hrs) * 100.0).round() / 100.0)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            (dur, api, la, lr, cph)
+        } else {
+            (None, None, None, None, None)
+        };
 
     serde_json::json!({
         "model": {"id": hook.model.id.clone(), "display_name": hook.model.display_name.clone()},
@@ -672,7 +751,14 @@ pub fn build_json_output(
         "provider": {"apiKeySource": api_key_source, "env": provider_final},
         "plan": {"tier": plan_tier, "max_tokens": plan_max},
         "reset_at": reset_iso,
-        "session": {"cost_usd": (session_cost * 100.0).round() / 100.0},
+        "session": {
+            "cost_usd": (session_cost * 100.0).round() / 100.0,
+            "duration_ms": sess_duration_ms,
+            "api_duration_ms": sess_api_ms,
+            "lines_added": sess_lines_added,
+            "lines_removed": sess_lines_removed,
+            "cost_per_hour": sess_cph_json,
+        },
         "today": {"cost_usd": (today_cost * 100.0).round() / 100.0},
         "block": block_json.clone(),
         "window": block_json,

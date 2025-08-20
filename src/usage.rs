@@ -378,6 +378,11 @@ pub fn scan_usage(
                     Ok(d) => d,
                     Err(_) => continue,
                 };
+                // Skip sidechain entries to avoid double counting non-main chain activity
+                if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
+                    continue;
+                }
+
                 let msg = match v.get("message") {
                     Some(m) => m,
                     None => continue,
