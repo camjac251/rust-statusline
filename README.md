@@ -64,6 +64,10 @@ Flags and options (also see `--help`):
   - Plan tier to derive window max tokens (overrides env)
 - `--plan-max-tokens <N>`
   - Explicit per-window max tokens (overrides tier/env)
+- `--hints` (env: `CLAUDE_STATUS_HINTS=1`)
+  - Show optional hints: approaching-limit warnings, “resets@” emphasis near end, and auto-compact countdown when context ≥40%
+ - `--plan-profile <standard|monitor>`
+   - Plan cap profile (overrides env). `standard`: pro=200k, max5x=1M, max20x=4M. `monitor`: pro≈19k, max5x≈88k, max20x≈220k
 
 ## Environment variables
 
@@ -75,6 +79,8 @@ Flags and options (also see `--help`):
   - `pro|max5x|max20x` mapped to 200k, 1M, 4M tokens per 5h window
 - `CLAUDE_PLAN_MAX_TOKENS`:
   - Explicit numeric per-window max; takes precedence over tier
+- `CLAUDE_PLAN_PROFILE`:
+  - `standard|monitor` to select cap table. `standard` (default): pro=200k, max5x=1M, max20x=4M. `monitor`: pro≈19k, max5x≈88k, max20x≈220k
 - `CLAUDE_CONTEXT_LIMIT`:
   - Explicit context window tokens if not recognized from model id
 - Pricing overrides (if all are set, they take precedence):
@@ -108,6 +114,10 @@ Example fields (subject to additions):
     "cost_per_hour": 1.50
   },
   "context": {"tokens": 12345, "percent": 6, "limit": 200000, "source": "transcript|entries"},
+  // Extras for consumers (present when computable):
+  //   headroom_tokens: remaining tokens against context limit
+  //   eta_minutes: rounded minutes to full context at current non-cache TPM
+  "context": {"headroom_tokens": 186655, "eta_minutes": 42}
   "git": {
     "branch": "main",
     "short_commit": "abc1234",

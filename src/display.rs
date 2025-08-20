@@ -252,6 +252,8 @@ pub fn print_header(
 #[allow(clippy::too_many_arguments)]
 pub fn print_text_output(
     args: &Args,
+    model_id: &str,
+    model_display_name: &str,
     session_cost: f64,
     today_cost: f64,
     total_cost: f64,
@@ -358,6 +360,31 @@ pub fn print_text_output(
             proj_colored
         );
         print!("{} ", "·".bright_black().dimmed());
+
+        if args.hints {
+            // Approaching limit hint 
+            // Show a friendly warning and a nudge to try /model when near cap
+            let is_opus = model_id.to_lowercase().contains("opus");
+            if usage_percent >= 95.0 {
+                let label = if is_opus { "Opus usage limit" } else { "usage limit" };
+                print!(
+                    "{}{} {} ",
+                    "warn:".bright_black().dimmed(),
+                    format!("{} nearly reached", label).red().bold(),
+                    "/model best".bright_white().bold()
+                );
+                print!("{} ", "·".bright_black().dimmed());
+            } else if usage_percent >= 80.0 {
+                let label = if is_opus { "Opus usage limit" } else { "usage limit" };
+                print!(
+                    "{}{} {} ",
+                    "warn:".bright_black().dimmed(),
+                    format!("Approaching {}", label).yellow().bold(),
+                    "/model best".white()
+                );
+                print!("{} ", "·".bright_black().dimmed());
+            }
+        }
     }
 
     // countdown and reset time
@@ -368,8 +395,11 @@ pub fn print_text_output(
     } else {
         format!("{}m left", rem_m)
     };
-    let countdown_colored = if remaining_minutes < 60.0 {
+    // Emphasize as we get closer to the reset time
+    let countdown_colored = if remaining_minutes < 30.0 {
         countdown.red().bold().to_string()
+    } else if remaining_minutes < 60.0 {
+        countdown.yellow().bold().to_string()
     } else if remaining_minutes < 180.0 {
         countdown.yellow().to_string()
     } else {
@@ -407,7 +437,10 @@ pub fn print_text_output(
     let fmt = if use_12h { "%-I:%M %p" } else { "%H:%M" };
     let reset_disp = window_end_local.format(fmt).to_string();
     let midnight = window_end_local.hour() == 0 && window_end_local.minute() == 0;
-    if !use_12h && midnight {
+    // Prefer a more explicit "resets@" once close to window end (hints only)
+    if args.hints && remaining_minutes <= 60.0 {
+        print!("{}{} ", "resets@".bright_black().dimmed(), reset_disp.white());
+    } else if !use_12h && midnight {
         // 24h mode hint for next day
         print!(
             "{}{}{} ",
@@ -420,7 +453,7 @@ pub fn print_text_output(
     }
     print!("{} ", "·".bright_black().dimmed());
 
-    // burn: show non-cache tokens per minute (aligns with usage% basis)
+    // burn: show non-cache tokens per minute (indicator); usage% now based on TOTAL tokens
     let burn_val = format!("{}/m", format_tokens(tpm_indicator.round() as u64));
     let burn_colored = if tpm_indicator >= 5000.0 {
         format!("{}", burn_val.red().bold())
@@ -476,6 +509,42 @@ pub fn print_text_output(
             format!("{}%", pct).green().to_string()
         };
         print!("{} ({})", format_tokens(tokens), pct_colored);
+
+        if args.hints {
+            // Auto-compact hint: when context usage >= 40%, show headroom and ETA to full
+            if pct >= 40 {
+                // Use true context limit based on model + display
+                let ctx_limit = context_limit_for_model_display(model_id, model_display_name) as f64;
+                let headroom_tokens = (ctx_limit - tokens as f64).max(0.0);
+                // Use tpm_indicator (non-cache) to estimate time until context fills
+                if tpm_indicator > 0.0 && headroom_tokens > 0.0 {
+                    let eta_min = headroom_tokens / tpm_indicator;
+                    let eta_min_i = eta_min.round() as i64;
+                    let eta_disp = if eta_min_i >= 120 {
+                        format!("~{}h", eta_min_i / 60)
+                    } else if eta_min_i >= 60 {
+                        format!("~{}h{}m", eta_min_i / 60, eta_min_i % 60)
+                    } else {
+                        format!("~{}m", eta_min_i)
+                    };
+                    print!(
+                        " {}{}{}{}",
+                        "·".bright_black().dimmed(),
+                        "compact:".bright_black().dimmed(),
+                        "≥40% ".yellow(),
+                        eta_disp.yellow()
+                    );
+                } else {
+                    // Show a simple hint if we cannot estimate time
+                    print!(
+                        " {}{}{}",
+                        "·".bright_black().dimmed(),
+                        "compact:".bright_black().dimmed(),
+                        "≥40%".yellow()
+                    );
+                }
+            }
+        }
     } else {
         print!("{}", "N/A".bright_black().dimmed());
     }
@@ -530,6 +599,18 @@ pub fn build_json_output(
         .map(|(t, p)| (Some(t), Some(p)))
         .unwrap_or((None, None));
     let ctx_limit = context_limit_for_model_display(&hook.model.id, &hook.model.display_name);
+    // Optional headroom and ETA for consumers
+    let (context_headroom, context_eta_minutes) = if let Some(toks) = ctx_tokens {
+        let head = (ctx_limit as i64 - toks as i64).max(0) as u64;
+        let eta = if tpm_indicator > 0.0 && head > 0 {
+            Some(((head as f64) / tpm_indicator).round() as i64)
+        } else {
+            None
+        };
+        (Some(head), eta)
+    } else {
+        (None, None)
+    };
 
     // Git json fields (present even if nulls to keep schema stable)
     let (
@@ -599,7 +680,9 @@ pub fn build_json_output(
             "tokens": ctx_tokens,
             "percent": ctx_pct,
             "limit": ctx_limit,
-            "source": context_source
+            "source": context_source,
+            "headroom_tokens": context_headroom,
+            "eta_minutes": context_eta_minutes
         },
         "git": {
             "branch": git_branch,

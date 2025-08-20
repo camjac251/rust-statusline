@@ -26,7 +26,7 @@ pub fn calc_context_from_transcript(
     model_display_name: &str,
 ) -> Option<(u64, u32)> {
     // Stream the file line-by-line to avoid loading entire transcripts into memory.
-    // Keep the last assistant message with usage; sum input + cache* + output .
+    // Keep the last assistant message with usage; sum input + cache* only (exclude output from context window).
     let file = File::open(transcript_path).ok()?;
     let reader = BufReader::new(file);
     let mut last_total_in: Option<u64> = None;
@@ -59,8 +59,7 @@ pub fn calc_context_from_transcript(
         if let Some(inp) = usage.input_tokens {
             let total_in = inp
                 + usage.cache_creation_input_tokens.unwrap_or(0)
-                + usage.cache_read_input_tokens.unwrap_or(0)
-                + usage.output_tokens.unwrap_or(0);
+                + usage.cache_read_input_tokens.unwrap_or(0);
             last_total_in = Some(total_in);
         }
     }
@@ -89,8 +88,8 @@ pub fn calc_context_from_entries(
     }
     filtered.sort_by_key(|e| e.ts);
     let last = filtered.last()?;
-    // Include output
-    let total_in = last.input + last.output + last.cache_create + last.cache_read;
+    // Exclude output; context is input + cache tokens only
+    let total_in = last.input + last.cache_create + last.cache_read;
     let limit = context_limit_for_model_display(model_id, model_display_name);
     let pct = ((total_in as f64 / limit as f64) * 100.0).round() as u32;
     Some((total_in, pct.min(100)))
@@ -108,8 +107,8 @@ pub fn calc_context_from_any(
     let mut sorted: Vec<&Entry> = entries.iter().collect();
     sorted.sort_by_key(|e| e.ts);
     let last = sorted.last()?;
-    // Include output
-    let total_in = last.input + last.output + last.cache_create + last.cache_read;
+    // Exclude output; context is input + cache tokens only
+    let total_in = last.input + last.cache_create + last.cache_read;
     let limit = context_limit_for_model_display(model_id, model_display_name);
     let pct = ((total_in as f64 / limit as f64) * 100.0).round() as u32;
     Some((total_in, pct.min(100)))

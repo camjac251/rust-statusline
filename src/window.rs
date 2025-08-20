@@ -160,10 +160,13 @@ pub fn calculate_window_metrics(
     };
 
     let remaining_minutes = ((end - now_utc).num_minutes()).max(0) as f64;
-    let projected_tokens_nc = noncache_tokens + tpm_indicator * remaining_minutes;
+    // Projected usage should be based on total tokens to match percentage basis
+    // Use overall tokens/minute (tpm), not the non-cache indicator
+    let projected_total_tokens = total_tokens + tpm * remaining_minutes;
 
-    let usage_percent = plan_max.map(|pm| (noncache_tokens * 100.0 / pm).max(0.0));
-    let projected_percent = plan_max.map(|pm| (projected_tokens_nc * 100.0 / pm).max(0.0));
+    // Usage percentage is now based on TOTAL tokens (input + output + cache create + cache read)
+    let usage_percent = plan_max.map(|pm| (total_tokens * 100.0 / pm).max(0.0));
+    let projected_percent = plan_max.map(|pm| (projected_total_tokens * 100.0 / pm).max(0.0));
 
     WindowMetrics {
         total_cost,
@@ -200,18 +203,8 @@ pub fn window_bounds(
         let end = start + chrono::TimeDelta::hours(WINDOW_DURATION_HOURS);
         (start, end)
     } else {
-        // Fallback: floor to nearest earlier 5-hour boundary in local time
-        let local_now = now_utc.with_timezone(&Local);
-        let floored = local_now
-            .with_minute(0)
-            .and_then(|d| d.with_second(0))
-            .and_then(|d| d.with_nanosecond(0))
-            .unwrap();
-        let h = floored.hour() as i64;
-        let back = h % 5;
-        let start_local = floored - chrono::TimeDelta::hours(back);
-        let start = start_local.with_timezone(&Utc);
-        let end = start + chrono::TimeDelta::hours(WINDOW_DURATION_HOURS);
-        (start, end)
+        // Fallback: rolling 5-hour window ending at 'now'
+        let start = now_utc - chrono::TimeDelta::hours(WINDOW_DURATION_HOURS);
+        (start, now_utc)
     }
 }

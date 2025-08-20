@@ -154,6 +154,8 @@ fn main() -> Result<()> {
     } else {
         print_text_output(
             &args,
+            &hook.model.id,
+            &hook.model.display_name,
             session_cost,
             today_cost,
             metrics.total_cost,

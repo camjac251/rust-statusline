@@ -24,6 +24,14 @@ pub enum PlanTierArg {
     Max20x,
 }
 
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+pub enum PlanProfileArg {
+    /// Standard caps (pro=200k, max5x=1M, max20x=4M)
+    Standard,
+    /// Monitor-compatible caps (pro≈19k, max5x≈88k, max20x≈220k)
+    Monitor,
+}
+
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BurnScopeArg {
     /// Per-minute burn for this session only (input+output tokens)
@@ -74,6 +82,11 @@ pub struct Args {
     #[arg(long)]
     pub truecolor: bool,
 
+    /// Show extra status hints (approaching limit, compact countdown)
+    /// Can also be toggled via CLAUDE_STATUS_HINTS=1
+    #[arg(long, env = "CLAUDE_STATUS_HINTS")]
+    pub hints: bool,
+
     /// Plan tier: pro|max5x|max20x (overrides env)
     #[arg(long, value_enum)]
     pub plan_tier: Option<PlanTierArg>,
@@ -81,6 +94,10 @@ pub struct Args {
     /// Plan max tokens per window (overrides tier/env)
     #[arg(long)]
     pub plan_max_tokens: Option<u64>,
+
+    /// Plan profile: standard|monitor (overrides env)
+    #[arg(long = "plan-profile", value_enum)]
+    pub plan_profile: Option<PlanProfileArg>,
 
     /// Burn scope: session|global (default: session)
     #[arg(long, value_enum, default_value_t = BurnScopeArg::Session)]
