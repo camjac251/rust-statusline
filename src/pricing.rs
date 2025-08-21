@@ -7,23 +7,116 @@
 //! Each model has pricing for:
 //! - Input tokens
 //! - Output tokens  
-//! - Cache creation (typically 1.25x input price)
+//! - Cache creation (typically 1.25x input price, with 5m/1h tiers)
 //! - Cache reads (typically 0.1x input price)
 //!
-//! Prices can be overridden via environment variables:
-//! - `CLAUDE_PRICE_INPUT`
-//! - `CLAUDE_PRICE_OUTPUT`
-//! - `CLAUDE_PRICE_CACHE_CREATE`
-//! - `CLAUDE_PRICE_CACHE_READ`
+//! Prices can be loaded from:
+//! 1. External pricing.json file (preferred)
+//! 2. Environment variables (overrides JSON):
+//!    - `CLAUDE_PRICE_INPUT`
+//!    - `CLAUDE_PRICE_OUTPUT`
+//!    - `CLAUDE_PRICE_CACHE_CREATE`
+//!    - `CLAUDE_PRICE_CACHE_READ`
+//! 3. Built-in defaults (fallback)
 
+use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
+use std::fs;
+use std::path::Path;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Pricing {
     pub in_per_tok: f64,
     pub out_per_tok: f64,
     pub cache_create_per_tok: f64,
     pub cache_read_per_tok: f64,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct ModelPricing {
+    name: String,
+    input: f64,
+    output: f64,
+    cache_create: f64,
+    #[serde(default)]
+    cache_create_1h: Option<f64>,
+    cache_read: f64,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct PricingConfig {
+    models: HashMap<String, ModelPricing>,
+    #[serde(default)]
+    additional_costs: AdditionalCosts,
+}
+
+#[derive(Deserialize, Serialize, Debug, Default)]
+struct AdditionalCosts {
+    #[serde(default)]
+    web_search_per_request: f64,
+}
+
+/// Load pricing from external JSON file
+static PRICING_CONFIG: Lazy<Option<PricingConfig>> = Lazy::new(|| {
+    // Try multiple locations for pricing.json
+    let paths = vec![
+        Path::new("pricing.json"),
+        Path::new("./pricing.json"),
+        Path::new("pricing.json"),
+    ];
+    
+    for path in paths {
+        if path.exists() {
+            if let Ok(contents) = fs::read_to_string(path) {
+                if let Ok(config) = serde_json::from_str::<PricingConfig>(&contents) {
+                    return Some(config);
+                }
+            }
+        }
+    }
+    
+    // Try from CLAUDE_PRICING_PATH environment variable
+    if let Ok(custom_path) = env::var("CLAUDE_PRICING_PATH") {
+        if let Ok(contents) = fs::read_to_string(&custom_path) {
+            if let Ok(config) = serde_json::from_str::<PricingConfig>(&contents) {
+                return Some(config);
+            }
+        }
+    }
+    
+    None
+});
+
+/// Get pricing from external config
+fn pricing_from_config(model_id: &str) -> Option<Pricing> {
+    let config = PRICING_CONFIG.as_ref()?;
+    let m = model_id.to_lowercase();
+    
+    // Try exact match first
+    if let Some(model_pricing) = config.models.get(&m) {
+        return Some(Pricing {
+            in_per_tok: model_pricing.input,
+            out_per_tok: model_pricing.output,
+            cache_create_per_tok: model_pricing.cache_create,
+            cache_read_per_tok: model_pricing.cache_read,
+        });
+    }
+    
+    // Try partial matches
+    for (key, model_pricing) in &config.models {
+        if m.contains(key) || key.contains(&m) {
+            return Some(Pricing {
+                in_per_tok: model_pricing.input,
+                out_per_tok: model_pricing.output,
+                cache_create_per_tok: model_pricing.cache_create,
+                cache_read_per_tok: model_pricing.cache_read,
+            });
+        }
+    }
+    
+    None
 }
 
 pub(crate) fn static_pricing_lookup(model_id: &str) -> Option<Pricing> {
@@ -94,9 +187,8 @@ pub(crate) fn static_pricing_lookup(model_id: &str) -> Option<Pricing> {
 
 pub fn pricing_for_model(model_id: &str) -> Option<Pricing> {
     let m = model_id.to_lowercase();
-    // Static per-token prices in USD (per token).
-    // Assumptions: cache write ≈ 1.25× input price; cache read ≈ 0.1× input price
-    // Env overrides take precedence when all four are provided.
+    
+    // Priority 1: Environment variable overrides (when all four are provided)
     if let (Ok(gi), Ok(go), Ok(gc), Ok(gr)) = (
         env::var("CLAUDE_PRICE_INPUT").map(|s| s.parse::<f64>()),
         env::var("CLAUDE_PRICE_OUTPUT").map(|s| s.parse::<f64>()),
@@ -112,12 +204,18 @@ pub fn pricing_for_model(model_id: &str) -> Option<Pricing> {
             });
         }
     }
-
-    // Prefer explicit known model variants
+    
+    // Priority 2: External pricing.json config
+    if let Some(p) = pricing_from_config(&m) {
+        return Some(p);
+    }
+    
+    // Priority 3: Built-in static pricing
     if let Some(p) = static_pricing_lookup(&m) {
         return Some(p);
     }
-    // Family heuristics
+    
+    // Priority 4: Family heuristics fallback
     if m.contains("opus") {
         let in_pt = 15e-6; // $15 / 1M
         Some(Pricing {

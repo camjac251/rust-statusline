@@ -106,6 +106,10 @@ pub struct Args {
     /// Window scope: global|project (default: global)
     #[arg(long, value_enum, default_value_t = WindowScopeArg::Global)]
     pub window_scope: WindowScopeArg,
+    
+    /// Debug mode: show detailed calculation information
+    #[arg(long, env = "CLAUDE_DEBUG")]
+    pub debug: bool,
 }
 
 impl Args {

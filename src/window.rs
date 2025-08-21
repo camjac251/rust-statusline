@@ -4,7 +4,7 @@
 
 use crate::models::Entry;
 use crate::utils::{sanitized_project_name, WINDOW_DURATION_HOURS, WINDOW_DURATION_SECONDS};
-use chrono::{DateTime, Local, Timelike, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
 
 /// Metrics calculated for a window period
 #[derive(Debug, Clone)]
@@ -215,22 +215,119 @@ pub fn window_bounds(
     }
 }
 
-/// Heuristic active block bounds when no provider reset anchor is known.
-/// Algorithm:
-/// - Sort all entry timestamps ascending; walk backward from newest to find the
-///   earliest timestamp such that no gap >= window duration occurs.
-/// - Floor the earliest timestamp to the hour to form the block start.
-/// - End = start + window duration. If now is past end, keep end; remaining time may be 0.
-fn heuristic_active_block_bounds(
+/// Floor a timestamp to the beginning of the hour
+fn floor_to_hour(ts: DateTime<Utc>) -> DateTime<Utc> {
+    ts.with_minute(0)
+        .and_then(|d| d.with_second(0))
+        .and_then(|d| d.with_nanosecond(0))
+        .unwrap_or(ts)
+}
+
+/// Find session boundaries by detecting gaps in activity
+#[allow(dead_code)]
+fn find_session_boundaries(entries: &[Entry], gap_threshold: Duration) -> Vec<DateTime<Utc>> {
+    let mut boundaries = Vec::new();
+    let mut sorted_entries = entries.to_vec();
+    sorted_entries.sort_by_key(|e| e.ts);
+    
+    for i in 1..sorted_entries.len() {
+        let gap = sorted_entries[i].ts - sorted_entries[i - 1].ts;
+        if gap >= gap_threshold {
+            boundaries.push(sorted_entries[i].ts);
+        }
+    }
+    boundaries
+}
+
+/// Progressive lookback to find active block with optimization
+fn progressive_lookback_block(
     entries: &[Entry],
     now_utc: DateTime<Utc>,
 ) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     if entries.is_empty() {
         return None;
     }
+    
+    let session_duration = Duration::hours(WINDOW_DURATION_HOURS as i64);
+    let lookback_windows = [
+        Duration::hours(10),  // 2x session duration - catches most cases
+        Duration::hours(24),  // Full day for longer sessions
+        Duration::hours(48),  // Extended sessions
+    ];
+    
+    for lookback in &lookback_windows {
+        let cutoff = now_utc - *lookback;
+        let recent_entries: Vec<&Entry> = entries
+            .iter()
+            .filter(|e| e.ts >= cutoff)
+            .collect();
+        
+        if recent_entries.is_empty() {
+            continue;
+        }
+        
+        // Sort timestamps
+        let mut timestamps: Vec<DateTime<Utc>> = recent_entries.iter().map(|e| e.ts).collect();
+        timestamps.sort_unstable();
+        
+        // Find the most recent continuous work session
+        let mut continuous_start = *timestamps.last()?;
+        for i in (1..timestamps.len()).rev() {
+            let gap = timestamps[i] - timestamps[i - 1];
+            if gap >= session_duration {
+                // Found a session boundary
+                continuous_start = timestamps[i];
+                break;
+            }
+            continuous_start = timestamps[i - 1];
+        }
+        
+        // Floor to hour for cleaner boundaries
+        let floored_start = floor_to_hour(continuous_start);
+        
+        // Calculate how long we've been working from the floored start
+        let total_work_time = now_utc - floored_start;
+        
+        // If we've been working for more than one session, find the current block
+        let block_start = if total_work_time > session_duration {
+            let completed_blocks = (total_work_time.num_seconds() / session_duration.num_seconds()) as i64;
+            floored_start + Duration::seconds(completed_blocks * session_duration.num_seconds())
+        } else {
+            floored_start
+        };
+        
+        let block_end = block_start + session_duration;
+        
+        // Check if block is still active (activity within session duration)
+        if let Some(last_ts) = timestamps.last() {
+            if now_utc - *last_ts <= session_duration {
+                return Some((block_start, block_end));
+            }
+        }
+    }
+    
+    None
+}
+
+/// Heuristic active block bounds when no provider reset anchor is known.
+/// Uses progressive lookback with gap detection for accurate session boundaries.
+fn heuristic_active_block_bounds(
+    entries: &[Entry],
+    now_utc: DateTime<Utc>,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    // Try progressive lookback first for better accuracy
+    if let Some(bounds) = progressive_lookback_block(entries, now_utc) {
+        return Some(bounds);
+    }
+    
+    // Fallback to original implementation if progressive fails
+    if entries.is_empty() {
+        return None;
+    }
     let mut ts: Vec<DateTime<Utc>> = entries.iter().map(|e| e.ts).collect();
     ts.sort_unstable();
     let session_dur = chrono::TimeDelta::hours(WINDOW_DURATION_HOURS);
+    
     // Start from the newest and walk backward until a gap >= session duration
     let mut earliest = *ts.last()?;
     for w in ts.windows(2).rev() {
@@ -243,13 +340,11 @@ fn heuristic_active_block_bounds(
         }
         earliest = prev;
     }
+    
     // Floor to the hour in UTC
-    let floored = earliest
-        .with_minute(0)
-        .and_then(|d| d.with_second(0))
-        .and_then(|d| d.with_nanosecond(0))
-        .unwrap_or(earliest);
+    let floored = floor_to_hour(earliest);
     let end = floored + chrono::TimeDelta::hours(WINDOW_DURATION_HOURS);
+    
     // If the latest activity is older than a window, consider no active block
     if now_utc - *ts.last().unwrap() > session_dur {
         // Still return bounds to compute historical block metrics; caller will compute remaining=0

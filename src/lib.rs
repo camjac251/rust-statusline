@@ -18,6 +18,9 @@
 //! - `git` (default): Enables repository inspection via gix
 //! - `colors` (default): Enables terminal color output via owo-colors
 
+/// In-memory caching for parsed JSONL data
+pub mod cache;
+
 /// Command-line argument parsing and configuration
 pub mod cli;
 

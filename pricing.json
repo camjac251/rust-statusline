@@ -1,0 +1,133 @@
+{
+  "_meta": {
+    "updated": "2025-08-20",
+    "currency": "USD",
+    "unit": "per_token",
+    "description": "Pricing configuration for Claude models. All prices are in USD per token."
+  },
+  "models": {
+    "claude-opus-4-1": {
+      "name": "Claude Opus 4.1",
+      "input": 1.5e-5,
+      "output": 7.5e-5,
+      "cache_create": 1.875e-5,
+      "cache_create_1h": 3.0e-5,
+      "cache_read": 1.5e-6
+    },
+    "claude-opus-4-1-20250805": {
+      "name": "Claude Opus 4.1",
+      "input": 1.5e-5,
+      "output": 7.5e-5,
+      "cache_create": 1.875e-5,
+      "cache_create_1h": 3.0e-5,
+      "cache_read": 1.5e-6
+    },
+    "claude-opus-4": {
+      "name": "Claude Opus 4",
+      "input": 1.5e-5,
+      "output": 7.5e-5,
+      "cache_create": 1.875e-5,
+      "cache_create_1h": 3.0e-5,
+      "cache_read": 1.5e-6
+    },
+    "claude-4-opus": {
+      "name": "Claude 4 Opus",
+      "input": 1.5e-5,
+      "output": 7.5e-5,
+      "cache_create": 1.875e-5,
+      "cache_create_1h": 3.0e-5,
+      "cache_read": 1.5e-6
+    },
+    "claude-sonnet-4": {
+      "name": "Claude Sonnet 4",
+      "input": 3e-6,
+      "output": 1.5e-5,
+      "cache_create": 3.75e-6,
+      "cache_create_1h": 6e-6,
+      "cache_read": 3e-7
+    },
+    "claude-4-sonnet": {
+      "name": "Claude 4 Sonnet",
+      "input": 3e-6,
+      "output": 1.5e-5,
+      "cache_create": 3.75e-6,
+      "cache_create_1h": 6e-6,
+      "cache_read": 3e-7
+    },
+    "claude-3-7-sonnet": {
+      "name": "Claude 3.7 Sonnet",
+      "input": 3e-6,
+      "output": 1.5e-5,
+      "cache_create": 3.75e-6,
+      "cache_create_1h": 6e-6,
+      "cache_read": 3e-7
+    },
+    "claude-3-5-sonnet": {
+      "name": "Claude 3.5 Sonnet",
+      "input": 3e-6,
+      "output": 1.5e-5,
+      "cache_create": 3.75e-6,
+      "cache_create_1h": 6e-6,
+      "cache_read": 3e-7
+    },
+    "claude-3-5-sonnet-20241022": {
+      "name": "Claude 3.5 Sonnet",
+      "input": 3e-6,
+      "output": 1.5e-5,
+      "cache_create": 3.75e-6,
+      "cache_create_1h": 6e-6,
+      "cache_read": 3e-7
+    },
+    "claude-3-5-sonnet-20240620": {
+      "name": "Claude 3.5 Sonnet",
+      "input": 3e-6,
+      "output": 1.5e-5,
+      "cache_create": 3.75e-6,
+      "cache_create_1h": 6e-6,
+      "cache_read": 3e-7
+    },
+    "claude-3-5-haiku": {
+      "name": "Claude 3.5 Haiku",
+      "input": 2.5e-7,
+      "output": 1.25e-6,
+      "cache_create": 3.125e-7,
+      "cache_create_1h": 5e-7,
+      "cache_read": 2.5e-8
+    },
+    "claude-3-5-haiku-20241022": {
+      "name": "Claude 3.5 Haiku",
+      "input": 8e-7,
+      "output": 4e-6,
+      "cache_create": 1e-6,
+      "cache_create_1h": 1.6e-6,
+      "cache_read": 8e-8
+    },
+    "claude-3-haiku": {
+      "name": "Claude 3 Haiku",
+      "input": 2.5e-7,
+      "output": 1.25e-6,
+      "cache_create": 3.125e-7,
+      "cache_create_1h": 5e-7,
+      "cache_read": 2.5e-8
+    }
+  },
+  "tiered_pricing": {
+    "enabled": false,
+    "comment": "Set CLAUDE_ENABLE_TIERED_PRICING=1 to enable",
+    "thresholds": {
+      "sonnet_haiku_high_volume": {
+        "tokens": 200000,
+        "models": ["sonnet", "haiku"],
+        "multipliers": {
+          "input": 2.0,
+          "output": 1.5,
+          "cache_create": 2.0,
+          "cache_read": 2.0
+        }
+      }
+    }
+  },
+  "additional_costs": {
+    "web_search_per_request": 0.01
+  }
+}

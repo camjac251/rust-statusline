@@ -9,10 +9,11 @@
 //! - `calc_context_from_*`: Calculates context window usage from various sources
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Duration, Local, Utc};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::fs::File;
+use std::env;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -126,6 +127,18 @@ pub fn scan_usage(
     Option<DateTime<Utc>>,
     Option<String>,
 )> {
+    // Check cache first
+    if let Some((cached_entries, cached_today_cost, cached_reset, cached_api_key)) = 
+        crate::cache::get_cached_usage(session_id, project_dir) {
+        // Calculate session cost from cached entries
+        let session_cost = cached_entries
+            .iter()
+            .filter(|e| e.session_id.as_deref() == Some(session_id))
+            .map(|e| e.cost)
+            .sum();
+        return Ok((session_cost, cached_today_cost, cached_entries, cached_reset, cached_api_key));
+    }
+    
     let today = Local::now().date_naive();
     let mut session_cost = 0.0f64;
     let mut today_cost = 0.0f64;
@@ -140,6 +153,17 @@ pub fn scan_usage(
     let mut last_seen_raw: HashMap<String, (u64, u64, u64, u64)> = HashMap::new();
     // Once an id shows non-monotonicity, mark it as delta mode to sum subsequent updates
     let mut force_delta_mode: HashMap<String, bool> = HashMap::new();
+
+    // Optimization: Skip files older than 48 hours by default
+    let cutoff_time = if let Ok(hours_str) = env::var("CLAUDE_SCAN_LOOKBACK_HOURS") {
+        if let Ok(hours) = hours_str.parse::<i64>() {
+            Utc::now() - Duration::hours(hours)
+        } else {
+            Utc::now() - Duration::hours(48)
+        }
+    } else {
+        Utc::now() - Duration::hours(48)
+    };
 
     for base in paths {
         let root = base.join("projects");
@@ -156,6 +180,17 @@ pub fn scan_usage(
                 Err(_) => continue,
             };
             let path = entry.path().to_path_buf();
+            
+            // File mtime optimization: skip old files
+            if let Ok(metadata) = fs::metadata(&path) {
+                if let Ok(modified) = metadata.modified() {
+                    let mtime: DateTime<Utc> = modified.into();
+                    if mtime < cutoff_time {
+                        continue; // Skip old files
+                    }
+                }
+            }
+            
             let file = match File::open(&path) {
                 Ok(f) => f,
                 Err(_) => continue,
@@ -635,6 +670,16 @@ pub fn scan_usage(
             }
         }
     }
+    // Cache the results before returning
+    crate::cache::cache_usage(
+        session_id,
+        project_dir,
+        entries.clone(),
+        today_cost,
+        latest_reset,
+        api_key_source.clone(),
+    );
+    
     Ok((
         session_cost,
         today_cost,

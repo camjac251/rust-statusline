@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Entry {
     pub ts: DateTime<Utc>,
     pub input: u64,

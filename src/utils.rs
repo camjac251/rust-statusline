@@ -449,7 +449,7 @@ fn parse_command_line_overrides(
         .or_else(|| v.get("statusline").and_then(|s| s.get("command")))?;
     let cmd = cmd_val.as_str()?;
     // naive split; acceptable for typical flags; drop the binary path (first token)
-    let mut parts: Vec<&str> = cmd.split_whitespace().collect();
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() {
         return None;
     }

@@ -239,6 +239,7 @@ dependencies = [
  "directories",
  "gix",
  "globwalk",
+ "once_cell",
  "owo-colors",
  "serde",
  "serde_json",

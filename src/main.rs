@@ -203,6 +203,45 @@ fn main() -> Result<()> {
             session_cph_opt,
             lines_delta_opt,
         );
+        
+        // Debug output if requested
+        if args.debug {
+            eprintln!();
+            eprintln!("{}", "=== Debug Information ===".bright_black());
+            eprintln!("Session: ${:.2} (from: {})", 
+                session_cost, 
+                if hook.cost.is_some() { "hook" } else { "calculated" }
+            );
+            eprintln!("Today: ${:.2} ({} entries scanned)", today_cost, entries.len());
+            eprintln!("Window: ${:.2} (reset: {:?}, window_entries: {})", 
+                metrics.total_cost, 
+                latest_reset.map(|r| r.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+                entries.iter().filter(|e| {
+                    let (start, end) = claude_statusline::window::window_bounds(now_utc, latest_reset);
+                    e.ts >= start && e.ts < end
+                }).count()
+            );
+            if let Some(ctx) = context {
+                eprintln!("Context: {} tokens ({}% of limit, source: {})", 
+                    ctx.0, ctx.1, context_source.unwrap_or("unknown"));
+            }
+            eprintln!("Burn rates: session={:.1}/m, global={:.1}/m", 
+                metrics.session_nc_tpm, metrics.global_nc_tpm);
+            eprintln!("Plan: tier={:?}, max={:?} tokens", 
+                args.plan_tier, plan_max);
+            eprintln!("Files scanned: cutoff=48h (env: CLAUDE_SCAN_LOOKBACK_HOURS)");
+            #[cfg(feature = "git")]
+            if let Some(ref git) = git_info {
+                eprintln!("Git: branch={}, clean={}, ahead={}, behind={}", 
+                    git.branch.as_deref().unwrap_or("detached"),
+                    git.is_clean.map(|c| if c { "yes" } else { "no" }).unwrap_or("unknown"),
+                    git.ahead.unwrap_or(0),
+                    git.behind.unwrap_or(0));
+            }
+            eprintln!("Window scope: {:?}, Burn scope: {:?}", 
+                args.window_scope, args.burn_scope);
+            eprintln!("{}", "========================".bright_black());
+        }
     }
     Ok(())
 }
