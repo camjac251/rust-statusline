@@ -33,6 +33,10 @@ fn json_output_shape_minimal() {
         10000,    // output tokens
         20000,    // cache_create tokens
         13456,    // cache_read tokens
+        0,        // sess input
+        0,        // sess output
+        0,        // sess cache_create
+        0,        // sess cache_read
         3,        // web_search_requests
         Some("standard".to_string()),
         Some(12.3),
@@ -123,6 +127,10 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         0,
         0,
         0,
+        0,
+        0,
+        0,
+        0,    // web_search_requests
         None,
         None,
         None,

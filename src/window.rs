@@ -16,6 +16,11 @@ pub struct WindowMetrics {
     pub tokens_output: u64,
     pub tokens_cache_create: u64,
     pub tokens_cache_read: u64,
+    // Session-scoped token breakdown within the current window
+    pub session_tokens_input: u64,
+    pub session_tokens_output: u64,
+    pub session_tokens_cache_create: u64,
+    pub session_tokens_cache_read: u64,
     pub web_search_requests: u64,
     pub service_tier: Option<String>,
     pub tpm: f64,
@@ -115,6 +120,8 @@ pub fn calculate_window_metrics(
     // Calculate session-specific burn rate
     let mut session_input: u64 = 0;
     let mut session_output: u64 = 0;
+    let mut session_cache_create: u64 = 0;
+    let mut session_cache_read: u64 = 0;
     let mut session_first: Option<DateTime<Utc>> = None;
     let mut session_last: Option<DateTime<Utc>> = None;
 
@@ -122,6 +129,8 @@ pub fn calculate_window_metrics(
         if e.session_id.as_deref() == Some(session_id) {
             session_input += e.input;
             session_output += e.output;
+            session_cache_create += e.cache_create;
+            session_cache_read += e.cache_read;
             session_first = Some(session_first.unwrap_or(e.ts));
             session_last = Some(e.ts);
         }
@@ -186,6 +195,10 @@ pub fn calculate_window_metrics(
         tokens_output,
         tokens_cache_create,
         tokens_cache_read,
+        session_tokens_input: session_input,
+        session_tokens_output: session_output,
+        session_tokens_cache_create: session_cache_create,
+        session_tokens_cache_read: session_cache_read,
         web_search_requests,
         service_tier,
         tpm,

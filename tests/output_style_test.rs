@@ -35,6 +35,10 @@ fn test_output_style_in_json() {
         0,    // output tokens
         0,    // cache_create tokens
         0,    // cache_read tokens
+        0,    // sess input
+        0,    // sess output
+        0,    // sess cache_create
+        0,    // sess cache_read
         0,    // web_search_requests
         None, // service_tier
         None, // usage_percent
@@ -88,6 +92,10 @@ fn test_output_style_in_json() {
         0,    // output tokens
         0,    // cache_create tokens
         0,    // cache_read tokens
+        0,    // sess input
+        0,    // sess output
+        0,    // sess cache_create
+        0,    // sess cache_read
         0,    // web_search_requests
         None, // service_tier
         None, // usage_percent
@@ -146,6 +154,10 @@ fn test_multiple_output_styles() {
             0,    // output tokens
             0,    // cache_create tokens
             0,    // cache_read tokens
+            0,    // sess input
+            0,    // sess output
+            0,    // sess cache_create
+            0,    // sess cache_read
             0,    // web_search_requests
             None, // service_tier
             None, // usage_percent

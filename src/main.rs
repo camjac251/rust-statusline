@@ -150,6 +150,19 @@ fn main() -> Result<()> {
         let plan_tier_json = plan_tier_final.clone();
         let plan_max_json = plan_max;
 
+        // Construct an active block descriptor for JSON start/end fields
+        let (wb_start, wb_end) = claude_statusline::window::window_bounds(now_utc, latest_reset);
+        let active_block = claude_statusline::models::Block {
+            start: wb_start,
+            end: wb_end,
+            actual_end: wb_end,
+            is_active: true,
+            is_gap: false,
+            entries: Vec::new(),
+            tokens: claude_statusline::models::TokenCounts::default(),
+            cost: metrics.total_cost,
+        };
+
         print_json_output(
             &hook,
             session_cost,
@@ -161,12 +174,16 @@ fn main() -> Result<()> {
             metrics.tokens_output,
             metrics.tokens_cache_create,
             metrics.tokens_cache_read,
+            metrics.session_tokens_input,
+            metrics.session_tokens_output,
+            metrics.session_tokens_cache_create,
+            metrics.session_tokens_cache_read,
             metrics.web_search_requests,
             metrics.service_tier,
             metrics.usage_percent,
             metrics.projected_percent,
             metrics.remaining_minutes,
-            None,
+            Some(&active_block),
             latest_reset,
             metrics.tpm,
             metrics.tpm_indicator,
@@ -226,6 +243,10 @@ fn main() -> Result<()> {
             metrics.tokens_output,
             metrics.tokens_cache_create,
             metrics.tokens_cache_read,
+            metrics.session_tokens_input,
+            metrics.session_tokens_output,
+            metrics.session_tokens_cache_create,
+            metrics.session_tokens_cache_read,
             metrics.web_search_requests,
             session_cph_opt,
             lines_delta_opt,

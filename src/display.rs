@@ -266,6 +266,11 @@ pub fn print_text_output(
     tokens_output: u64,
     tokens_cache_create: u64,
     tokens_cache_read: u64,
+    // session-scoped tokens within the current window
+    sess_tokens_input: u64,
+    sess_tokens_output: u64,
+    sess_tokens_cache_create: u64,
+    sess_tokens_cache_read: u64,
     web_search_requests: u64,
     // Optional enrichments from Claude's provided cost block
     session_cost_per_hour: Option<f64>,
@@ -503,6 +508,19 @@ pub fn print_text_output(
         burn_colored,
         cph_colored
     );
+    // Optional usage percent display when plan caps are known
+    if let Some(up) = usage_percent {
+        let p = (up * 10.0).round() / 10.0;
+        let p_str = format!("{}%", p);
+        let p_col = if p >= 80.0 { p_str.red().bold().to_string() } else if p >= 50.0 { p_str.yellow().to_string() } else { p_str.green().to_string() };
+        if let Some(pp) = projected_percent {
+            let proj = ((pp.max(0.0)) * 10.0).round() / 10.0;
+            let proj_str = format!("→ {}%", proj);
+            print!(" {}{} {}", "use:".bright_black().dimmed(), p_col, proj_str.bright_black());
+        } else {
+            print!(" {}{}", "use:".bright_black().dimmed(), p_col);
+        }
+    }
     if let Some(sess_cph) = session_cost_per_hour {
         let sess_str = format!("${}/h", format_currency(sess_cph));
         let sess_colored = if sess_cph >= 5.0 {
@@ -531,6 +549,19 @@ pub fn print_text_output(
             format!("{}/{}", tcc, tcr).white(),
             "ws:".bright_black().dimmed(),
             ws.to_string().white()
+        );
+        // Also show session-scoped breakdown for clarity
+        let sti = format_tokens(sess_tokens_input);
+        let sto = format_tokens(sess_tokens_output);
+        let stcc = format_tokens(sess_tokens_cache_create);
+        let stcr = format_tokens(sess_tokens_cache_read);
+        print!(
+            " {}{}{} {}{} ",
+            "·".bright_black().dimmed(),
+            "sess:".bright_black().dimmed(),
+            format!("{}/{}", sti, sto).white(),
+            "cache:".bright_black().dimmed(),
+            format!("{}/{}", stcc, stcr).white()
         );
         print!("{} ", "·".bright_black().dimmed());
     }
@@ -618,6 +649,11 @@ pub fn build_json_output(
     tokens_output: u64,
     tokens_cache_create: u64,
     tokens_cache_read: u64,
+    // session-scoped tokens
+    sess_tokens_input: u64,
+    sess_tokens_output: u64,
+    sess_tokens_cache_create: u64,
+    sess_tokens_cache_read: u64,
     web_search_requests: u64,
     service_tier: Option<String>,
     usage_percent: Option<f64>,
@@ -758,6 +794,13 @@ pub fn build_json_output(
             "lines_added": sess_lines_added,
             "lines_removed": sess_lines_removed,
             "cost_per_hour": sess_cph_json,
+            "tokens": {
+                "input_tokens": sess_tokens_input,
+                "output_tokens": sess_tokens_output,
+                "cache_creation_input_tokens": sess_tokens_cache_create,
+                "cache_read_input_tokens": sess_tokens_cache_read,
+                "total_tokens": (sess_tokens_input + sess_tokens_output + sess_tokens_cache_create + sess_tokens_cache_read)
+            }
         },
         "today": {"cost_usd": (today_cost * 100.0).round() / 100.0},
         "block": block_json.clone(),
@@ -795,6 +838,11 @@ pub fn print_json_output(
     tokens_output: u64,
     tokens_cache_create: u64,
     tokens_cache_read: u64,
+    // session-scoped
+    sess_tokens_input: u64,
+    sess_tokens_output: u64,
+    sess_tokens_cache_create: u64,
+    sess_tokens_cache_read: u64,
     web_search_requests: u64,
     service_tier: Option<String>,
     usage_percent: Option<f64>,
@@ -825,6 +873,10 @@ pub fn print_json_output(
         tokens_output,
         tokens_cache_create,
         tokens_cache_read,
+        sess_tokens_input,
+        sess_tokens_output,
+        sess_tokens_cache_create,
+        sess_tokens_cache_read,
         web_search_requests,
         service_tier,
         usage_percent,
