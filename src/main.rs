@@ -12,7 +12,7 @@ use claude_statusline::models::HookJson;
 use claude_statusline::usage::{
     calc_context_from_any, calc_context_from_entries, calc_context_from_transcript, scan_usage,
 };
-use claude_statusline::utils::{claude_paths, read_stdin, resolve_plan_config};
+use claude_statusline::utils::{auto_detect_plan_tier, claude_paths, read_stdin, resolve_plan_config};
 use claude_statusline::window::{calculate_window_metrics, BurnScope, WindowScope};
 
 fn main() -> Result<()> {
@@ -75,7 +75,7 @@ fn main() -> Result<()> {
     }
 
     // Plan resolution: CLI args override env; max_tokens overrides tier.
-    let (_plan_tier_final, plan_max) = resolve_plan_config(&args);
+    let (mut plan_tier_final, mut plan_max) = resolve_plan_config(&args);
 
     // Calculate window metrics
     let now_utc = Utc::now();
@@ -88,7 +88,7 @@ fn main() -> Result<()> {
         BurnScopeArg::Global => BurnScope::Global,
     };
 
-    let metrics = calculate_window_metrics(
+    let mut metrics = calculate_window_metrics(
         &entries,
         &hook.session_id,
         hook.workspace.project_dir.as_deref(),
@@ -98,6 +98,32 @@ fn main() -> Result<()> {
         burn_scope,
         plan_max,
     );
+    
+    // Auto-detect plan tier if not configured, based on actual usage
+    if plan_tier_final.is_none() && metrics.noncache_tokens > 0.0 {
+        if let Some(detected_tier) = auto_detect_plan_tier(metrics.noncache_tokens) {
+            plan_tier_final = Some(detected_tier.clone());
+            // Set appropriate max tokens for detected tier
+            plan_max = match detected_tier.as_str() {
+                "max20x" => Some(4_000_000.0),
+                "max5x" => Some(1_000_000.0),
+                "pro" => Some(200_000.0),
+                _ => None,
+            };
+            
+            // Recalculate metrics with the detected plan_max to get correct usage percentages
+            metrics = calculate_window_metrics(
+                &entries,
+                &hook.session_id,
+                hook.workspace.project_dir.as_deref(),
+                now_utc,
+                latest_reset,
+                window_scope,
+                burn_scope,
+                plan_max,
+            );
+        }
+    }
 
     // Fallback context from entries if transcript lacked usage
     if context.is_none() {
@@ -120,8 +146,9 @@ fn main() -> Result<()> {
 
     if args.json {
         // Machine-readable output for statusline consumption
-        // Use same plan configuration resolution
-        let (plan_tier_json, plan_max_json) = resolve_plan_config(&args);
+        // Use the resolved/detected plan configuration
+        let plan_tier_json = plan_tier_final.clone();
+        let plan_max_json = plan_max;
 
         print_json_output(
             &hook,

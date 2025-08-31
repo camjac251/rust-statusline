@@ -189,6 +189,21 @@ pub(crate) fn plan_from_env() -> (Option<String>, Option<f64>) {
     (tier, None)
 }
 
+/// Auto-detect plan tier based on token usage in current window
+pub fn auto_detect_plan_tier(window_tokens: f64) -> Option<String> {
+    // Based on observed patterns from reference implementations
+    // If user has used more tokens than a tier allows, they must be on a higher tier
+    if window_tokens > 1_000_000.0 {
+        Some("max20x".to_string())
+    } else if window_tokens > 200_000.0 {
+        Some("max5x".to_string())
+    } else if window_tokens > 0.0 {
+        Some("pro".to_string())
+    } else {
+        None
+    }
+}
+
 /// Resolve plan tier and max tokens from CLI args, environment, and settings.json overrides
 pub fn resolve_plan_config(args: &Args) -> (Option<String>, Option<f64>) {
     let (env_tier, env_max_tokens) = plan_from_env();
@@ -539,6 +554,18 @@ mod tests {
 
         env::remove_var("CLAUDE_PLAN_TIER");
         env::remove_var("CLAUDE_PLAN_MAX_TOKENS");
+    }
+
+    #[test]
+    fn test_auto_detect_plan_tier() {
+        assert_eq!(auto_detect_plan_tier(0.0), None);
+        assert_eq!(auto_detect_plan_tier(100_000.0), Some("pro".to_string()));
+        assert_eq!(auto_detect_plan_tier(200_000.0), Some("pro".to_string()));
+        assert_eq!(auto_detect_plan_tier(200_001.0), Some("max5x".to_string()));
+        assert_eq!(auto_detect_plan_tier(500_000.0), Some("max5x".to_string()));
+        assert_eq!(auto_detect_plan_tier(1_000_000.0), Some("max5x".to_string()));
+        assert_eq!(auto_detect_plan_tier(1_000_001.0), Some("max20x".to_string()));
+        assert_eq!(auto_detect_plan_tier(2_000_000.0), Some("max20x".to_string()));
     }
 
     #[test]

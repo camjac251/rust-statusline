@@ -103,6 +103,10 @@ pub fn calculate_window_metrics(
         tokens_cache_read += e.cache_read;
         total_cost += e.cost;
     }
+    
+    // Add web search costs ($0.01 per search request, based on reference implementations)
+    const WEB_SEARCH_COST_USD: f64 = 0.01;
+    total_cost += (web_search_requests as f64) * WEB_SEARCH_COST_USD;
 
     let total_tokens =
         (tokens_input + tokens_output + tokens_cache_create + tokens_cache_read) as f64;
@@ -315,40 +319,81 @@ fn heuristic_active_block_bounds(
     entries: &[Entry],
     now_utc: DateTime<Utc>,
 ) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-    // Try progressive lookback first for better accuracy
+    if entries.is_empty() {
+        return None;
+    }
+    
+    // Sort entries by timestamp
+    let mut sorted_entries = entries.to_vec();
+    sorted_entries.sort_by_key(|e| e.ts);
+    
+    let session_duration = chrono::TimeDelta::hours(WINDOW_DURATION_HOURS);
+    let session_duration_ms = session_duration.num_milliseconds();
+    
+    // Identify session blocks using the same algorithm as claude-powerline-rust
+    let mut blocks: Vec<Vec<DateTime<Utc>>> = Vec::new();
+    let mut current_block: Vec<DateTime<Utc>> = Vec::new();
+    let mut current_block_start: Option<DateTime<Utc>> = None;
+    
+    for entry in &sorted_entries {
+        let entry_time = entry.ts;
+        
+        match current_block_start {
+            None => {
+                // Start first block - floor to the hour
+                current_block_start = Some(floor_to_hour(entry_time));
+                current_block.push(entry_time);
+            }
+            Some(block_start) => {
+                let time_since_block_start = (entry_time - block_start).num_milliseconds();
+                let time_since_last_entry = if let Some(last) = current_block.last() {
+                    (entry_time - *last).num_milliseconds()
+                } else {
+                    0
+                };
+                
+                // New block starts if: time since block start > 5 hours OR time since last entry > 5 hours
+                if time_since_block_start > session_duration_ms || time_since_last_entry > session_duration_ms {
+                    // Finalize current block
+                    if !current_block.is_empty() {
+                        blocks.push(current_block.clone());
+                    }
+                    
+                    // Start new block
+                    current_block_start = Some(floor_to_hour(entry_time));
+                    current_block = vec![entry_time];
+                } else {
+                    current_block.push(entry_time);
+                }
+            }
+        }
+    }
+    
+    // Don't forget the last block
+    if !current_block.is_empty() {
+        blocks.push(current_block);
+    }
+    
+    // Find the active block (most recent that's still within session duration)
+    for block in blocks.iter().rev() {
+        if let (Some(first), Some(last)) = (block.first(), block.last()) {
+            let block_start = floor_to_hour(*first);
+            let block_end = block_start + session_duration;
+            
+            // Check if block is active: current time within 5 hours of last entry AND before theoretical end
+            let time_since_last = now_utc - *last;
+            if time_since_last < session_duration && now_utc < block_end {
+                return Some((block_start, block_end));
+            }
+        }
+    }
+    
+    // Fallback: Use progressive lookback if the block-based approach fails
     if let Some(bounds) = progressive_lookback_block(entries, now_utc) {
         return Some(bounds);
     }
     
-    // Fallback to original implementation if progressive fails
-    if entries.is_empty() {
-        return None;
-    }
-    let mut ts: Vec<DateTime<Utc>> = entries.iter().map(|e| e.ts).collect();
-    ts.sort_unstable();
-    let session_dur = chrono::TimeDelta::hours(WINDOW_DURATION_HOURS);
-    
-    // Start from the newest and walk backward until a gap >= session duration
-    let mut earliest = *ts.last()?;
-    for w in ts.windows(2).rev() {
-        let prev = w[0];
-        let next = w[1];
-        let gap = next - prev;
-        if gap >= session_dur {
-            // Boundary found; earliest is next segment start
-            break;
-        }
-        earliest = prev;
-    }
-    
-    // Floor to the hour in UTC
-    let floored = floor_to_hour(earliest);
-    let end = floored + chrono::TimeDelta::hours(WINDOW_DURATION_HOURS);
-    
-    // If the latest activity is older than a window, consider no active block
-    if now_utc - *ts.last().unwrap() > session_dur {
-        // Still return bounds to compute historical block metrics; caller will compute remaining=0
-        return Some((floored, end));
-    }
-    Some((floored, end))
+    // Last resort: rolling 5-hour window ending at 'now'
+    let start = now_utc - session_duration;
+    Some((start, now_utc))
 }
