@@ -141,6 +141,9 @@ pub fn scan_usage(
     
     let today = Local::now().date_naive();
     let mut session_cost = 0.0f64;
+    // Prefer precise session cost from SDK result messages when available.
+    // Track the maximum observed total_cost_usd for this session to avoid overcounting across retries.
+    let mut session_cost_via_results: f64 = 0.0;
     let mut today_cost = 0.0f64;
     // Aggregate usage by request/message id to avoid double-counting incremental updates
     let mut aggregated: HashMap<String, Entry> = HashMap::new();
@@ -209,6 +212,31 @@ pub fn scan_usage(
                     Ok(v) => v,
                     Err(_) => continue,
                 };
+
+                // Capture precise cost from SDK result messages for this session
+                if v.get("type").and_then(|s| s.as_str()) == Some("result") {
+                    let sid_v = v
+                        .get("sessionId")
+                        .or_else(|| v.get("session_id"))
+                        .and_then(|s| s.as_str());
+                    if let Some(sid_here) = sid_v {
+                        if sid_here == session_id {
+                            if let Some(cn) = v.get("total_cost_usd") {
+                                if let Some(n) = cn.as_f64() {
+                                    if n > session_cost_via_results {
+                                        session_cost_via_results = n;
+                                    }
+                                } else if let Some(s) = cn.as_str() {
+                                    if let Ok(n) = s.parse::<f64>() {
+                                        if n > session_cost_via_results {
+                                            session_cost_via_results = n;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if v.get("isApiErrorMessage").and_then(|b| b.as_bool()) == Some(true) {
                     if let Some(msg) = v.get("message") {
                         if let Some(content) = msg.get("content") {
@@ -510,21 +538,13 @@ pub fn scan_usage(
                                 || std::env::var("CLAUDE_PRICE_CACHE_CREATE").is_err()
                                 || std::env::var("CLAUDE_PRICE_CACHE_READ").is_err();
                             let mdl_l = mdl.to_lowercase();
-                            // Optional tiered pricing bump, disabled by default.
-                            // Enable only if CLAUDE_ENABLE_TIERED_PRICING=1
-                            if std::env::var("CLAUDE_ENABLE_TIERED_PRICING")
-                                .ok()
-                                .as_deref()
-                                == Some("1")
-                                && no_explicit_env
-                                && total_in > 200_000
-                                && (mdl_l.contains("sonnet") || mdl_l.contains("haiku"))
-                            {
-                                // Bump rates to a high-volume tier when above threshold
-                                p.in_per_tok = 6e-6;
-                                p.out_per_tok = 22.5e-6;
-                                p.cache_create_per_tok = 7.5e-6;
-                                p.cache_read_per_tok = 0.6e-6;
+                            // Tiered pricing forSonnet-family when uncached input > 200k
+                            if no_explicit_env && total_in > 200_000 && mdl_l.contains("sonnet") {
+                                // in: 3 -> 6, out: 15 -> 22.5, cache_write: 3.75 -> 7.5, cache_read: 0.3 -> 0.6
+                                p.in_per_tok *= 2.0;
+                                p.out_per_tok *= 1.5;
+                                p.cache_create_per_tok *= 2.0;
+                                p.cache_read_per_tok *= 2.0;
                             }
                             // Fallback: include cache + web search pricing
                             cost = (input as f64) * p.in_per_tok
@@ -670,6 +690,11 @@ pub fn scan_usage(
             }
         }
     }
+    // Prefer result-derived session cost if present
+    if session_cost_via_results > 0.0 {
+        session_cost = session_cost_via_results;
+    }
+
     // Cache the results before returning
     crate::cache::cache_usage(
         session_id,

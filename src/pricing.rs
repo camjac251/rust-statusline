@@ -172,14 +172,13 @@ pub(crate) fn static_pricing_lookup(model_id: &str) -> Option<Pricing> {
             cache_read_per_tok: in_pt * 0.1,
         });
     }
-    // Claude 3.5 Haiku
+    // Claude 3.5 Haiku ()
     if m.contains("3-5-haiku") {
-        let in_pt = 0.25e-6;
         return Some(Pricing {
-            in_per_tok: in_pt,
-            out_per_tok: 1.25e-6,
-            cache_create_per_tok: in_pt * 1.25,
-            cache_read_per_tok: in_pt * 0.1,
+            in_per_tok: 0.8e-6,      // $0.8 / 1M
+            out_per_tok: 4.0e-6,     // $4 / 1M
+            cache_create_per_tok: 1.0e-6,
+            cache_read_per_tok: 0.08e-6,
         });
     }
     None

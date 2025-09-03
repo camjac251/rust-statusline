@@ -367,7 +367,7 @@ pub fn print_text_output(
         };
         print!(
             "{}{}{}{} {}{} ",
-            "usage (nc):".bright_black().dimmed(),
+            "usage:".bright_black().dimmed(),
             usage_colored,
             "→".bright_black().dimmed(),
             proj_colored,
@@ -508,19 +508,7 @@ pub fn print_text_output(
         burn_colored,
         cph_colored
     );
-    // Optional usage percent display when plan caps are known
-    if let Some(up) = usage_percent {
-        let p = (up * 10.0).round() / 10.0;
-        let p_str = format!("{}%", p);
-        let p_col = if p >= 80.0 { p_str.red().bold().to_string() } else if p >= 50.0 { p_str.yellow().to_string() } else { p_str.green().to_string() };
-        if let Some(pp) = projected_percent {
-            let proj = ((pp.max(0.0)) * 10.0).round() / 10.0;
-            let proj_str = format!("→ {}%", proj);
-            print!(" {}{} {}", "use:".bright_black().dimmed(), p_col, proj_str.bright_black());
-        } else {
-            print!(" {}{}", "use:".bright_black().dimmed(), p_col);
-        }
-    }
+    // (Usage percent already printed earlier as "usage (nc)" when plan caps are configured.)
     if let Some(sess_cph) = session_cost_per_hour {
         let sess_str = format!("${}/h", format_currency(sess_cph));
         let sess_colored = if sess_cph >= 5.0 {
