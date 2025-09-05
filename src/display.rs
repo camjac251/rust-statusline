@@ -93,7 +93,7 @@ pub mod color_shim {
 use color_shim::ColorizeShim as OwoColorize;
 
 use crate::cli::{Args, LabelsArg, TimeFormatArg};
-use crate::models::{Block, GitInfo, HookJson};
+use crate::models::{Block, GitInfo, HookJson, RateLimitInfo};
 use crate::utils::{
     context_limit_for_model_display, deduce_provider_from_model, format_currency, format_path,
     format_tokens,
@@ -275,6 +275,7 @@ pub fn print_text_output(
     // Optional enrichments from Claude's provided cost block
     session_cost_per_hour: Option<f64>,
     lines_delta: Option<(i64, i64)>,
+    rate_limit: Option<&RateLimitInfo>,
 ) {
     // Line 2
     print!("{} ", "❯".bright_cyan());
@@ -430,6 +431,52 @@ pub fn print_text_output(
     };
     print!("{}{} ", "time:".bright_black().dimmed(), countdown_colored);
     print!("{} ", "·".bright_black().dimmed());
+
+    // Rate limit indicators
+    if let Some(rl) = rate_limit {
+        if let Some(ref s) = rl.status {
+            let s_col = match s.as_str() {
+                "allowed_warning" => "warn".yellow().bold().to_string(),
+                "rejected" => "rejected".red().bold().to_string(),
+                _ => s.to_string().green().to_string(),
+            };
+            print!("{}{} ", "rl:".bright_black().dimmed(), s_col);
+            print!("{} ", "·".bright_black().dimmed());
+        }
+        if rl.is_using_overage.unwrap_or(false) {
+            let over = rl
+                .overage_resets_at
+                .map(|d| d.with_timezone(&Local))
+                .map(|d| if matches!(args.time_fmt, TimeFormatArg::H12) {
+                    d.format("%I:%M %p").to_string().trim().to_string()
+                } else {
+                    d.format("%H:%M").to_string()
+                })
+                .unwrap_or_else(|| "n/a".to_string());
+            print!(
+                "{}{}{}{} ",
+                "overage:".bright_black().dimmed(),
+                "on ".red().bold(),
+                "until ".bright_black().dimmed(),
+                over.white()
+            );
+            print!("{} ", "·".bright_black().dimmed());
+        }
+        if rl.fallback_available.unwrap_or(false) {
+            let pct = rl
+                .fallback_percentage
+                .map(|p| format!("{:.0}%", p * 100.0))
+                .unwrap_or_else(|| "".to_string());
+            print!(
+                "{}{}{}{} ",
+                "fallback:".bright_black().dimmed(),
+                "available".green(),
+                if pct.is_empty() { "".to_string() } else { " ".to_string() },
+                pct
+            );
+            print!("{} ", "·".bright_black().dimmed());
+        }
+    }
 
     // Reset clock at window end (active end if available; else computed using shared window_bounds)
     let window_end_local = if let Some(b) = active_block {
@@ -660,6 +707,10 @@ pub fn build_json_output(
     plan_tier: Option<String>,
     plan_max: Option<f64>,
     git_info: Option<GitInfo>,
+    rate_limit: Option<&RateLimitInfo>,
+    oauth_org_type: Option<String>,
+    oauth_rate_tier: Option<String>,
+    plan_source: String,
 ) -> serde_json::Value {
     // Provider from env or deduced from model id
     let provider_env = env::var("CLAUDE_PROVIDER").ok().map(|s| {
@@ -773,7 +824,11 @@ pub fn build_json_output(
         "version": hook.version.clone(),
         "output_style": hook.output_style.as_ref().map(|s| serde_json::json!({"name": s.name.clone()})),
         "provider": {"apiKeySource": api_key_source, "env": provider_final},
-        "plan": {"tier": plan_tier, "max_tokens": plan_max},
+        "plan": {"tier": plan_tier, "max_tokens": plan_max, "source": plan_source},
+        "oauth_profile": {
+            "organization_type": oauth_org_type,
+            "rate_limit_tier": oauth_rate_tier
+        },
         "reset_at": reset_iso,
         "session": {
             "cost_usd": (session_cost * 100.0).round() / 100.0,
@@ -801,6 +856,16 @@ pub fn build_json_output(
             "headroom_tokens": context_headroom,
             "eta_minutes": context_eta_minutes
         },
+        "rate_limit": rate_limit.as_ref().map(|rl| serde_json::json!({
+            "status": rl.status,
+            "resets_at": rl.resets_at.map(|d| d.to_rfc3339()),
+            "fallback_available": rl.fallback_available,
+            "fallback_percentage": rl.fallback_percentage,
+            "rate_limit_type": rl.rate_limit_type,
+            "overage_status": rl.overage_status,
+            "overage_resets_at": rl.overage_resets_at.map(|d| d.to_rfc3339()),
+            "is_using_overage": rl.is_using_overage,
+        })),
         "git": {
             "branch": git_branch,
             "short_commit": git_short,
@@ -849,6 +914,10 @@ pub fn print_json_output(
     plan_tier: Option<String>,
     plan_max: Option<f64>,
     git_info: Option<GitInfo>,
+    rate_limit: Option<&RateLimitInfo>,
+    oauth_org_type: Option<String>,
+    oauth_rate_tier: Option<String>,
+    plan_source: String,
 ) -> anyhow::Result<()> {
     let json = build_json_output(
         hook,
@@ -883,6 +952,10 @@ pub fn print_json_output(
         plan_tier,
         plan_max,
         git_info,
+        rate_limit,
+        oauth_org_type,
+        oauth_rate_tier,
+        plan_source,
     );
     println!("{}", serde_json::to_string(&json)?);
     Ok(())

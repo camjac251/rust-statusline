@@ -4,7 +4,7 @@ use chrono::Utc;
 use owo_colors::OwoColorize;
 use std::path::Path;
 
-use claude_statusline::cli::{Args, BurnScopeArg, WindowScopeArg};
+use claude_statusline::cli::{Args, BurnScopeArg, WindowScopeArg, WindowAnchorArg};
 #[cfg(not(feature = "colors"))]
 use claude_statusline::display::color_shim::ColorizeShim;
 use claude_statusline::display::{print_header, print_json_output, print_text_output};
@@ -28,19 +28,26 @@ fn main() -> Result<()> {
     }
     let hook: HookJson = serde_json::from_slice(&stdin).context("parse hook json")?;
 
-    // Compute metrics
+    // Compute metrics (from logs)
     let paths = claude_paths(args.claude_config_dir.as_deref());
-    let (mut session_cost, today_cost, entries, latest_reset, api_key_source) = scan_usage(
+    let (mut session_cost, today_cost, entries, latest_reset, api_key_source, rate_limit_info) = scan_usage(
         &paths,
         &hook.session_id,
         hook.workspace.project_dir.as_deref(),
+        Some(&hook.model.id),
     )
-    .unwrap_or((0.0, 0.0, Vec::new(), None, None));
+    .unwrap_or((0.0, 0.0, Vec::new(), None, None, None));
 
-    // If Claude Code supplied aggregate session cost, prefer it over our scan
-    if let Some(ref c) = hook.cost {
-        if let Some(v) = c.total_cost_usd {
-            session_cost = v;
+    // By default prefer log-derived session cost for Pro/Max/Team usage; allow opting into
+    // hook-provided totals via CLAUDE_SESSION_COST_SOURCE=hook
+    if std::env::var("CLAUDE_SESSION_COST_SOURCE")
+        .map(|s| s.eq_ignore_ascii_case("hook"))
+        .unwrap_or(false)
+    {
+        if let Some(ref c) = hook.cost {
+            if let Some(v) = c.total_cost_usd {
+                session_cost = v;
+            }
         }
     }
     let mut context = calc_context_from_transcript(
@@ -74,11 +81,19 @@ fn main() -> Result<()> {
         print_header(&hook, git_info.as_ref(), &args, api_key_source.as_deref());
     }
 
-    // Plan resolution: CLI args override env; max_tokens overrides tier.
+    // Plan resolution: CLI args override env; max_tokens overrides tier. Offline-only: no API calls.
     let (mut plan_tier_final, mut plan_max) = resolve_plan_config(&args);
+    let plan_source = "inferred".to_string();
+    let oauth_org_type: Option<String> = None;
+    let oauth_rate_tier: Option<String> = None;
 
     // Calculate window metrics
     let now_utc = Utc::now();
+    // Honor window anchor preference: set env consumed by window.rs
+    match args.window_anchor {
+        WindowAnchorArg::Provider => std::env::set_var("CLAUDE_WINDOW_ANCHOR", "provider"),
+        WindowAnchorArg::Log => std::env::set_var("CLAUDE_WINDOW_ANCHOR", "log"),
+    }
     let window_scope = match args.window_scope {
         WindowScopeArg::Global => WindowScope::Global,
         WindowScopeArg::Project => WindowScope::Project,
@@ -99,15 +114,15 @@ fn main() -> Result<()> {
         plan_max,
     );
     
-    // Auto-detect plan tier if not configured, based on actual usage
+    // Auto-detect plan tier if not configured (and not set via OAuth), based on actual usage
     if plan_tier_final.is_none() && metrics.noncache_tokens > 0.0 {
         if let Some(detected_tier) = auto_detect_plan_tier(metrics.noncache_tokens) {
             plan_tier_final = Some(detected_tier.clone());
             // Set appropriate max tokens for detected tier
             plan_max = match detected_tier.as_str() {
-                "max20x" => Some(4_000_000.0),
-                "max5x" => Some(1_000_000.0),
-                "pro" => Some(200_000.0),
+                "max20x" => Some(claude_statusline::utils::five_hour_base_tokens() * 20.0),
+                "max5x" => Some(claude_statusline::utils::five_hour_base_tokens() * 5.0),
+                "pro" => Some(claude_statusline::utils::five_hour_base_tokens()),
                 _ => None,
             };
             
@@ -196,6 +211,10 @@ fn main() -> Result<()> {
             plan_tier_json,
             plan_max_json,
             git_info,
+            rate_limit_info.as_ref(),
+            oauth_org_type,
+            oauth_rate_tier,
+            plan_source,
         )?;
     } else {
         // Compute session-level cost per hour and line deltas from Claude's provided cost
@@ -250,6 +269,7 @@ fn main() -> Result<()> {
             metrics.web_search_requests,
             session_cph_opt,
             lines_delta_opt,
+            rate_limit_info.as_ref(),
         );
         
         // Debug output if requested

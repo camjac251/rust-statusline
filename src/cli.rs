@@ -48,6 +48,14 @@ pub enum WindowScopeArg {
     Project,
 }
 
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowAnchorArg {
+    /// Align windows to provider reset anchor if known
+    Provider,
+    /// Use log/heuristic 5-hour blocks (floored hour + 5h)
+    Log,
+}
+
 #[derive(clap::Parser, Debug)]
 pub struct Args {
     /// Force Claude data path(s), comma-separated. Defaults to ~/.config/claude and ~/.claude
@@ -110,6 +118,14 @@ pub struct Args {
     /// Debug mode: show detailed calculation information
     #[arg(long, env = "CLAUDE_DEBUG")]
     pub debug: bool,
+
+    /// Window anchor: provider|log (default: log)
+    /// provider uses a persisted/provider reset anchor if available;
+    /// log uses heuristic log-derived 5-hour blocks (monitor-style)
+    #[arg(long, value_enum, default_value_t = WindowAnchorArg::Log)]
+    pub window_anchor: WindowAnchorArg,
+
+    // OAuth/API options removed for offline-only mode
 }
 
 impl Args {

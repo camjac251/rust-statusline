@@ -241,6 +241,7 @@ dependencies = [
  "globwalk",
  "once_cell",
  "owo-colors",
+ "regex",
  "serde",
  "serde_json",
  "serial_test",

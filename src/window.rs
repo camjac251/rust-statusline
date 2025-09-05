@@ -61,7 +61,15 @@ pub fn calculate_window_metrics(
 ) -> WindowMetrics {
     // Calculate window start and end: prefer provider reset anchor; otherwise use
     // a heuristic active-block finder similar to ccstatusline/claude-powerline.
-    let (start, end) = if latest_reset.is_some() {
+    let ignore_anchor = match std::env::var("CLAUDE_WINDOW_ANCHOR") {
+        Ok(v) => {
+            let v = v.to_lowercase();
+            v == "log" || v == "heuristic" || v == "none"
+        }
+        Err(_) => false,
+    };
+
+    let (start, end) = if latest_reset.is_some() && !ignore_anchor {
         window_bounds(now_utc, latest_reset)
     } else if let Some((hs, he)) = heuristic_active_block_bounds(entries, now_utc) {
         (hs, he)
@@ -70,13 +78,15 @@ pub fn calculate_window_metrics(
         window_bounds(now_utc, None)
     };
 
-    // Filter entries for the window
-    let mut window_entries: Vec<&Entry> = entries
+    // Global (account-wide) entries for the window — always used for block totals and percent
+    let mut global_entries: Vec<&Entry> = entries
         .iter()
         .filter(|e| e.ts >= start && e.ts < end)
         .collect();
+    global_entries.sort_by_key(|e| e.ts);
 
-    // Apply project scope filter if requested
+    // Optional project-scoped view retained only for display/burn by scope
+    let mut window_entries: Vec<&Entry> = global_entries.clone();
     if let WindowScope::Project = window_scope {
         if let Some(pd) = project_dir {
             let proj = sanitized_project_name(pd);
@@ -84,37 +94,26 @@ pub fn calculate_window_metrics(
         }
     }
 
-    window_entries.sort_by_key(|e| e.ts);
+    // Aggregate global metrics for block usage (account-wide)
+    let web_search_requests: u64 = global_entries.iter().map(|e| e.web_search_requests).sum();
+    let service_tier: Option<String> = global_entries.iter().rev().find_map(|e| e.service_tier.clone());
 
-    // Aggregate metrics
-    let web_search_requests: u64 = window_entries.iter().map(|e| e.web_search_requests).sum();
-    // pick the latest (most recent) non-None service tier in this window
-    let service_tier: Option<String> = window_entries
-        .iter()
-        .rev()
-        .find_map(|e| e.service_tier.clone());
-
-    // Calculate token totals
     let mut tokens_input: u64 = 0;
     let mut tokens_output: u64 = 0;
     let mut tokens_cache_create: u64 = 0;
     let mut tokens_cache_read: u64 = 0;
     let mut total_cost: f64 = 0.0;
-
-    for e in &window_entries {
+    for e in &global_entries {
         tokens_input += e.input;
         tokens_output += e.output;
         tokens_cache_create += e.cache_create;
         tokens_cache_read += e.cache_read;
         total_cost += e.cost;
     }
-    
-    // Add web search costs ($0.01 per search request, based on reference implementations)
-    const WEB_SEARCH_COST_USD: f64 = 0.01;
-    total_cost += (web_search_requests as f64) * WEB_SEARCH_COST_USD;
+    // Cost is already computed per entry in usage.rs (including web_search when recomputed);
+    // do not add web_search again here to avoid double counting.
 
-    let total_tokens =
-        (tokens_input + tokens_output + tokens_cache_create + tokens_cache_read) as f64;
+    let total_tokens = (tokens_input + tokens_output + tokens_cache_create + tokens_cache_read) as f64;
     let noncache_tokens = (tokens_input + tokens_output) as f64;
 
     // Calculate session-specific burn rate
@@ -137,8 +136,9 @@ pub fn calculate_window_metrics(
     }
 
     // Calculate duration and rates
-    let duration_minutes_global = if window_entries.len() >= 2 {
-        match (window_entries.first(), window_entries.last()) {
+    // Global duration/burn (account-wide)
+    let duration_minutes_global = if global_entries.len() >= 2 {
+        match (global_entries.first(), global_entries.last()) {
             (Some(first), Some(last)) => ((last.ts - first.ts).num_seconds().max(0) as f64) / 60.0,
             _ => 0.0,
         }
@@ -181,11 +181,19 @@ pub fn calculate_window_metrics(
     };
 
     let remaining_minutes = ((end - now_utc).num_minutes()).max(0) as f64;
-    // Usage percent should reflect plan caps which apply to non-cache tokens (input+output).
-    // Project using global non-cache rate to best approximate account-level consumption.
-    let projected_nc_tokens = noncache_tokens + global_nc_tpm * remaining_minutes;
-    let usage_percent = plan_max.map(|pm| (noncache_tokens * 100.0 / pm).max(0.0));
-    let projected_percent = plan_max.map(|pm| (projected_nc_tokens * 100.0 / pm).max(0.0));
+    // Usage percent reflects account-level (global) consumption against cap.
+    // By default, align with Claude Code Usage Monitor style: EXCLUDE cache tokens from percent.
+    // You can opt-in to including cache tokens by setting CLAUDE_USAGE_INCLUDE_CACHE=1/true.
+    let include_cache = match std::env::var("CLAUDE_USAGE_INCLUDE_CACHE") {
+        Ok(v) => v != "0" && v.to_lowercase() != "false",
+        // Default is false (monitor style)
+        Err(_) => false,
+    };
+    let used_tokens_for_percent = if include_cache { total_tokens } else { noncache_tokens };
+    let tpm_for_projection = if include_cache { tpm } else { global_nc_tpm };
+    let projected_tokens = used_tokens_for_percent + tpm_for_projection * remaining_minutes;
+    let usage_percent = plan_max.map(|pm| ((used_tokens_for_percent * 100.0 / pm).max(0.0)).min(100.0));
+    let projected_percent = plan_max.map(|pm| ((projected_tokens * 100.0 / pm).max(0.0)).min(100.0));
 
     WindowMetrics {
         total_cost,

@@ -45,3 +45,5 @@ pub mod utils;
 
 /// Window calculation and metrics
 pub mod window;
+
+// OAuth helpers removed for offline-only mode

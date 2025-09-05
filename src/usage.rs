@@ -9,7 +9,9 @@
 //! - `calc_context_from_*`: Calculates context window usage from various sources
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Local, Utc};
+use chrono::{DateTime, Duration, Local, Utc, Datelike, Timelike, TimeZone};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
@@ -17,9 +19,75 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use crate::models::{Entry, MessageUsage, TranscriptLine};
+use crate::models::{Entry, MessageUsage, RateLimitInfo, TranscriptLine};
+// Offline-only: no OAuth/profile lookups here
 use crate::pricing::pricing_for_model;
 use crate::utils::{context_limit_for_model_display, parse_iso_date, sanitized_project_name};
+
+// Helper: detect reset time from assistant text like "... limit reached ... resets 5am" with DST correction
+static ASSISTANT_LIMIT_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)limit\s+reached.*resets\s+(\d{1,2})\s*(am|pm)").unwrap()
+});
+
+fn parse_am_pm_reset(ts_utc: DateTime<Utc>, text: &str) -> Option<DateTime<Utc>> {
+    let caps = ASSISTANT_LIMIT_RE.captures(text)?;
+    let hour_s = caps.get(1)?.as_str();
+    let ampm = caps.get(2)?.as_str().to_lowercase();
+    let base_hour: u32 = hour_s.parse().ok()?;
+    if base_hour == 0 || base_hour > 12 {
+        return None;
+    }
+    let hour24: u32 = if ampm == "am" {
+        if base_hour == 12 { 0 } else { base_hour }
+    } else {
+        if base_hour == 12 { 12 } else { (base_hour + 12) % 24 }
+    };
+    // Convert ts to local
+    let ts_local = ts_utc.with_timezone(&Local);
+    // Construct same-day local time at the given hour
+    let mut same_day = ts_local
+        .with_hour(hour24)?.with_minute(0)?.with_second(0)?.with_nanosecond(0)?;
+
+    // Optional DST correction (for historical Claude Code bug where reset hour was shown in standard time).
+    // Enable by setting CLAUDE_RESET_ASSUME_STANDARD_TIME=1
+    let assume_standard = std::env::var("CLAUDE_RESET_ASSUME_STANDARD_TIME")
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if assume_standard {
+        // Compute DST offset difference: current local offset minus minimum offset in this year
+        let year = ts_local.year();
+        let mut min_off: i32 = ts_local.offset().local_minus_utc();
+        for m in 1..=12 {
+            // Prefer midnight; if ambiguous/unavailable, try noon to avoid DST gaps
+            let cand_midnight = Local.with_ymd_and_hms(year, m as u32, 1, 0, 0, 0);
+            let cand = match cand_midnight {
+                chrono::LocalResult::Single(dt) => Some(dt),
+                _ => match Local.with_ymd_and_hms(year, m as u32, 1, 12, 0, 0) {
+                    chrono::LocalResult::Single(dt) => Some(dt),
+                    _ => None,
+                },
+            };
+            if let Some(dt) = cand {
+                let off = dt.offset().local_minus_utc();
+                if off < min_off {
+                    min_off = off;
+                }
+            }
+        }
+        let cur_off = ts_local.offset().local_minus_utc();
+        let diff_minutes = cur_off - min_off; // typically 0 or +60 during DST
+        if diff_minutes != 0 {
+            same_day = same_day + chrono::TimeDelta::minutes(diff_minutes as i64);
+        }
+    }
+    // If we've already passed that time today, use tomorrow
+    let reset_local = if ts_local < same_day {
+        same_day
+    } else {
+        same_day + chrono::TimeDelta::days(1)
+    };
+    Some(reset_local.with_timezone(&Utc))
+}
 
 pub fn calc_context_from_transcript(
     transcript_path: &Path,
@@ -120,12 +188,14 @@ pub fn scan_usage(
     paths: &[PathBuf],
     session_id: &str,
     project_dir: Option<&str>,
+    _model_id_for_probe: Option<&str>,
 ) -> Result<(
     f64, /*session*/
     f64, /*today*/
     Vec<Entry>,
     Option<DateTime<Utc>>,
     Option<String>,
+    Option<RateLimitInfo>,
 )> {
     // Check cache first
     if let Some((cached_entries, cached_today_cost, cached_reset, cached_api_key)) = 
@@ -136,7 +206,23 @@ pub fn scan_usage(
             .filter(|e| e.session_id.as_deref() == Some(session_id))
             .map(|e| e.cost)
             .sum();
-        return Ok((session_cost, cached_today_cost, cached_entries, cached_reset, cached_api_key));
+        return Ok((
+            session_cost,
+            cached_today_cost,
+            cached_entries,
+            cached_reset,
+            cached_api_key,
+            read_persisted_reset_state().map(|st| RateLimitInfo {
+                status: st.status,
+                resets_at: st.reset_at,
+                fallback_available: st.fallback.as_deref().map(|s| s == "available"),
+                fallback_percentage: st.fallback_percentage,
+                rate_limit_type: st.rate_limit_type,
+                overage_status: st.overage_status,
+                overage_resets_at: st.overage_resets_at,
+                is_using_overage: None,
+            }),
+        ));
     }
     
     let today = Local::now().date_naive();
@@ -213,6 +299,8 @@ pub fn scan_usage(
                     Err(_) => continue,
                 };
 
+                
+
                 // Capture precise cost from SDK result messages for this session
                 if v.get("type").and_then(|s| s.as_str()) == Some("result") {
                     let sid_v = v
@@ -237,6 +325,13 @@ pub fn scan_usage(
                         }
                     }
                 }
+                // Best-effort timestamp for limit parsing
+                let tsd_for_limits: Option<DateTime<Utc>> = v
+                    .get("timestamp")
+                    .and_then(|s| s.as_str())
+                    .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+                    .map(|d| d.with_timezone(&Utc));
+
                 if v.get("isApiErrorMessage").and_then(|b| b.as_bool()) == Some(true) {
                     if let Some(msg) = v.get("message") {
                         if let Some(content) = msg.get("content") {
@@ -265,6 +360,16 @@ pub fn scan_usage(
                                                         }
                                                     }
                                                 }
+                                            } else if let Some(base) = tsd_for_limits {
+                                                if let Some(dt) = parse_am_pm_reset(base, text) {
+                                                    if latest_reset.map(|x| dt > x).unwrap_or(true) {
+                                                        latest_reset = Some(dt);
+                                                    }
+                                                }
+                                            } else if let Some(dt) = parse_am_pm_reset(Utc::now(), text) {
+                                                if latest_reset.map(|x| dt > x).unwrap_or(true) {
+                                                    latest_reset = Some(dt);
+                                                }
                                             }
                                         }
                                     }
@@ -292,6 +397,16 @@ pub fn scan_usage(
                                                 }
                                             }
                                         }
+                                    }
+                                } else if let Some(base) = tsd_for_limits {
+                                    if let Some(dt) = parse_am_pm_reset(base, text) {
+                                        if latest_reset.map(|x| dt > x).unwrap_or(true) {
+                                            latest_reset = Some(dt);
+                                        }
+                                    }
+                                } else if let Some(dt) = parse_am_pm_reset(Utc::now(), text) {
+                                    if latest_reset.map(|x| dt > x).unwrap_or(true) {
+                                        latest_reset = Some(dt);
                                     }
                                 }
                             }
@@ -424,6 +539,18 @@ pub fn scan_usage(
                                                     }
                                                 }
                                             }
+                                        }
+                                    } else if let Some(ts_s) = v.get("timestamp").and_then(|s| s.as_str()) {
+                                        if let Ok(b) = DateTime::parse_from_rfc3339(ts_s).map(|d| d.with_timezone(&Utc)) {
+                                            if let Some(dt) = parse_am_pm_reset(b, text) {
+                                                if latest_reset.map(|x| dt > x).unwrap_or(true) {
+                                                    latest_reset = Some(dt);
+                                                }
+                                            }
+                                        }
+                                    } else if let Some(dt) = parse_am_pm_reset(Utc::now(), text) {
+                                        if latest_reset.map(|x| dt > x).unwrap_or(true) {
+                                            latest_reset = Some(dt);
                                         }
                                     }
                                 }
@@ -676,6 +803,19 @@ pub fn scan_usage(
             }
         }
     }
+
+    // Offline-only: never perform API probes. If a persisted reset exists in the future, use it.
+    let now = Utc::now();
+    let rl_info: Option<RateLimitInfo> = None;
+    if latest_reset.is_none() {
+        if let Some(state) = read_persisted_reset_state() {
+            if let Some(reset_at) = state.reset_at {
+                if reset_at > now {
+                    latest_reset = Some(reset_at);
+                }
+            }
+        }
+    }
     // Finalize aggregated entries and compute totals
     let mut entries: Vec<Entry> = aggregated.into_values().collect();
     entries.sort_by_key(|e| e.ts);
@@ -705,12 +845,33 @@ pub fn scan_usage(
         api_key_source.clone(),
     );
     
+    // Persist log-derived reset too so we don't need to re-probe until after expiry
+    if let Some(dt) = latest_reset {
+        let prev = read_persisted_reset_state();
+        if prev.as_ref().and_then(|p| p.reset_at).map(|p| p < dt).unwrap_or(true) {
+            let prev_last_checked = prev.as_ref().and_then(|p| p.last_checked);
+            let prev_status = prev.as_ref().and_then(|p| p.status.as_deref());
+            let prev_fallback = prev.as_ref().and_then(|p| p.fallback.as_deref());
+            write_persisted_reset_state(
+                Some(dt),
+                prev_last_checked,
+                prev_status,
+                prev_fallback,
+                prev.as_ref().and_then(|p| p.rate_limit_type.as_deref()),
+                prev.as_ref().and_then(|p| p.overage_status.as_deref()),
+                prev.as_ref().and_then(|p| p.overage_resets_at),
+                prev.as_ref().and_then(|p| p.fallback_percentage),
+            );
+        }
+    }
+
     Ok((
         session_cost,
         today_cost,
         entries,
         latest_reset,
         api_key_source,
+        rl_info,
     ))
 }
 
@@ -723,5 +884,65 @@ fn normalize_reset_anchor(n: i64) -> i64 {
         n
     } else {
         now + n
+    }
+}
+
+
+// --- Persisted reset state (on-disk), used only for log-derived anchors ---
+
+#[derive(Debug, Clone)]
+struct ResetState {
+    reset_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_checked: Option<chrono::DateTime<chrono::Utc>>,
+    status: Option<String>,
+    fallback: Option<String>,
+    rate_limit_type: Option<String>,
+    overage_status: Option<String>,
+    overage_resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    fallback_percentage: Option<f64>,
+}
+
+fn reset_state_path() -> Option<std::path::PathBuf> {
+    directories::BaseDirs::new().map(|b| b.home_dir().join(".claude").join("statusline-reset.json"))
+}
+
+fn read_persisted_reset_state() -> Option<ResetState> {
+    let p = reset_state_path()?;
+    let txt = std::fs::read_to_string(&p).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+    let reset_at = v.get("reset_at").and_then(|x| x.as_i64()).and_then(|e| chrono::DateTime::<chrono::Utc>::from_timestamp(e, 0));
+    let last_checked = v.get("last_checked").and_then(|x| x.as_i64()).and_then(|e| chrono::DateTime::<chrono::Utc>::from_timestamp(e, 0));
+    let status = v.get("status").and_then(|x| x.as_str()).map(|s| s.to_string());
+    let fallback = v.get("fallback").and_then(|x| x.as_str()).map(|s| s.to_string());
+    let rate_limit_type = v.get("rate_limit_type").and_then(|x| x.as_str()).map(|s| s.to_string());
+    let overage_status = v.get("overage_status").and_then(|x| x.as_str()).map(|s| s.to_string());
+    let overage_resets_at = v.get("overage_resets_at").and_then(|x| x.as_i64()).and_then(|e| chrono::DateTime::<chrono::Utc>::from_timestamp(e, 0));
+    let fallback_percentage = v.get("fallback_percentage").and_then(|x| x.as_f64());
+    Some(ResetState { reset_at, last_checked, status, fallback, rate_limit_type, overage_status, overage_resets_at, fallback_percentage })
+}
+
+fn write_persisted_reset_state(
+    reset_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_checked: Option<chrono::DateTime<chrono::Utc>>,
+    status: Option<&str>,
+    fallback: Option<&str>,
+    rate_limit_type: Option<&str>,
+    overage_status: Option<&str>,
+    overage_resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    fallback_percentage: Option<f64>,
+) {
+    if let Some(p) = reset_state_path() {
+        if let Some(dir) = p.parent() { let _ = std::fs::create_dir_all(dir); }
+        let obj = serde_json::json!({
+            "reset_at": reset_at.map(|d| d.timestamp()),
+            "last_checked": last_checked.map(|d| d.timestamp()),
+            "status": status,
+            "fallback": fallback,
+            "rate_limit_type": rate_limit_type,
+            "overage_status": overage_status,
+            "overage_resets_at": overage_resets_at.map(|d| d.timestamp()),
+            "fallback_percentage": fallback_percentage,
+        });
+        let _ = std::fs::write(p, obj.to_string());
     }
 }

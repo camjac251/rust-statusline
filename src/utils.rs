@@ -5,7 +5,10 @@ use std::path::PathBuf;
 
 use crate::cli::{Args, PlanProfileArg, PlanTierArg};
 
-pub const BASE_TOKEN_LIMIT: f64 = 200_000.0;
+// Default 5-hour base tokens for Pro. Many ccusage users operate with 250k as the
+// effective base; Max tiers are derived as 5x and 20x. You can override via
+// CLAUDE_5H_BASE_TOKENS or set a hard numeric with CLAUDE_PLAN_MAX_TOKENS.
+pub const BASE_TOKEN_LIMIT: f64 = 250_000.0;
 pub const WINDOW_DURATION_HOURS: i64 = 5;
 pub const WINDOW_DURATION_SECONDS: i64 = WINDOW_DURATION_HOURS * 60 * 60;
 
@@ -185,7 +188,7 @@ pub(crate) fn plan_from_env() -> (Option<String>, Option<f64>) {
         }
     }
     if let Some(ref t) = tier {
-        let base: f64 = 200_000.0;
+        let base: f64 = five_hour_base_tokens();
         let mult = match t.to_lowercase().as_str() {
             "pro" => 1.0,
             "max5x" | "max_5x" | "5x" => 5.0,
@@ -199,13 +202,26 @@ pub(crate) fn plan_from_env() -> (Option<String>, Option<f64>) {
     (tier, None)
 }
 
+/// Read the base five-hour token limit for Pro (defaults to 200k). This is used to derive
+/// Max 5x/20x caps when exact caps are not known.
+pub fn five_hour_base_tokens() -> f64 {
+    if let Ok(s) = env::var("CLAUDE_5H_BASE_TOKENS") {
+        if let Ok(v) = s.parse::<f64>() {
+            if v.is_finite() && v > 0.0 {
+                return v;
+            }
+        }
+    }
+    BASE_TOKEN_LIMIT
+}
+
 /// Auto-detect plan tier based on token usage in current window
 pub fn auto_detect_plan_tier(window_tokens: f64) -> Option<String> {
-    // Based on observed patterns from reference implementations
-    // If user has used more tokens than a tier allows, they must be on a higher tier
-    if window_tokens > 1_000_000.0 {
+    // Use configured base to infer tier boundaries: base → pro, base*5 → max5x, base*20 → max20x
+    let base = five_hour_base_tokens();
+    if window_tokens > base * 5.0 {
         Some("max20x".to_string())
-    } else if window_tokens > 200_000.0 {
+    } else if window_tokens > base {
         Some("max5x".to_string())
     } else if window_tokens > 0.0 {
         Some("pro".to_string())
@@ -227,10 +243,12 @@ pub fn resolve_plan_config(args: &Args) -> (Option<String>, Option<f64>) {
         PlanProfileArg::Standard => "standard".to_string(),
         PlanProfileArg::Monitor => "monitor".to_string(),
     });
+    // Default profile now aligns with Claude Code Usage Monitor behavior
+    // (pro=19k, max5x=88k, max20x=220k)
     let plan_profile_final = plan_profile_cli
         .or(plan_profile_env)
         .or(plan_profile_settings)
-        .unwrap_or_else(|| "standard".to_string());
+        .unwrap_or_else(|| "monitor".to_string());
     let plan_tier_cli: Option<String> = args.plan_tier.map(|t| match t {
         PlanTierArg::Pro => "pro".to_string(),
         PlanTierArg::Max5x => "max5x".to_string(),
@@ -246,8 +264,9 @@ pub fn resolve_plan_config(args: &Args) -> (Option<String>, Option<f64>) {
         .or_else(|| {
             if let Some(ref t) = plan_tier_final {
                 match plan_profile_final.as_str() {
-                    // Standard mapping: 200k base * {1,5,20}
+                    // Standard mapping: base * {1,5,20}; base defaults to 200k and can be overridden by CLAUDE_5H_BASE_TOKENS
                     "standard" => {
+                        let base = five_hour_base_tokens();
                         let mult = match t.as_str() {
                             "pro" => 1.0,
                             "max5x" => 5.0,
@@ -255,7 +274,7 @@ pub fn resolve_plan_config(args: &Args) -> (Option<String>, Option<f64>) {
                             _ => 0.0,
                         };
                         if mult > 0.0 {
-                            return Some(BASE_TOKEN_LIMIT * mult);
+                            return Some(base * mult);
                         }
                     }
                     // Monitor mapping: fixed caps per tier (≈19k/88k/220k)
