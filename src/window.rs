@@ -3,8 +3,76 @@
 //! Handles 5-hour window calculations for usage tracking
 
 use crate::models::Entry;
+use crate::usage::{detect_rapid_exchange, calculate_session_complexity};
 use crate::utils::{sanitized_project_name, WINDOW_DURATION_HOURS, WINDOW_DURATION_SECONDS};
-use chrono::{DateTime, Duration, Timelike, Utc};
+use chrono::{DateTime, Duration, Local, TimeZone, Timelike, Utc};
+
+// Session reset hours in local time: 1am, 7am, 1pm, 7pm (from JavaScript implementation)
+// These align with Claude's actual reset schedule
+pub const RESET_HOURS: [u32; 4] = [1, 7, 13, 19];
+
+// Calculate the next reset time based on fixed reset hours
+pub fn calculate_next_reset(now: DateTime<Utc>) -> DateTime<Utc> {
+    let local_now = now.with_timezone(&Local);
+    let current_hour = local_now.hour();
+
+    // Find the next reset hour
+    let next_reset_hour = RESET_HOURS.iter()
+        .find(|&&h| h > current_hour)
+        .copied()
+        .unwrap_or(RESET_HOURS[0]); // Wrap to first reset hour of next day
+
+    // Calculate the reset time
+    let reset_time = if next_reset_hour > current_hour {
+        // Reset is later today
+        local_now
+            .with_hour(next_reset_hour).unwrap()
+            .with_minute(0).unwrap()
+            .with_second(0).unwrap()
+            .with_nanosecond(0).unwrap()
+    } else {
+        // Reset is tomorrow
+        (local_now + Duration::days(1))
+            .with_hour(next_reset_hour).unwrap()
+            .with_minute(0).unwrap()
+            .with_second(0).unwrap()
+            .with_nanosecond(0).unwrap()
+    };
+
+    reset_time.with_timezone(&Utc)
+}
+
+// Calculate the previous reset time based on fixed reset hours
+pub fn calculate_previous_reset(now: DateTime<Utc>) -> DateTime<Utc> {
+    let local_now = now.with_timezone(&Local);
+    let current_hour = local_now.hour();
+
+    // Find the previous reset hour
+    let prev_reset_hour = RESET_HOURS.iter()
+        .rev()
+        .find(|&&h| h <= current_hour)
+        .copied()
+        .unwrap_or(RESET_HOURS[3]); // Wrap to last reset hour of previous day
+
+    // Calculate the reset time
+    let reset_time = if prev_reset_hour <= current_hour {
+        // Reset was earlier today
+        local_now
+            .with_hour(prev_reset_hour).unwrap()
+            .with_minute(0).unwrap()
+            .with_second(0).unwrap()
+            .with_nanosecond(0).unwrap()
+    } else {
+        // Reset was yesterday
+        (local_now - Duration::days(1))
+            .with_hour(prev_reset_hour).unwrap()
+            .with_minute(0).unwrap()
+            .with_second(0).unwrap()
+            .with_nanosecond(0).unwrap()
+    };
+
+    reset_time.with_timezone(&Utc)
+}
 
 /// Metrics calculated for a window period
 #[derive(Debug, Clone)]
@@ -169,8 +237,24 @@ pub fn calculate_window_metrics(
         0.0
     };
 
+    // Enhanced burn rate with rapid exchange detection (from JavaScript implementation)
+    let (is_rapid, enhanced_burn_rate) = detect_rapid_exchange(entries, session_id, 15);
+
+    // Adjust burn rate if rapid exchange detected (indicates active development)
+    let adjusted_session_tpm = if is_rapid && enhanced_burn_rate > session_nc_tpm {
+        enhanced_burn_rate
+    } else {
+        session_nc_tpm
+    };
+
+    // Calculate message complexity for more accurate session limits
+    let complexity = calculate_session_complexity(entries, session_id);
+
+    // Adjust tpm based on message complexity (heavier messages burn faster)
+    let complexity_adjusted_tpm = adjusted_session_tpm * complexity.average_weight;
+
     let tpm_indicator = match burn_scope {
-        BurnScope::Session => session_nc_tpm,
+        BurnScope::Session => complexity_adjusted_tpm,
         BurnScope::Global => global_nc_tpm,
     };
 
@@ -190,8 +274,22 @@ pub fn calculate_window_metrics(
         Err(_) => false,
     };
     let used_tokens_for_percent = if include_cache { total_tokens } else { noncache_tokens };
-    let tpm_for_projection = if include_cache { tpm } else { global_nc_tpm };
-    let projected_tokens = used_tokens_for_percent + tpm_for_projection * remaining_minutes;
+
+    // Use complexity-adjusted burn rate for more accurate projection
+    // If we're in rapid exchange mode, use the enhanced rate
+    let projection_tpm = if is_rapid {
+        // During rapid exchange, use the complexity-adjusted session rate for projection
+        complexity_adjusted_tpm
+    } else if include_cache {
+        tpm
+    } else {
+        global_nc_tpm
+    };
+
+    // Project tokens based on current burn rate and remaining time
+    let projected_tokens = used_tokens_for_percent + projection_tpm * remaining_minutes;
+
+    // Calculate usage percentages
     let usage_percent = plan_max.map(|pm| ((used_tokens_for_percent * 100.0 / pm).max(0.0)).min(100.0));
     let projected_percent = plan_max.map(|pm| ((projected_tokens * 100.0 / pm).max(0.0)).min(100.0));
 
@@ -222,7 +320,7 @@ pub fn calculate_window_metrics(
 
 /// Compute the active 5-hour window [start, end).
 /// - If a provider reset anchor is known, align windows to it.
-/// - Otherwise, align to local 5-hour buckets starting at 00:00 local time.
+/// - Otherwise, use fixed reset hours [1,7,13,19] in local time.
 pub fn window_bounds(
     now_utc: chrono::DateTime<chrono::Utc>,
     latest_reset: Option<chrono::DateTime<chrono::Utc>>,
@@ -234,9 +332,13 @@ pub fn window_bounds(
         let end = start + chrono::TimeDelta::hours(WINDOW_DURATION_HOURS);
         (start, end)
     } else {
-        // Fallback: rolling 5-hour window ending at 'now'
-        let start = now_utc - chrono::TimeDelta::hours(WINDOW_DURATION_HOURS);
-        (start, now_utc)
+        // Fallback: Use fixed reset hours [1,7,13,19] in local time
+        let prev_reset = calculate_previous_reset(now_utc);
+        let next_reset = calculate_next_reset(now_utc);
+
+        // Current window is from previous reset to next reset
+        // Note: Windows may not be exactly 5 hours due to reset schedule
+        (prev_reset, next_reset)
     }
 }
 

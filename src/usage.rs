@@ -29,6 +29,15 @@ static ASSISTANT_LIMIT_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)limit\s+reached.*resets\s+(\d{1,2})\s*(am|pm)").unwrap()
 });
 
+// Context warning message patterns (from Python implementation)
+static CONTEXT_AUTO_COMPACT_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"Context left until auto-compact: (\d+)%").unwrap()
+});
+
+static CONTEXT_LOW_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"Context low \((\d+)% remaining\)").unwrap()
+});
+
 fn parse_am_pm_reset(ts_utc: DateTime<Utc>, text: &str) -> Option<DateTime<Utc>> {
     let caps = ASSISTANT_LIMIT_RE.captures(text)?;
     let hour_s = caps.get(1)?.as_str();
@@ -99,6 +108,7 @@ pub fn calc_context_from_transcript(
     let file = File::open(transcript_path).ok()?;
     let reader = BufReader::new(file);
     let mut last_total_in: Option<u64> = None;
+    let mut context_warning_pct: Option<u32> = None;
 
     for line in reader.lines() {
         let line = match line {
@@ -109,34 +119,60 @@ pub fn calc_context_from_transcript(
         if t.is_empty() {
             continue;
         }
-        let parsed: TranscriptLine = match serde_json::from_str(t) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if parsed.r#type.as_deref() != Some("assistant") {
-            continue;
-        }
-        let usage = parsed
-            .message
-            .and_then(|m| m.usage)
-            .unwrap_or(MessageUsage {
-                input_tokens: None,
-                output_tokens: None,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-            });
-        if let Some(inp) = usage.input_tokens {
-            let total_in = inp
-                + usage.cache_creation_input_tokens.unwrap_or(0)
-                + usage.cache_read_input_tokens.unwrap_or(0);
-            last_total_in = Some(total_in);
+
+        // First try to parse as JSON
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(t) {
+            // Check for system messages with context warnings (like Python implementation)
+            if parsed.get("type").and_then(|v| v.as_str()) == Some("system_message") {
+                if let Some(content) = parsed.get("content").and_then(|v| v.as_str()) {
+                    // Parse "Context left until auto-compact: X%"
+                    if let Some(caps) = CONTEXT_AUTO_COMPACT_RE.captures(content) {
+                        if let Ok(percent_left) = caps[1].parse::<u32>() {
+                            context_warning_pct = Some(100 - percent_left);
+                        }
+                    }
+                    // Parse "Context low (X% remaining)"
+                    else if let Some(caps) = CONTEXT_LOW_RE.captures(content) {
+                        if let Ok(percent_left) = caps[1].parse::<u32>() {
+                            context_warning_pct = Some(100 - percent_left);
+                        }
+                    }
+                }
+            }
+
+            // Continue with existing assistant message parsing
+            if let Ok(parsed_line) = serde_json::from_value::<TranscriptLine>(parsed) {
+                if parsed_line.r#type.as_deref() == Some("assistant") {
+                    let usage = parsed_line
+                        .message
+                        .and_then(|m| m.usage)
+                        .unwrap_or(MessageUsage {
+                            input_tokens: None,
+                            output_tokens: None,
+                            cache_creation_input_tokens: None,
+                            cache_read_input_tokens: None,
+                        });
+                    if let Some(inp) = usage.input_tokens {
+                        let total_in = inp
+                            + usage.cache_creation_input_tokens.unwrap_or(0)
+                            + usage.cache_read_input_tokens.unwrap_or(0);
+                        last_total_in = Some(total_in);
+                    }
+                }
+            }
         }
     }
 
+    // Prefer token-based calculation if available, fall back to context warning
     if let Some(total_in) = last_total_in {
         let context_limit = context_limit_for_model_display(model_id, model_display_name);
         let pct = ((total_in as f64 / context_limit as f64) * 100.0).round() as u32;
         Some((total_in, pct.min(100)))
+    } else if let Some(warning_pct) = context_warning_pct {
+        // Estimate tokens from percentage (fallback when no token data available)
+        let context_limit = context_limit_for_model_display(model_id, model_display_name);
+        let estimated_tokens = ((warning_pct as f64 / 100.0) * context_limit as f64).round() as u64;
+        Some((estimated_tokens, warning_pct.min(100)))
     } else {
         None
     }
@@ -181,6 +217,38 @@ pub fn calc_context_from_any(
     let limit = context_limit_for_model_display(model_id, model_display_name);
     let pct = ((total_in as f64 / limit as f64) * 100.0).round() as u32;
     Some((total_in, pct.min(100)))
+}
+
+// Additional usage metrics for enhanced tracking
+#[derive(Debug, Clone)]
+pub struct EnhancedMetrics {
+    pub agent_invocations: HashMap<String, u32>,
+    pub compact_summary_count: u32,
+    pub last_compact_time: Option<DateTime<Utc>>,
+    pub tool_correlation_count: usize,
+    pub message_complexity: MessageComplexity,
+}
+
+// Message complexity tracking for accurate session limits
+#[derive(Debug, Clone)]
+pub struct MessageComplexity {
+    pub total_weight: f64,
+    pub message_count: u32,
+    pub short_messages: u32,  // weight < 0.5
+    pub long_messages: u32,   // weight > 2.0
+    pub average_weight: f64,
+}
+
+impl Default for MessageComplexity {
+    fn default() -> Self {
+        Self {
+            total_weight: 0.0,
+            message_count: 0,
+            short_messages: 0,
+            long_messages: 0,
+            average_weight: 1.0,
+        }
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -242,6 +310,13 @@ pub fn scan_usage(
     let mut last_seen_raw: HashMap<String, (u64, u64, u64, u64)> = HashMap::new();
     // Once an id shows non-monotonicity, mark it as delta mode to sum subsequent updates
     let mut force_delta_mode: HashMap<String, bool> = HashMap::new();
+    // Track agent/Task tool invocations for better cost analysis
+    let mut agent_invocations: HashMap<String, u32> = HashMap::new();
+    // Track tool_use blocks for correlation with tool_result (for accurate token counting)
+    let mut tool_use_tokens: HashMap<String, u64> = HashMap::new();
+    // Track compact summaries (when conversations get auto-compacted)
+    let mut compact_summary_count = 0u32;
+    let mut last_compact_time: Option<DateTime<Utc>> = None;
 
     // Optimization: Skip files older than 48 hours by default
     let cutoff_time = if let Ok(hours_str) = env::var("CLAUDE_SCAN_LOOKBACK_HOURS") {
@@ -477,6 +552,83 @@ pub fn scan_usage(
                 {
                     if let Some(src) = v.get("apiKeySource").and_then(|s| s.as_str()) {
                         api_key_source = Some(src.to_string());
+                    }
+                }
+
+                // Track Task/Agent tool invocations and tool_use blocks (from JavaScript implementation)
+                if v.get("type").and_then(|s| s.as_str()) == Some("assistant") {
+                    if let Some(msg) = v.get("message") {
+                        if let Some(content) = msg.get("content") {
+                            if let Some(content_array) = content.as_array() {
+                                for block in content_array {
+                                    if block.get("type").and_then(|s| s.as_str()) == Some("tool_use") {
+                                        // Track all tool_use blocks by ID for correlation
+                                        if let Some(tool_id) = block.get("id").and_then(|s| s.as_str()) {
+                                            // Estimate tokens for tool use (name + input)
+                                            let name_tokens = block.get("name").and_then(|s| s.as_str()).map(|s| s.len() as u64 / 4).unwrap_or(0);
+                                            let input_tokens = block.get("input").map(|v| v.to_string().len() as u64 / 4).unwrap_or(0);
+                                            tool_use_tokens.insert(tool_id.to_string(), name_tokens + input_tokens);
+                                        }
+
+                                        // Special handling for Task tool (agent invocations)
+                                        if block.get("name").and_then(|s| s.as_str()) == Some("Task") {
+                                            if let Some(input) = block.get("input") {
+                                                if let Some(agent_type) = input.get("subagent_type").and_then(|s| s.as_str()) {
+                                                    *agent_invocations.entry(agent_type.to_string()).or_insert(0) += 1;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Track tool_result blocks and correlate with tool_use (for accurate context tracking)
+                if v.get("type").and_then(|s| s.as_str()) == Some("user") {
+                    if let Some(msg) = v.get("message") {
+                        if let Some(content) = msg.get("content") {
+                            if let Some(content_array) = content.as_array() {
+                                for block in content_array {
+                                    if block.get("type").and_then(|s| s.as_str()) == Some("tool_result") {
+                                        if let Some(tool_use_id) = block.get("tool_use_id").and_then(|s| s.as_str()) {
+                                            // Add tool result tokens to the original tool_use tracking
+                                            let result_tokens = block.get("content").map(|v| v.to_string().len() as u64 / 4).unwrap_or(0);
+                                            if let Some(existing) = tool_use_tokens.get_mut(tool_use_id) {
+                                                *existing += result_tokens;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Detect compact summaries (conversation compaction events)
+                if v.get("isCompactSummary").and_then(|b| b.as_bool()) == Some(true) {
+                    compact_summary_count += 1;
+                    if let Some(ts_str) = v.get("timestamp").and_then(|s| s.as_str()) {
+                        if let Ok(ts) = DateTime::parse_from_rfc3339(ts_str) {
+                            last_compact_time = Some(ts.with_timezone(&Utc));
+                        }
+                    }
+                }
+
+                // Also check for compact summary indicators in system messages
+                if v.get("type").and_then(|s| s.as_str()) == Some("system") {
+                    if let Some(content) = v.get("content").and_then(|s| s.as_str()) {
+                        if content.contains("conversation has been compacted") ||
+                           content.contains("auto-compact") ||
+                           content.contains("context has been reset") {
+                            compact_summary_count += 1;
+                            if let Some(ts_str) = v.get("timestamp").and_then(|s| s.as_str()) {
+                                if let Ok(ts) = DateTime::parse_from_rfc3339(ts_str) {
+                                    last_compact_time = Some(ts.with_timezone(&Utc));
+                                }
+                            }
+                        }
                     }
                 }
                 // detect reset time from API error line or other usage-limit messages with pipe+epoch
@@ -885,6 +1037,104 @@ fn normalize_reset_anchor(n: i64) -> i64 {
     } else {
         now + n
     }
+}
+
+// Calculate message complexity weight based on token usage (from JavaScript implementation)
+// Pro plan limits are based on message complexity, not just count
+pub fn calculate_message_weight(entry: &Entry) -> f64 {
+    // Average Claude Code message is ~500 tokens
+    const AVERAGE_MESSAGE_TOKENS: f64 = 500.0;
+
+    // Total tokens for this message
+    let total_tokens = (entry.input + entry.cache_create + entry.cache_read) as f64;
+
+    if total_tokens > 0.0 {
+        // Calculate weight relative to average
+        let weight = total_tokens / AVERAGE_MESSAGE_TOKENS;
+
+        // Cap at reasonable limits (0.1 to 5.0)
+        weight.max(0.1).min(5.0)
+    } else {
+        // Default to average weight if no token data
+        1.0
+    }
+}
+
+// Calculate session message complexity for accurate limit tracking
+pub fn calculate_session_complexity(entries: &[Entry], session_id: &str) -> MessageComplexity {
+    let session_entries: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| e.session_id.as_deref() == Some(session_id))
+        .collect();
+
+    let mut complexity = MessageComplexity::default();
+
+    for entry in session_entries {
+        let weight = calculate_message_weight(entry);
+        complexity.total_weight += weight;
+        complexity.message_count += 1;
+
+        if weight < 0.5 {
+            complexity.short_messages += 1;
+        } else if weight > 2.0 {
+            complexity.long_messages += 1;
+        }
+    }
+
+    if complexity.message_count > 0 {
+        complexity.average_weight = complexity.total_weight / complexity.message_count as f64;
+    }
+
+    complexity
+}
+
+// Detect rapid message exchange patterns for burn rate calculation (from JavaScript implementation)
+pub fn detect_rapid_exchange(entries: &[Entry], session_id: &str, window_minutes: i64) -> (bool, f64) {
+    let now = Utc::now();
+    let window_start = now - Duration::minutes(window_minutes);
+
+    // Filter entries for this session within the window
+    let mut session_entries: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| {
+            e.session_id.as_deref() == Some(session_id) &&
+            e.ts >= window_start
+        })
+        .collect();
+
+    if session_entries.len() < 2 {
+        return (false, 0.0);
+    }
+
+    session_entries.sort_by_key(|e| e.ts);
+
+    // Calculate average time between messages
+    let mut total_gap_minutes = 0.0;
+    let mut gap_count = 0;
+
+    for i in 1..session_entries.len() {
+        let gap = session_entries[i].ts - session_entries[i-1].ts;
+        total_gap_minutes += gap.num_minutes() as f64;
+        gap_count += 1;
+    }
+
+    if gap_count == 0 {
+        return (false, 0.0);
+    }
+
+    let avg_gap_minutes = total_gap_minutes / gap_count as f64;
+
+    // Rapid exchange if average gap is less than 5 minutes
+    let is_rapid = avg_gap_minutes < 5.0;
+
+    // Calculate burn rate (tokens per minute) for the window
+    let total_tokens: u64 = session_entries.iter()
+        .map(|e| e.input + e.output + e.cache_create + e.cache_read)
+        .sum();
+    let window_duration_minutes = (session_entries.last().unwrap().ts - session_entries.first().unwrap().ts).num_minutes().max(1) as f64;
+    let burn_rate = total_tokens as f64 / window_duration_minutes;
+
+    (is_rapid, burn_rate)
 }
 
 
