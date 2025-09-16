@@ -3,9 +3,9 @@
 //! Handles 5-hour window calculations for usage tracking
 
 use crate::models::Entry;
-use crate::usage::{detect_rapid_exchange, calculate_session_complexity};
+use crate::usage::{calculate_session_complexity, detect_rapid_exchange};
 use crate::utils::{sanitized_project_name, WINDOW_DURATION_HOURS, WINDOW_DURATION_SECONDS};
-use chrono::{DateTime, Duration, Local, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Duration, Local, Timelike, Utc};
 
 // Session reset hours in local time: 1am, 7am, 1pm, 7pm (from JavaScript implementation)
 // These align with Claude's actual reset schedule
@@ -17,7 +17,8 @@ pub fn calculate_next_reset(now: DateTime<Utc>) -> DateTime<Utc> {
     let current_hour = local_now.hour();
 
     // Find the next reset hour
-    let next_reset_hour = RESET_HOURS.iter()
+    let next_reset_hour = RESET_HOURS
+        .iter()
         .find(|&&h| h > current_hour)
         .copied()
         .unwrap_or(RESET_HOURS[0]); // Wrap to first reset hour of next day
@@ -26,17 +27,25 @@ pub fn calculate_next_reset(now: DateTime<Utc>) -> DateTime<Utc> {
     let reset_time = if next_reset_hour > current_hour {
         // Reset is later today
         local_now
-            .with_hour(next_reset_hour).unwrap()
-            .with_minute(0).unwrap()
-            .with_second(0).unwrap()
-            .with_nanosecond(0).unwrap()
+            .with_hour(next_reset_hour)
+            .unwrap()
+            .with_minute(0)
+            .unwrap()
+            .with_second(0)
+            .unwrap()
+            .with_nanosecond(0)
+            .unwrap()
     } else {
         // Reset is tomorrow
         (local_now + Duration::days(1))
-            .with_hour(next_reset_hour).unwrap()
-            .with_minute(0).unwrap()
-            .with_second(0).unwrap()
-            .with_nanosecond(0).unwrap()
+            .with_hour(next_reset_hour)
+            .unwrap()
+            .with_minute(0)
+            .unwrap()
+            .with_second(0)
+            .unwrap()
+            .with_nanosecond(0)
+            .unwrap()
     };
 
     reset_time.with_timezone(&Utc)
@@ -48,7 +57,8 @@ pub fn calculate_previous_reset(now: DateTime<Utc>) -> DateTime<Utc> {
     let current_hour = local_now.hour();
 
     // Find the previous reset hour
-    let prev_reset_hour = RESET_HOURS.iter()
+    let prev_reset_hour = RESET_HOURS
+        .iter()
         .rev()
         .find(|&&h| h <= current_hour)
         .copied()
@@ -58,17 +68,25 @@ pub fn calculate_previous_reset(now: DateTime<Utc>) -> DateTime<Utc> {
     let reset_time = if prev_reset_hour <= current_hour {
         // Reset was earlier today
         local_now
-            .with_hour(prev_reset_hour).unwrap()
-            .with_minute(0).unwrap()
-            .with_second(0).unwrap()
-            .with_nanosecond(0).unwrap()
+            .with_hour(prev_reset_hour)
+            .unwrap()
+            .with_minute(0)
+            .unwrap()
+            .with_second(0)
+            .unwrap()
+            .with_nanosecond(0)
+            .unwrap()
     } else {
         // Reset was yesterday
         (local_now - Duration::days(1))
-            .with_hour(prev_reset_hour).unwrap()
-            .with_minute(0).unwrap()
-            .with_second(0).unwrap()
-            .with_nanosecond(0).unwrap()
+            .with_hour(prev_reset_hour)
+            .unwrap()
+            .with_minute(0)
+            .unwrap()
+            .with_second(0)
+            .unwrap()
+            .with_nanosecond(0)
+            .unwrap()
     };
 
     reset_time.with_timezone(&Utc)
@@ -164,7 +182,10 @@ pub fn calculate_window_metrics(
 
     // Aggregate global metrics for block usage (account-wide)
     let web_search_requests: u64 = global_entries.iter().map(|e| e.web_search_requests).sum();
-    let service_tier: Option<String> = global_entries.iter().rev().find_map(|e| e.service_tier.clone());
+    let service_tier: Option<String> = global_entries
+        .iter()
+        .rev()
+        .find_map(|e| e.service_tier.clone());
 
     let mut tokens_input: u64 = 0;
     let mut tokens_output: u64 = 0;
@@ -181,7 +202,8 @@ pub fn calculate_window_metrics(
     // Cost is already computed per entry in usage.rs (including web_search when recomputed);
     // do not add web_search again here to avoid double counting.
 
-    let total_tokens = (tokens_input + tokens_output + tokens_cache_create + tokens_cache_read) as f64;
+    let total_tokens =
+        (tokens_input + tokens_output + tokens_cache_create + tokens_cache_read) as f64;
     let noncache_tokens = (tokens_input + tokens_output) as f64;
 
     // Calculate session-specific burn rate
@@ -273,7 +295,11 @@ pub fn calculate_window_metrics(
         // Default is false (monitor style)
         Err(_) => false,
     };
-    let used_tokens_for_percent = if include_cache { total_tokens } else { noncache_tokens };
+    let used_tokens_for_percent = if include_cache {
+        total_tokens
+    } else {
+        noncache_tokens
+    };
 
     // Use complexity-adjusted burn rate for more accurate projection
     // If we're in rapid exchange mode, use the enhanced rate
@@ -290,8 +316,10 @@ pub fn calculate_window_metrics(
     let projected_tokens = used_tokens_for_percent + projection_tpm * remaining_minutes;
 
     // Calculate usage percentages
-    let usage_percent = plan_max.map(|pm| ((used_tokens_for_percent * 100.0 / pm).max(0.0)).min(100.0));
-    let projected_percent = plan_max.map(|pm| ((projected_tokens * 100.0 / pm).max(0.0)).min(100.0));
+    let usage_percent =
+        plan_max.map(|pm| ((used_tokens_for_percent * 100.0 / pm).max(0.0)).min(100.0));
+    let projected_percent =
+        plan_max.map(|pm| ((projected_tokens * 100.0 / pm).max(0.0)).min(100.0));
 
     WindowMetrics {
         total_cost,
@@ -356,7 +384,7 @@ fn find_session_boundaries(entries: &[Entry], gap_threshold: Duration) -> Vec<Da
     let mut boundaries = Vec::new();
     let mut sorted_entries = entries.to_vec();
     sorted_entries.sort_by_key(|e| e.ts);
-    
+
     for i in 1..sorted_entries.len() {
         let gap = sorted_entries[i].ts - sorted_entries[i - 1].ts;
         if gap >= gap_threshold {
@@ -374,29 +402,26 @@ fn progressive_lookback_block(
     if entries.is_empty() {
         return None;
     }
-    
+
     let session_duration = Duration::hours(WINDOW_DURATION_HOURS as i64);
     let lookback_windows = [
-        Duration::hours(10),  // 2x session duration - catches most cases
-        Duration::hours(24),  // Full day for longer sessions
-        Duration::hours(48),  // Extended sessions
+        Duration::hours(10), // 2x session duration - catches most cases
+        Duration::hours(24), // Full day for longer sessions
+        Duration::hours(48), // Extended sessions
     ];
-    
+
     for lookback in &lookback_windows {
         let cutoff = now_utc - *lookback;
-        let recent_entries: Vec<&Entry> = entries
-            .iter()
-            .filter(|e| e.ts >= cutoff)
-            .collect();
-        
+        let recent_entries: Vec<&Entry> = entries.iter().filter(|e| e.ts >= cutoff).collect();
+
         if recent_entries.is_empty() {
             continue;
         }
-        
+
         // Sort timestamps
         let mut timestamps: Vec<DateTime<Utc>> = recent_entries.iter().map(|e| e.ts).collect();
         timestamps.sort_unstable();
-        
+
         // Find the most recent continuous work session
         let mut continuous_start = *timestamps.last()?;
         for i in (1..timestamps.len()).rev() {
@@ -408,23 +433,24 @@ fn progressive_lookback_block(
             }
             continuous_start = timestamps[i - 1];
         }
-        
+
         // Floor to hour for cleaner boundaries
         let floored_start = floor_to_hour(continuous_start);
-        
+
         // Calculate how long we've been working from the floored start
         let total_work_time = now_utc - floored_start;
-        
+
         // If we've been working for more than one session, find the current block
         let block_start = if total_work_time > session_duration {
-            let completed_blocks = (total_work_time.num_seconds() / session_duration.num_seconds()) as i64;
+            let completed_blocks =
+                (total_work_time.num_seconds() / session_duration.num_seconds()) as i64;
             floored_start + Duration::seconds(completed_blocks * session_duration.num_seconds())
         } else {
             floored_start
         };
-        
+
         let block_end = block_start + session_duration;
-        
+
         // Check if block is still active (activity within session duration)
         if let Some(last_ts) = timestamps.last() {
             if now_utc - *last_ts <= session_duration {
@@ -432,7 +458,7 @@ fn progressive_lookback_block(
             }
         }
     }
-    
+
     None
 }
 
@@ -445,22 +471,22 @@ fn heuristic_active_block_bounds(
     if entries.is_empty() {
         return None;
     }
-    
+
     // Sort entries by timestamp
     let mut sorted_entries = entries.to_vec();
     sorted_entries.sort_by_key(|e| e.ts);
-    
+
     let session_duration = chrono::TimeDelta::hours(WINDOW_DURATION_HOURS);
     let session_duration_ms = session_duration.num_milliseconds();
-    
+
     // Identify session blocks using the same algorithm as claude-powerline-rust
     let mut blocks: Vec<Vec<DateTime<Utc>>> = Vec::new();
     let mut current_block: Vec<DateTime<Utc>> = Vec::new();
     let mut current_block_start: Option<DateTime<Utc>> = None;
-    
+
     for entry in &sorted_entries {
         let entry_time = entry.ts;
-        
+
         match current_block_start {
             None => {
                 // Start first block - floor to the hour
@@ -474,14 +500,16 @@ fn heuristic_active_block_bounds(
                 } else {
                     0
                 };
-                
+
                 // New block starts if: time since block start > 5 hours OR time since last entry > 5 hours
-                if time_since_block_start > session_duration_ms || time_since_last_entry > session_duration_ms {
+                if time_since_block_start > session_duration_ms
+                    || time_since_last_entry > session_duration_ms
+                {
                     // Finalize current block
                     if !current_block.is_empty() {
                         blocks.push(current_block.clone());
                     }
-                    
+
                     // Start new block
                     current_block_start = Some(floor_to_hour(entry_time));
                     current_block = vec![entry_time];
@@ -491,18 +519,18 @@ fn heuristic_active_block_bounds(
             }
         }
     }
-    
+
     // Don't forget the last block
     if !current_block.is_empty() {
         blocks.push(current_block);
     }
-    
+
     // Find the active block (most recent that's still within session duration)
     for block in blocks.iter().rev() {
         if let (Some(first), Some(last)) = (block.first(), block.last()) {
             let block_start = floor_to_hour(*first);
             let block_end = block_start + session_duration;
-            
+
             // Check if block is active: current time within 5 hours of last entry AND before theoretical end
             let time_since_last = now_utc - *last;
             if time_since_last < session_duration && now_utc < block_end {
@@ -510,12 +538,12 @@ fn heuristic_active_block_bounds(
             }
         }
     }
-    
+
     // Fallback: Use progressive lookback if the block-based approach fails
     if let Some(bounds) = progressive_lookback_block(entries, now_utc) {
         return Some(bounds);
     }
-    
+
     // Last resort: rolling 5-hour window ending at 'now'
     let start = now_utc - session_duration;
     Some((start, now_utc))

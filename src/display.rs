@@ -95,8 +95,8 @@ use color_shim::ColorizeShim as OwoColorize;
 use crate::cli::{Args, LabelsArg, TimeFormatArg};
 use crate::models::{Block, GitInfo, HookJson, RateLimitInfo};
 use crate::utils::{
-    context_limit_for_model_display, deduce_provider_from_model, format_currency, format_path,
-    format_tokens,
+    deduce_provider_from_model, format_currency, format_path, format_tokens,
+    system_overhead_tokens, usable_context_limit,
 };
 use crate::window::window_bounds;
 
@@ -447,10 +447,12 @@ pub fn print_text_output(
             let over = rl
                 .overage_resets_at
                 .map(|d| d.with_timezone(&Local))
-                .map(|d| if matches!(args.time_fmt, TimeFormatArg::H12) {
-                    d.format("%I:%M %p").to_string().trim().to_string()
-                } else {
-                    d.format("%H:%M").to_string()
+                .map(|d| {
+                    if matches!(args.time_fmt, TimeFormatArg::H12) {
+                        d.format("%I:%M %p").to_string().trim().to_string()
+                    } else {
+                        d.format("%H:%M").to_string()
+                    }
                 })
                 .unwrap_or_else(|| "n/a".to_string());
             print!(
@@ -471,7 +473,11 @@ pub fn print_text_output(
                 "{}{}{}{} ",
                 "fallback:".bright_black().dimmed(),
                 "available".green(),
-                if pct.is_empty() { "".to_string() } else { " ".to_string() },
+                if pct.is_empty() {
+                    "".to_string()
+                } else {
+                    " ".to_string()
+                },
                 pct
             );
             print!("{} ", "·".bright_black().dimmed());
@@ -611,14 +617,24 @@ pub fn print_text_output(
         } else {
             format!("{}%", pct).green().to_string()
         };
-        print!("{} ({})", format_tokens(tokens), pct_colored);
+        let overhead = system_overhead_tokens();
+        let raw_tokens = tokens.saturating_sub(overhead);
+        if overhead > 0 {
+            print!(
+                "{} +{} sys = {} ({})",
+                format_tokens(raw_tokens),
+                format_tokens(overhead),
+                format_tokens(tokens),
+                pct_colored
+            );
+        } else {
+            print!("{} ({})", format_tokens(tokens), pct_colored);
+        }
 
         if args.hints {
             // Auto-compact hint: when context usage >= 40%, show headroom and ETA to full
             if pct >= 40 {
-                // Use true context limit based on model + display
-                let ctx_limit =
-                    context_limit_for_model_display(model_id, model_display_name) as f64;
+                let ctx_limit = usable_context_limit(model_id, model_display_name) as f64;
                 let headroom_tokens = (ctx_limit - tokens as f64).max(0.0);
                 // Use tpm_indicator (non-cache) to estimate time until context fills
                 if tpm_indicator > 0.0 && headroom_tokens > 0.0 {
@@ -728,7 +744,14 @@ pub fn build_json_output(
     let (ctx_tokens, ctx_pct) = context
         .map(|(t, p)| (Some(t), Some(p)))
         .unwrap_or((None, None));
-    let ctx_limit = context_limit_for_model_display(&hook.model.id, &hook.model.display_name);
+    let ctx_limit = usable_context_limit(&hook.model.id, &hook.model.display_name);
+    let overhead_value = system_overhead_tokens();
+    let overhead_display = if ctx_tokens.is_some() && overhead_value > 0 {
+        Some(overhead_value)
+    } else {
+        None
+    };
+    let ctx_tokens_raw = ctx_tokens.map(|t| t.saturating_sub(overhead_value));
     // Optional headroom and ETA for consumers
     let (context_headroom, context_eta_minutes) = if let Some(toks) = ctx_tokens {
         let head = (ctx_limit as i64 - toks as i64).max(0) as u64;
@@ -850,6 +873,8 @@ pub fn build_json_output(
         "window": block_json,
         "context": {
             "tokens": ctx_tokens,
+            "tokens_raw": ctx_tokens_raw,
+            "system_overhead_tokens": overhead_display,
             "percent": ctx_pct,
             "limit": ctx_limit,
             "source": context_source,

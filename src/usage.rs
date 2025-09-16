@@ -9,7 +9,7 @@
 //! - `calc_context_from_*`: Calculates context window usage from various sources
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Local, Utc, Datelike, Timelike, TimeZone};
+use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Timelike, Utc};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
@@ -22,21 +22,20 @@ use std::path::{Path, PathBuf};
 use crate::models::{Entry, MessageUsage, RateLimitInfo, TranscriptLine};
 // Offline-only: no OAuth/profile lookups here
 use crate::pricing::pricing_for_model;
-use crate::utils::{context_limit_for_model_display, parse_iso_date, sanitized_project_name};
+use crate::utils::{
+    parse_iso_date, sanitized_project_name, system_overhead_tokens, usable_context_limit,
+};
 
 // Helper: detect reset time from assistant text like "... limit reached ... resets 5am" with DST correction
-static ASSISTANT_LIMIT_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)limit\s+reached.*resets\s+(\d{1,2})\s*(am|pm)").unwrap()
-});
+static ASSISTANT_LIMIT_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)limit\s+reached.*resets\s+(\d{1,2})\s*(am|pm)").unwrap());
 
 // Context warning message patterns (from Python implementation)
-static CONTEXT_AUTO_COMPACT_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"Context left until auto-compact: (\d+)%").unwrap()
-});
+static CONTEXT_AUTO_COMPACT_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"Context left until auto-compact: (\d+)%").unwrap());
 
-static CONTEXT_LOW_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"Context low \((\d+)% remaining\)").unwrap()
-});
+static CONTEXT_LOW_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"Context low \((\d+)% remaining\)").unwrap());
 
 fn parse_am_pm_reset(ts_utc: DateTime<Utc>, text: &str) -> Option<DateTime<Utc>> {
     let caps = ASSISTANT_LIMIT_RE.captures(text)?;
@@ -47,15 +46,26 @@ fn parse_am_pm_reset(ts_utc: DateTime<Utc>, text: &str) -> Option<DateTime<Utc>>
         return None;
     }
     let hour24: u32 = if ampm == "am" {
-        if base_hour == 12 { 0 } else { base_hour }
+        if base_hour == 12 {
+            0
+        } else {
+            base_hour
+        }
     } else {
-        if base_hour == 12 { 12 } else { (base_hour + 12) % 24 }
+        if base_hour == 12 {
+            12
+        } else {
+            (base_hour + 12) % 24
+        }
     };
     // Convert ts to local
     let ts_local = ts_utc.with_timezone(&Local);
     // Construct same-day local time at the given hour
     let mut same_day = ts_local
-        .with_hour(hour24)?.with_minute(0)?.with_second(0)?.with_nanosecond(0)?;
+        .with_hour(hour24)?
+        .with_minute(0)?
+        .with_second(0)?
+        .with_nanosecond(0)?;
 
     // Optional DST correction (for historical Claude Code bug where reset hour was shown in standard time).
     // Enable by setting CLAUDE_RESET_ASSUME_STANDARD_TIME=1
@@ -152,10 +162,13 @@ pub fn calc_context_from_transcript(
                             cache_creation_input_tokens: None,
                             cache_read_input_tokens: None,
                         });
-                    if let Some(inp) = usage.input_tokens {
-                        let total_in = inp
-                            + usage.cache_creation_input_tokens.unwrap_or(0)
-                            + usage.cache_read_input_tokens.unwrap_or(0);
+                    let inp = usage.input_tokens.unwrap_or(0);
+                    let out = usage.output_tokens.unwrap_or(0);
+                    let total_in = inp
+                        + out
+                        + usage.cache_creation_input_tokens.unwrap_or(0)
+                        + usage.cache_read_input_tokens.unwrap_or(0);
+                    if total_in > 0 {
                         last_total_in = Some(total_in);
                     }
                 }
@@ -164,14 +177,26 @@ pub fn calc_context_from_transcript(
     }
 
     // Prefer token-based calculation if available, fall back to context warning
+    let budget = usable_context_limit(model_id, model_display_name);
     if let Some(total_in) = last_total_in {
-        let context_limit = context_limit_for_model_display(model_id, model_display_name);
-        let pct = ((total_in as f64 / context_limit as f64) * 100.0).round() as u32;
-        Some((total_in, pct.min(100)))
+        let overhead = system_overhead_tokens();
+        let adjusted = total_in.saturating_add(overhead);
+        let pct = if budget == 0 {
+            if adjusted == 0 {
+                0
+            } else {
+                100
+            }
+        } else {
+            ((adjusted as f64 / budget as f64) * 100.0).round() as u32
+        };
+        Some((adjusted, pct.min(100)))
     } else if let Some(warning_pct) = context_warning_pct {
-        // Estimate tokens from percentage (fallback when no token data available)
-        let context_limit = context_limit_for_model_display(model_id, model_display_name);
-        let estimated_tokens = ((warning_pct as f64 / 100.0) * context_limit as f64).round() as u64;
+        let estimated_tokens = if budget == 0 {
+            0
+        } else {
+            ((warning_pct as f64 / 100.0) * budget as f64).round() as u64
+        };
         Some((estimated_tokens, warning_pct.min(100)))
     } else {
         None
@@ -193,11 +218,20 @@ pub fn calc_context_from_entries(
     }
     filtered.sort_by_key(|e| e.ts);
     let last = filtered.last()?;
-    // Exclude output; context is input + cache tokens only
-    let total_in = last.input + last.cache_create + last.cache_read;
-    let limit = context_limit_for_model_display(model_id, model_display_name);
-    let pct = ((total_in as f64 / limit as f64) * 100.0).round() as u32;
-    Some((total_in, pct.min(100)))
+    let total_in = last.input + last.output + last.cache_create + last.cache_read;
+    let overhead = system_overhead_tokens();
+    let adjusted = total_in.saturating_add(overhead);
+    let limit = usable_context_limit(model_id, model_display_name);
+    let pct = if limit == 0 {
+        if adjusted == 0 {
+            0
+        } else {
+            100
+        }
+    } else {
+        ((adjusted as f64 / limit as f64) * 100.0).round() as u32
+    };
+    Some((adjusted, pct.min(100)))
 }
 
 // Fallback: compute context from the most recent entry regardless of session.
@@ -212,11 +246,20 @@ pub fn calc_context_from_any(
     let mut sorted: Vec<&Entry> = entries.iter().collect();
     sorted.sort_by_key(|e| e.ts);
     let last = sorted.last()?;
-    // Exclude output; context is input + cache tokens only
-    let total_in = last.input + last.cache_create + last.cache_read;
-    let limit = context_limit_for_model_display(model_id, model_display_name);
-    let pct = ((total_in as f64 / limit as f64) * 100.0).round() as u32;
-    Some((total_in, pct.min(100)))
+    let total_in = last.input + last.output + last.cache_create + last.cache_read;
+    let overhead = system_overhead_tokens();
+    let adjusted = total_in.saturating_add(overhead);
+    let limit = usable_context_limit(model_id, model_display_name);
+    let pct = if limit == 0 {
+        if adjusted == 0 {
+            0
+        } else {
+            100
+        }
+    } else {
+        ((adjusted as f64 / limit as f64) * 100.0).round() as u32
+    };
+    Some((adjusted, pct.min(100)))
 }
 
 // Additional usage metrics for enhanced tracking
@@ -234,8 +277,8 @@ pub struct EnhancedMetrics {
 pub struct MessageComplexity {
     pub total_weight: f64,
     pub message_count: u32,
-    pub short_messages: u32,  // weight < 0.5
-    pub long_messages: u32,   // weight > 2.0
+    pub short_messages: u32, // weight < 0.5
+    pub long_messages: u32,  // weight > 2.0
     pub average_weight: f64,
 }
 
@@ -266,8 +309,9 @@ pub fn scan_usage(
     Option<RateLimitInfo>,
 )> {
     // Check cache first
-    if let Some((cached_entries, cached_today_cost, cached_reset, cached_api_key)) = 
-        crate::cache::get_cached_usage(session_id, project_dir) {
+    if let Some((cached_entries, cached_today_cost, cached_reset, cached_api_key)) =
+        crate::cache::get_cached_usage(session_id, project_dir)
+    {
         // Calculate session cost from cached entries
         let session_cost = cached_entries
             .iter()
@@ -292,7 +336,7 @@ pub fn scan_usage(
             }),
         ));
     }
-    
+
     let today = Local::now().date_naive();
     let mut session_cost = 0.0f64;
     // Prefer precise session cost from SDK result messages when available.
@@ -315,8 +359,8 @@ pub fn scan_usage(
     // Track tool_use blocks for correlation with tool_result (for accurate token counting)
     let mut tool_use_tokens: HashMap<String, u64> = HashMap::new();
     // Track compact summaries (when conversations get auto-compacted)
-    let mut compact_summary_count = 0u32;
-    let mut last_compact_time: Option<DateTime<Utc>> = None;
+    let mut _compact_summary_count = 0u32;
+    let mut _last_compact_time: Option<DateTime<Utc>> = None;
 
     // Optimization: Skip files older than 48 hours by default
     let cutoff_time = if let Ok(hours_str) = env::var("CLAUDE_SCAN_LOOKBACK_HOURS") {
@@ -344,7 +388,7 @@ pub fn scan_usage(
                 Err(_) => continue,
             };
             let path = entry.path().to_path_buf();
-            
+
             // File mtime optimization: skip old files
             if let Ok(metadata) = fs::metadata(&path) {
                 if let Ok(modified) = metadata.modified() {
@@ -354,7 +398,7 @@ pub fn scan_usage(
                     }
                 }
             }
-            
+
             let file = match File::open(&path) {
                 Ok(f) => f,
                 Err(_) => continue,
@@ -373,8 +417,6 @@ pub fn scan_usage(
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-
-                
 
                 // Capture precise cost from SDK result messages for this session
                 if v.get("type").and_then(|s| s.as_str()) == Some("result") {
@@ -437,11 +479,14 @@ pub fn scan_usage(
                                                 }
                                             } else if let Some(base) = tsd_for_limits {
                                                 if let Some(dt) = parse_am_pm_reset(base, text) {
-                                                    if latest_reset.map(|x| dt > x).unwrap_or(true) {
+                                                    if latest_reset.map(|x| dt > x).unwrap_or(true)
+                                                    {
                                                         latest_reset = Some(dt);
                                                     }
                                                 }
-                                            } else if let Some(dt) = parse_am_pm_reset(Utc::now(), text) {
+                                            } else if let Some(dt) =
+                                                parse_am_pm_reset(Utc::now(), text)
+                                            {
                                                 if latest_reset.map(|x| dt > x).unwrap_or(true) {
                                                     latest_reset = Some(dt);
                                                 }
@@ -561,20 +606,41 @@ pub fn scan_usage(
                         if let Some(content) = msg.get("content") {
                             if let Some(content_array) = content.as_array() {
                                 for block in content_array {
-                                    if block.get("type").and_then(|s| s.as_str()) == Some("tool_use") {
+                                    if block.get("type").and_then(|s| s.as_str())
+                                        == Some("tool_use")
+                                    {
                                         // Track all tool_use blocks by ID for correlation
-                                        if let Some(tool_id) = block.get("id").and_then(|s| s.as_str()) {
+                                        if let Some(tool_id) =
+                                            block.get("id").and_then(|s| s.as_str())
+                                        {
                                             // Estimate tokens for tool use (name + input)
-                                            let name_tokens = block.get("name").and_then(|s| s.as_str()).map(|s| s.len() as u64 / 4).unwrap_or(0);
-                                            let input_tokens = block.get("input").map(|v| v.to_string().len() as u64 / 4).unwrap_or(0);
-                                            tool_use_tokens.insert(tool_id.to_string(), name_tokens + input_tokens);
+                                            let name_tokens = block
+                                                .get("name")
+                                                .and_then(|s| s.as_str())
+                                                .map(|s| s.len() as u64 / 4)
+                                                .unwrap_or(0);
+                                            let input_tokens = block
+                                                .get("input")
+                                                .map(|v| v.to_string().len() as u64 / 4)
+                                                .unwrap_or(0);
+                                            tool_use_tokens.insert(
+                                                tool_id.to_string(),
+                                                name_tokens + input_tokens,
+                                            );
                                         }
 
                                         // Special handling for Task tool (agent invocations)
-                                        if block.get("name").and_then(|s| s.as_str()) == Some("Task") {
+                                        if block.get("name").and_then(|s| s.as_str())
+                                            == Some("Task")
+                                        {
                                             if let Some(input) = block.get("input") {
-                                                if let Some(agent_type) = input.get("subagent_type").and_then(|s| s.as_str()) {
-                                                    *agent_invocations.entry(agent_type.to_string()).or_insert(0) += 1;
+                                                if let Some(agent_type) = input
+                                                    .get("subagent_type")
+                                                    .and_then(|s| s.as_str())
+                                                {
+                                                    *agent_invocations
+                                                        .entry(agent_type.to_string())
+                                                        .or_insert(0) += 1;
                                                 }
                                             }
                                         }
@@ -591,11 +657,20 @@ pub fn scan_usage(
                         if let Some(content) = msg.get("content") {
                             if let Some(content_array) = content.as_array() {
                                 for block in content_array {
-                                    if block.get("type").and_then(|s| s.as_str()) == Some("tool_result") {
-                                        if let Some(tool_use_id) = block.get("tool_use_id").and_then(|s| s.as_str()) {
+                                    if block.get("type").and_then(|s| s.as_str())
+                                        == Some("tool_result")
+                                    {
+                                        if let Some(tool_use_id) =
+                                            block.get("tool_use_id").and_then(|s| s.as_str())
+                                        {
                                             // Add tool result tokens to the original tool_use tracking
-                                            let result_tokens = block.get("content").map(|v| v.to_string().len() as u64 / 4).unwrap_or(0);
-                                            if let Some(existing) = tool_use_tokens.get_mut(tool_use_id) {
+                                            let result_tokens = block
+                                                .get("content")
+                                                .map(|v| v.to_string().len() as u64 / 4)
+                                                .unwrap_or(0);
+                                            if let Some(existing) =
+                                                tool_use_tokens.get_mut(tool_use_id)
+                                            {
                                                 *existing += result_tokens;
                                             }
                                         }
@@ -608,10 +683,10 @@ pub fn scan_usage(
 
                 // Detect compact summaries (conversation compaction events)
                 if v.get("isCompactSummary").and_then(|b| b.as_bool()) == Some(true) {
-                    compact_summary_count += 1;
+                    _compact_summary_count += 1;
                     if let Some(ts_str) = v.get("timestamp").and_then(|s| s.as_str()) {
                         if let Ok(ts) = DateTime::parse_from_rfc3339(ts_str) {
-                            last_compact_time = Some(ts.with_timezone(&Utc));
+                            _last_compact_time = Some(ts.with_timezone(&Utc));
                         }
                     }
                 }
@@ -619,13 +694,14 @@ pub fn scan_usage(
                 // Also check for compact summary indicators in system messages
                 if v.get("type").and_then(|s| s.as_str()) == Some("system") {
                     if let Some(content) = v.get("content").and_then(|s| s.as_str()) {
-                        if content.contains("conversation has been compacted") ||
-                           content.contains("auto-compact") ||
-                           content.contains("context has been reset") {
-                            compact_summary_count += 1;
+                        if content.contains("conversation has been compacted")
+                            || content.contains("auto-compact")
+                            || content.contains("context has been reset")
+                        {
+                            _compact_summary_count += 1;
                             if let Some(ts_str) = v.get("timestamp").and_then(|s| s.as_str()) {
                                 if let Ok(ts) = DateTime::parse_from_rfc3339(ts_str) {
-                                    last_compact_time = Some(ts.with_timezone(&Utc));
+                                    _last_compact_time = Some(ts.with_timezone(&Utc));
                                 }
                             }
                         }
@@ -692,8 +768,12 @@ pub fn scan_usage(
                                                 }
                                             }
                                         }
-                                    } else if let Some(ts_s) = v.get("timestamp").and_then(|s| s.as_str()) {
-                                        if let Ok(b) = DateTime::parse_from_rfc3339(ts_s).map(|d| d.with_timezone(&Utc)) {
+                                    } else if let Some(ts_s) =
+                                        v.get("timestamp").and_then(|s| s.as_str())
+                                    {
+                                        if let Ok(b) = DateTime::parse_from_rfc3339(ts_s)
+                                            .map(|d| d.with_timezone(&Utc))
+                                        {
                                             if let Some(dt) = parse_am_pm_reset(b, text) {
                                                 if latest_reset.map(|x| dt > x).unwrap_or(true) {
                                                     latest_reset = Some(dt);
@@ -996,11 +1076,16 @@ pub fn scan_usage(
         latest_reset,
         api_key_source.clone(),
     );
-    
+
     // Persist log-derived reset too so we don't need to re-probe until after expiry
     if let Some(dt) = latest_reset {
         let prev = read_persisted_reset_state();
-        if prev.as_ref().and_then(|p| p.reset_at).map(|p| p < dt).unwrap_or(true) {
+        if prev
+            .as_ref()
+            .and_then(|p| p.reset_at)
+            .map(|p| p < dt)
+            .unwrap_or(true)
+        {
             let prev_last_checked = prev.as_ref().and_then(|p| p.last_checked);
             let prev_status = prev.as_ref().and_then(|p| p.status.as_deref());
             let prev_fallback = prev.as_ref().and_then(|p| p.fallback.as_deref());
@@ -1089,17 +1174,18 @@ pub fn calculate_session_complexity(entries: &[Entry], session_id: &str) -> Mess
 }
 
 // Detect rapid message exchange patterns for burn rate calculation (from JavaScript implementation)
-pub fn detect_rapid_exchange(entries: &[Entry], session_id: &str, window_minutes: i64) -> (bool, f64) {
+pub fn detect_rapid_exchange(
+    entries: &[Entry],
+    session_id: &str,
+    window_minutes: i64,
+) -> (bool, f64) {
     let now = Utc::now();
     let window_start = now - Duration::minutes(window_minutes);
 
     // Filter entries for this session within the window
     let mut session_entries: Vec<&Entry> = entries
         .iter()
-        .filter(|e| {
-            e.session_id.as_deref() == Some(session_id) &&
-            e.ts >= window_start
-        })
+        .filter(|e| e.session_id.as_deref() == Some(session_id) && e.ts >= window_start)
         .collect();
 
     if session_entries.len() < 2 {
@@ -1113,7 +1199,7 @@ pub fn detect_rapid_exchange(entries: &[Entry], session_id: &str, window_minutes
     let mut gap_count = 0;
 
     for i in 1..session_entries.len() {
-        let gap = session_entries[i].ts - session_entries[i-1].ts;
+        let gap = session_entries[i].ts - session_entries[i - 1].ts;
         total_gap_minutes += gap.num_minutes() as f64;
         gap_count += 1;
     }
@@ -1128,15 +1214,18 @@ pub fn detect_rapid_exchange(entries: &[Entry], session_id: &str, window_minutes
     let is_rapid = avg_gap_minutes < 5.0;
 
     // Calculate burn rate (tokens per minute) for the window
-    let total_tokens: u64 = session_entries.iter()
+    let total_tokens: u64 = session_entries
+        .iter()
         .map(|e| e.input + e.output + e.cache_create + e.cache_read)
         .sum();
-    let window_duration_minutes = (session_entries.last().unwrap().ts - session_entries.first().unwrap().ts).num_minutes().max(1) as f64;
+    let window_duration_minutes = (session_entries.last().unwrap().ts
+        - session_entries.first().unwrap().ts)
+        .num_minutes()
+        .max(1) as f64;
     let burn_rate = total_tokens as f64 / window_duration_minutes;
 
     (is_rapid, burn_rate)
 }
-
 
 // --- Persisted reset state (on-disk), used only for log-derived anchors ---
 
@@ -1160,15 +1249,45 @@ fn read_persisted_reset_state() -> Option<ResetState> {
     let p = reset_state_path()?;
     let txt = std::fs::read_to_string(&p).ok()?;
     let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
-    let reset_at = v.get("reset_at").and_then(|x| x.as_i64()).and_then(|e| chrono::DateTime::<chrono::Utc>::from_timestamp(e, 0));
-    let last_checked = v.get("last_checked").and_then(|x| x.as_i64()).and_then(|e| chrono::DateTime::<chrono::Utc>::from_timestamp(e, 0));
-    let status = v.get("status").and_then(|x| x.as_str()).map(|s| s.to_string());
-    let fallback = v.get("fallback").and_then(|x| x.as_str()).map(|s| s.to_string());
-    let rate_limit_type = v.get("rate_limit_type").and_then(|x| x.as_str()).map(|s| s.to_string());
-    let overage_status = v.get("overage_status").and_then(|x| x.as_str()).map(|s| s.to_string());
-    let overage_resets_at = v.get("overage_resets_at").and_then(|x| x.as_i64()).and_then(|e| chrono::DateTime::<chrono::Utc>::from_timestamp(e, 0));
+    let reset_at = v
+        .get("reset_at")
+        .and_then(|x| x.as_i64())
+        .and_then(|e| chrono::DateTime::<chrono::Utc>::from_timestamp(e, 0));
+    let last_checked = v
+        .get("last_checked")
+        .and_then(|x| x.as_i64())
+        .and_then(|e| chrono::DateTime::<chrono::Utc>::from_timestamp(e, 0));
+    let status = v
+        .get("status")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let fallback = v
+        .get("fallback")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let rate_limit_type = v
+        .get("rate_limit_type")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let overage_status = v
+        .get("overage_status")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let overage_resets_at = v
+        .get("overage_resets_at")
+        .and_then(|x| x.as_i64())
+        .and_then(|e| chrono::DateTime::<chrono::Utc>::from_timestamp(e, 0));
     let fallback_percentage = v.get("fallback_percentage").and_then(|x| x.as_f64());
-    Some(ResetState { reset_at, last_checked, status, fallback, rate_limit_type, overage_status, overage_resets_at, fallback_percentage })
+    Some(ResetState {
+        reset_at,
+        last_checked,
+        status,
+        fallback,
+        rate_limit_type,
+        overage_status,
+        overage_resets_at,
+        fallback_percentage,
+    })
 }
 
 fn write_persisted_reset_state(
@@ -1182,7 +1301,9 @@ fn write_persisted_reset_state(
     fallback_percentage: Option<f64>,
 ) {
     if let Some(p) = reset_state_path() {
-        if let Some(dir) = p.parent() { let _ = std::fs::create_dir_all(dir); }
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
         let obj = serde_json::json!({
             "reset_at": reset_at.map(|d| d.timestamp()),
             "last_checked": last_checked.map(|d| d.timestamp()),

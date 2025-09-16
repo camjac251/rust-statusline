@@ -167,6 +167,61 @@ pub fn context_limit_for_model_display(model_id: &str, display_name: &str) -> u6
     200_000
 }
 
+const DEFAULT_OUTPUT_RESERVE: u64 = 32_000;
+const SMALL_MODEL_OUTPUT_RESERVE: u64 = 8_192;
+const DEFAULT_AUTOCOMPACT_HEADROOM: u64 = 13_000;
+
+fn parse_bool_env(var: &str) -> bool {
+    if let Ok(val) = env::var(var) {
+        let trimmed = val.trim();
+        trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+    } else {
+        false
+    }
+}
+
+fn parse_u64_env(var: &str) -> Option<u64> {
+    env::var(var)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+}
+
+pub fn reserved_output_tokens_for_model(model_id: &str) -> u64 {
+    let lower = model_id.to_lowercase();
+    if lower.contains("3-5") || lower.contains("haiku") {
+        return SMALL_MODEL_OUTPUT_RESERVE;
+    }
+    if let Some(val) = parse_u64_env("CLAUDE_CODE_MAX_OUTPUT_TOKENS") {
+        if val == 0 {
+            return DEFAULT_OUTPUT_RESERVE;
+        }
+        return val.min(DEFAULT_OUTPUT_RESERVE);
+    }
+    DEFAULT_OUTPUT_RESERVE
+}
+
+pub fn auto_compact_enabled() -> bool {
+    parse_bool_env("CLAUDE_AUTO_COMPACT_ENABLED")
+}
+
+pub fn auto_compact_headroom_tokens() -> u64 {
+    parse_u64_env("CLAUDE_AUTO_COMPACT_HEADROOM").unwrap_or(DEFAULT_AUTOCOMPACT_HEADROOM)
+}
+
+pub fn system_overhead_tokens() -> u64 {
+    parse_u64_env("CLAUDE_SYSTEM_OVERHEAD").unwrap_or(0)
+}
+
+pub fn usable_context_limit(model_id: &str, display_name: &str) -> u64 {
+    let base = context_limit_for_model_display(model_id, display_name);
+    let reserve = reserved_output_tokens_for_model(model_id);
+    let mut usable = base.saturating_sub(reserve);
+    if auto_compact_enabled() {
+        usable = usable.saturating_sub(auto_compact_headroom_tokens());
+    }
+    usable
+}
+
 pub fn sanitized_project_name(project_dir: &str) -> String {
     project_dir
         .chars()
@@ -592,9 +647,18 @@ mod tests {
         assert_eq!(auto_detect_plan_tier(200_000.0), Some("pro".to_string()));
         assert_eq!(auto_detect_plan_tier(200_001.0), Some("max5x".to_string()));
         assert_eq!(auto_detect_plan_tier(500_000.0), Some("max5x".to_string()));
-        assert_eq!(auto_detect_plan_tier(1_000_000.0), Some("max5x".to_string()));
-        assert_eq!(auto_detect_plan_tier(1_000_001.0), Some("max20x".to_string()));
-        assert_eq!(auto_detect_plan_tier(2_000_000.0), Some("max20x".to_string()));
+        assert_eq!(
+            auto_detect_plan_tier(1_000_000.0),
+            Some("max5x".to_string())
+        );
+        assert_eq!(
+            auto_detect_plan_tier(1_000_001.0),
+            Some("max20x".to_string())
+        );
+        assert_eq!(
+            auto_detect_plan_tier(2_000_000.0),
+            Some("max20x".to_string())
+        );
     }
 
     #[test]
