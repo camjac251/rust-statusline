@@ -40,6 +40,9 @@ pub mod pricing;
 /// Usage tracking and block identification
 pub mod usage;
 
+/// Online usage limits retrieved from the Claude OAuth API
+pub mod usage_api;
+
 /// Utility functions for paths, formatting, and time
 pub mod utils;
 

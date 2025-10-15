@@ -114,7 +114,7 @@ pub fn calc_context_from_transcript(
     model_display_name: &str,
 ) -> Option<(u64, u32)> {
     // Stream the file line-by-line to avoid loading entire transcripts into memory.
-    // Keep the last assistant message with usage; sum input + cache* only (exclude output from context window).
+    // Keep the last assistant message with usage; sum input + output + cache* to mirror Claude CLI totals.
     let file = File::open(transcript_path).ok()?;
     let reader = BufReader::new(file);
     let mut last_total_in: Option<u64> = None;

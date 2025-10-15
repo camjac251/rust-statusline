@@ -26,37 +26,42 @@ fn test_output_style_in_json() {
 
     let json: Value = build_json_output(
         &hook_with_style,
-        0.0,  // session_cost
-        0.0,  // today_cost
-        0.0,  // total_cost
-        0.0,  // total_tokens
-        0.0,  // noncache_tokens
-        0,    // input tokens
-        0,    // output tokens
-        0,    // cache_create tokens
-        0,    // cache_read tokens
-        0,    // sess input
-        0,    // sess output
-        0,    // sess cache_create
-        0,    // sess cache_read
-        0,    // web_search_requests
-        None, // service_tier
-        None, // usage_percent
-        None, // projected_percent
-        0.0,  // remaining_minutes
-        None, // active_block
-        None, // latest_reset
-        0.0,  // tpm
-        0.0,  // tpm_indicator
-        0.0,  // session_nc_tpm
-        0.0,  // global_nc_tpm
-        0.0,  // cost_per_hour
-        None, // context
-        None, // context_source
-        None, // api_key_source
-        None, // plan_tier
-        None, // plan_max
-        None, // git_info
+        0.0,                    // session_cost
+        0.0,                    // today_cost
+        0.0,                    // total_cost
+        0.0,                    // total_tokens
+        0.0,                    // noncache_tokens
+        0,                      // input tokens
+        0,                      // output tokens
+        0,                      // cache_create tokens
+        0,                      // cache_read tokens
+        0,                      // sess input
+        0,                      // sess output
+        0,                      // sess cache_create
+        0,                      // sess cache_read
+        0,                      // web_search_requests
+        None,                   // service_tier
+        None,                   // usage_percent
+        None,                   // projected_percent
+        0.0,                    // remaining_minutes
+        None,                   // active_block
+        None,                   // latest_reset
+        0.0,                    // tpm
+        0.0,                    // tpm_indicator
+        0.0,                    // session_nc_tpm
+        0.0,                    // global_nc_tpm
+        0.0,                    // cost_per_hour
+        None,                   // context
+        None,                   // context_source
+        None,                   // api_key_source
+        None,                   // plan_tier
+        None,                   // plan_max
+        None,                   // git_info
+        None,                   // rate_limit
+        None,                   // oauth_org_type
+        None,                   // oauth_rate_tier
+        "inferred".to_string(), // plan_source
+        None,                   // usage_limits
     );
 
     // Verify output_style is present in JSON
@@ -83,37 +88,42 @@ fn test_output_style_in_json() {
 
     let json_no_style: Value = build_json_output(
         &hook_without_style,
-        0.0,  // session_cost
-        0.0,  // today_cost
-        0.0,  // total_cost
-        0.0,  // total_tokens
-        0.0,  // noncache_tokens
-        0,    // input tokens
-        0,    // output tokens
-        0,    // cache_create tokens
-        0,    // cache_read tokens
-        0,    // sess input
-        0,    // sess output
-        0,    // sess cache_create
-        0,    // sess cache_read
-        0,    // web_search_requests
-        None, // service_tier
-        None, // usage_percent
-        None, // projected_percent
-        0.0,  // remaining_minutes
-        None, // active_block
-        None, // latest_reset
-        0.0,  // tpm
-        0.0,  // tpm_indicator
-        0.0,  // session_nc_tpm
-        0.0,  // global_nc_tpm
-        0.0,  // cost_per_hour
-        None, // context
-        None, // context_source
-        None, // api_key_source
-        None, // plan_tier
-        None, // plan_max
-        None, // git_info
+        0.0,                    // session_cost
+        0.0,                    // today_cost
+        0.0,                    // total_cost
+        0.0,                    // total_tokens
+        0.0,                    // noncache_tokens
+        0,                      // input tokens
+        0,                      // output tokens
+        0,                      // cache_create tokens
+        0,                      // cache_read tokens
+        0,                      // sess input
+        0,                      // sess output
+        0,                      // sess cache_create
+        0,                      // sess cache_read
+        0,                      // web_search_requests
+        None,                   // service_tier
+        None,                   // usage_percent
+        None,                   // projected_percent
+        0.0,                    // remaining_minutes
+        None,                   // active_block
+        None,                   // latest_reset
+        0.0,                    // tpm
+        0.0,                    // tpm_indicator
+        0.0,                    // session_nc_tpm
+        0.0,                    // global_nc_tpm
+        0.0,                    // cost_per_hour
+        None,                   // context
+        None,                   // context_source
+        None,                   // api_key_source
+        None,                   // plan_tier
+        None,                   // plan_max
+        None,                   // git_info
+        None,                   // rate_limit
+        None,                   // oauth_org_type
+        None,                   // oauth_rate_tier
+        "inferred".to_string(), // plan_source
+        None,                   // usage_limits
     );
 
     // Verify output_style is null when not present
@@ -145,37 +155,43 @@ fn test_multiple_output_styles() {
         };
 
         let json: Value = build_json_output(
-            &hook, 0.0,  // session_cost
-            0.0,  // today_cost
-            0.0,  // total_cost
-            0.0,  // total_tokens
-            0.0,  // noncache_tokens
-            0,    // input tokens
-            0,    // output tokens
-            0,    // cache_create tokens
-            0,    // cache_read tokens
-            0,    // sess input
-            0,    // sess output
-            0,    // sess cache_create
-            0,    // sess cache_read
-            0,    // web_search_requests
-            None, // service_tier
-            None, // usage_percent
-            None, // projected_percent
-            0.0,  // remaining_minutes
-            None, // active_block
-            None, // latest_reset
-            0.0,  // tpm
-            0.0,  // tpm_indicator
-            0.0,  // session_nc_tpm
-            0.0,  // global_nc_tpm
-            0.0,  // cost_per_hour
-            None, // context
-            None, // context_source
-            None, // api_key_source
-            None, // plan_tier
-            None, // plan_max
-            None, // git_info
+            &hook,
+            0.0,                    // session_cost
+            0.0,                    // today_cost
+            0.0,                    // total_cost
+            0.0,                    // total_tokens
+            0.0,                    // noncache_tokens
+            0,                      // input tokens
+            0,                      // output tokens
+            0,                      // cache_create tokens
+            0,                      // cache_read tokens
+            0,                      // sess input
+            0,                      // sess output
+            0,                      // sess cache_create
+            0,                      // sess cache_read
+            0,                      // web_search_requests
+            None,                   // service_tier
+            None,                   // usage_percent
+            None,                   // projected_percent
+            0.0,                    // remaining_minutes
+            None,                   // active_block
+            None,                   // latest_reset
+            0.0,                    // tpm
+            0.0,                    // tpm_indicator
+            0.0,                    // session_nc_tpm
+            0.0,                    // global_nc_tpm
+            0.0,                    // cost_per_hour
+            None,                   // context
+            None,                   // context_source
+            None,                   // api_key_source
+            None,                   // plan_tier
+            None,                   // plan_max
+            None,                   // git_info
+            None,                   // rate_limit
+            None,                   // oauth_org_type
+            None,                   // oauth_rate_tier
+            "inferred".to_string(), // plan_source
+            None,                   // usage_limits
         );
 
         assert_eq!(

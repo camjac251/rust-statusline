@@ -5,10 +5,9 @@ use std::path::PathBuf;
 
 use crate::cli::{Args, PlanProfileArg, PlanTierArg};
 
-// Default 5-hour base tokens for Pro. Many ccusage users operate with 250k as the
-// effective base; Max tiers are derived as 5x and 20x. You can override via
+// Default 5-hour base tokens for Pro. Max tiers are derived as 5x and 20x. You can override via
 // CLAUDE_5H_BASE_TOKENS or set a hard numeric with CLAUDE_PLAN_MAX_TOKENS.
-pub const BASE_TOKEN_LIMIT: f64 = 250_000.0;
+pub const BASE_TOKEN_LIMIT: f64 = 200_000.0;
 pub const WINDOW_DURATION_HOURS: i64 = 5;
 pub const WINDOW_DURATION_SECONDS: i64 = WINDOW_DURATION_HOURS * 60 * 60;
 
@@ -167,8 +166,8 @@ pub fn context_limit_for_model_display(model_id: &str, display_name: &str) -> u6
     200_000
 }
 
-const DEFAULT_OUTPUT_RESERVE: u64 = 32_000;
-const SMALL_MODEL_OUTPUT_RESERVE: u64 = 8_192;
+const DEFAULT_OUTPUT_RESERVE: u64 = 0;
+const SMALL_MODEL_OUTPUT_RESERVE: u64 = 0;
 const DEFAULT_AUTOCOMPACT_HEADROOM: u64 = 13_000;
 
 fn parse_bool_env(var: &str) -> bool {

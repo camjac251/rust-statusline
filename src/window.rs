@@ -202,6 +202,14 @@ pub fn calculate_window_metrics(
     // Cost is already computed per entry in usage.rs (including web_search when recomputed);
     // do not add web_search again here to avoid double counting.
 
+    if matches!(window_scope, WindowScope::Project) {
+        tokens_input = window_entries.iter().map(|e| e.input).sum();
+        tokens_output = window_entries.iter().map(|e| e.output).sum();
+        tokens_cache_create = window_entries.iter().map(|e| e.cache_create).sum();
+        tokens_cache_read = window_entries.iter().map(|e| e.cache_read).sum();
+        total_cost = window_entries.iter().map(|e| e.cost).sum();
+    }
+
     let total_tokens =
         (tokens_input + tokens_output + tokens_cache_create + tokens_cache_read) as f64;
     let noncache_tokens = (tokens_input + tokens_output) as f64;
@@ -275,9 +283,47 @@ pub fn calculate_window_metrics(
     // Adjust tpm based on message complexity (heavier messages burn faster)
     let complexity_adjusted_tpm = adjusted_session_tpm * complexity.average_weight;
 
+    // Recent activity (last 30 minutes) to smooth projections and burn indicators
+    let recent_cutoff = now_utc - chrono::TimeDelta::minutes(30);
+    let mut recent_input: u64 = 0;
+    let mut recent_output: u64 = 0;
+    let mut recent_first: Option<DateTime<Utc>> = None;
+    let mut recent_last: Option<DateTime<Utc>> = None;
+    for e in &window_entries {
+        if e.ts >= recent_cutoff {
+            recent_input += e.input;
+            recent_output += e.output;
+            recent_first = Some(match recent_first {
+                Some(existing) => existing.min(e.ts),
+                None => e.ts,
+            });
+            recent_last = Some(match recent_last {
+                Some(existing) => existing.max(e.ts),
+                None => e.ts,
+            });
+        }
+    }
+    let recent_duration_minutes = match (recent_first, recent_last) {
+        (Some(first), Some(last)) if last > first => {
+            ((last - first).num_seconds().max(0) as f64) / 60.0
+        }
+        _ => 0.0,
+    };
+    let recent_nc_tpm = if recent_duration_minutes >= 5.0 {
+        (recent_input as f64 + recent_output as f64) / recent_duration_minutes
+    } else {
+        0.0
+    };
+
     let tpm_indicator = match burn_scope {
         BurnScope::Session => complexity_adjusted_tpm,
-        BurnScope::Global => global_nc_tpm,
+        BurnScope::Global => {
+            if recent_nc_tpm > 0.0 {
+                recent_nc_tpm
+            } else {
+                global_nc_tpm
+            }
+        }
     };
 
     let cost_per_hour = if duration_minutes_global > 0.0 {
@@ -308,6 +354,8 @@ pub fn calculate_window_metrics(
         complexity_adjusted_tpm
     } else if include_cache {
         tpm
+    } else if recent_nc_tpm > 0.0 {
+        recent_nc_tpm
     } else {
         global_nc_tpm
     };
@@ -318,8 +366,7 @@ pub fn calculate_window_metrics(
     // Calculate usage percentages
     let usage_percent =
         plan_max.map(|pm| ((used_tokens_for_percent * 100.0 / pm).max(0.0)).min(100.0));
-    let projected_percent =
-        plan_max.map(|pm| ((projected_tokens * 100.0 / pm).max(0.0)).min(100.0));
+    let projected_percent = plan_max.map(|pm| (projected_tokens * 100.0 / pm).max(0.0));
 
     WindowMetrics {
         total_cost,

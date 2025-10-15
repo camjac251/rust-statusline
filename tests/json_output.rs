@@ -55,6 +55,11 @@ fn json_output_shape_minimal() {
         Some("pro".to_string()), // plan_tier
         Some(200_000.0),         // plan_max
         None,                    // git_info
+        None,                    // rate_limit
+        None,                    // oauth_org_type
+        None,                    // oauth_rate_tier
+        "inferred".to_string(),  // plan_source
+        None,                    // usage_limits
     );
 
     // High-level keys exist
@@ -94,6 +99,9 @@ fn json_output_shape_minimal() {
 
     // Context section present
     assert!(json["context"]["limit"].is_number());
+
+    // Usage limits include extended buckets
+    assert!(json["usage_limits"].is_null() || json["usage_limits"].is_object());
 }
 
 #[test]
@@ -130,7 +138,7 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         0,
         0,
         0,
-        0,    // web_search_requests
+        0, // web_search_requests
         None,
         None,
         None,
@@ -147,6 +155,11 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         None,
         None,
         None,
+        None,
+        None,
+        None,
+        None,
+        "inferred".to_string(),
         None,
     );
 

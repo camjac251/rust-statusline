@@ -94,11 +94,31 @@ use color_shim::ColorizeShim as OwoColorize;
 
 use crate::cli::{Args, LabelsArg, TimeFormatArg};
 use crate::models::{Block, GitInfo, HookJson, RateLimitInfo};
+use crate::usage_api::{UsageLimit, UsageSummary};
 use crate::utils::{
     deduce_provider_from_model, format_currency, format_path, format_tokens,
     system_overhead_tokens, usable_context_limit,
 };
 use crate::window::window_bounds;
+
+fn colorize_percent(pct: f64) -> String {
+    if pct >= 95.0 {
+        format!("{pct:.1}%").red().bold().to_string()
+    } else if pct >= 80.0 {
+        format!("{pct:.1}%").yellow().bold().to_string()
+    } else {
+        format!("{pct:.1}%").green().to_string()
+    }
+}
+
+fn usage_limit_json(limit: &UsageLimit) -> serde_json::Value {
+    serde_json::json!({
+        "utilization": limit.utilization.map(|v| (v * 10.0).round() / 10.0),
+        "used": limit.used,
+        "remaining": limit.remaining,
+        "resets_at": limit.resets_at.map(|d| d.to_rfc3339()),
+    })
+}
 
 fn is_truecolor_enabled(args: &Args) -> bool {
     if let Ok(v) = env::var("CLAUDE_TRUECOLOR") {
@@ -276,6 +296,7 @@ pub fn print_text_output(
     session_cost_per_hour: Option<f64>,
     lines_delta: Option<(i64, i64)>,
     rate_limit: Option<&RateLimitInfo>,
+    usage_limits: Option<&UsageSummary>,
 ) {
     // Line 2
     print!("{} ", "❯".bright_cyan());
@@ -335,53 +356,111 @@ pub fn print_text_output(
     );
     print!("{} ", "·".bright_black().dimmed());
 
+    let use_12h = match args.time_fmt {
+        TimeFormatArg::H12 => true,
+        TimeFormatArg::H24 => false,
+        TimeFormatArg::Auto => {
+            if let Ok(forced) = env::var("CLAUDE_TIME_FORMAT") {
+                forced.trim() == "12"
+            } else {
+                let lc = env::var("LC_TIME")
+                    .or_else(|_| env::var("LANG"))
+                    .unwrap_or_default()
+                    .to_lowercase();
+                lc.contains("en_us")
+            }
+        }
+    };
+
     // usage (only if a plan/window max is configured)
-    if let (Some(usage_percent), Some(projected_percent)) = (usage_percent, projected_percent) {
-        let usage_colored = if usage_percent >= 95.0 {
-            format!("{:.1}%", usage_percent).red().bold().to_string()
-        } else if usage_percent >= 80.0 {
-            format!("{:.1}%", usage_percent).yellow().bold().to_string()
-        } else {
-            format!("{:.1}%", usage_percent).green().to_string()
-        };
-        let proj_colored = if projected_percent >= 95.0 {
-            format!("{:.1}%", projected_percent)
-                .red()
-                .bold()
-                .to_string()
-        } else if projected_percent >= 80.0 {
-            format!("{:.1}%", projected_percent)
-                .yellow()
-                .bold()
-                .to_string()
-        } else {
-            format!("{:.1}%", projected_percent).green().to_string()
-        };
+    if let Some(usage_value) = usage_percent {
+        let usage_colored = colorize_percent(usage_value);
         // Also show remaining percentage for clarity (what's left in window)
-        let left = (100.0 - usage_percent).max(0.0);
+        let left = (100.0 - usage_value).max(0.0);
         let left_colored = if left <= 5.0 {
-            format!("{:.1}%", left).red().bold().to_string()
+            format!("{left:.1}%").red().bold().to_string()
         } else if left <= 20.0 {
-            format!("{:.1}%", left).yellow().bold().to_string()
+            format!("{left:.1}%").yellow().bold().to_string()
         } else {
-            format!("{:.1}%", left).green().to_string()
+            format!("{left:.1}%").green().to_string()
         };
-        print!(
-            "{}{}{}{} {}{} ",
-            "usage:".bright_black().dimmed(),
-            usage_colored,
-            "→".bright_black().dimmed(),
-            proj_colored,
-            "left:".bright_black().dimmed(),
-            left_colored
-        );
+
+        if let Some(projected_value) = projected_percent {
+            let proj_colored = colorize_percent(projected_value);
+            print!(
+                "{}{}{}{} {}{} ",
+                "usage:".bright_black().dimmed(),
+                usage_colored,
+                "→".bright_black().dimmed(),
+                proj_colored,
+                "left:".bright_black().dimmed(),
+                left_colored
+            );
+        } else {
+            print!(
+                "{}{} {}{} ",
+                "usage:".bright_black().dimmed(),
+                usage_colored,
+                "left:".bright_black().dimmed(),
+                left_colored
+            );
+        }
+
+        if let Some(summary) = usage_limits {
+            let mut segments: Vec<String> = Vec::new();
+            if let Some(pct) = summary.seven_day.utilization {
+                let label = if long_labels { "weekly:" } else { "7d:" };
+                segments.push(format!(
+                    "{}{}",
+                    label.bright_black().dimmed(),
+                    colorize_percent(pct)
+                ));
+            }
+            if let Some(pct) = summary.seven_day_opus.utilization {
+                segments.push(format!(
+                    "{}{}",
+                    "opus:".bright_black().dimmed(),
+                    colorize_percent(pct)
+                ));
+            }
+            if !segments.is_empty() {
+                print!("{} ", "·".bright_black().dimmed());
+                let separator = format!(" {} ", "·".bright_black().dimmed());
+                let joined = segments.join(&separator);
+                print!("{} ", joined);
+            }
+
+            if args.hints {
+                if let Some(reset) = summary.seven_day.resets_at {
+                    let local = reset.with_timezone(&Local);
+                    let fmt = if use_12h { "%a %-I:%M %p" } else { "%a %H:%M" };
+                    print!(
+                        "{}{} ",
+                        "7d↻:".bright_black().dimmed(),
+                        local.format(fmt).to_string().white()
+                    );
+                    print!("{} ", "·".bright_black().dimmed());
+                }
+                if let Some(reset) = summary.seven_day_opus.resets_at {
+                    let local = reset.with_timezone(&Local);
+                    let fmt = if use_12h { "%a %-I:%M %p" } else { "%a %H:%M" };
+                    print!(
+                        "{}{} ",
+                        "opus↻:".bright_black().dimmed(),
+                        local.format(fmt).to_string().white()
+                    );
+                    print!("{} ", "·".bright_black().dimmed());
+                }
+            }
+        }
+
         print!("{} ", "·".bright_black().dimmed());
 
         if args.hints {
             // Approaching limit hint 
             // Show a friendly warning and a nudge to try /model when near cap
             let is_opus = model_id.to_lowercase().contains("opus");
-            if usage_percent >= 95.0 {
+            if usage_value >= 95.0 {
                 let label = if is_opus {
                     "Opus usage limit"
                 } else {
@@ -394,7 +473,7 @@ pub fn print_text_output(
                     "/model best".bright_white().bold()
                 );
                 print!("{} ", "·".bright_black().dimmed());
-            } else if usage_percent >= 80.0 {
+            } else if usage_value >= 80.0 {
                 let label = if is_opus {
                     "Opus usage limit"
                 } else {
@@ -666,7 +745,12 @@ pub fn print_text_output(
             }
         }
     } else {
-        print!("{}", "N/A".bright_black().dimmed());
+        print!(
+            "{}{} ",
+            "usage:".bright_black().dimmed(),
+            "N/A".bright_black().dimmed()
+        );
+        print!("{} ", "·".bright_black().dimmed());
     }
     // Optional: show delta lines when available and non-zero
     if let Some((added, removed)) = lines_delta {
@@ -727,6 +811,7 @@ pub fn build_json_output(
     oauth_org_type: Option<String>,
     oauth_rate_tier: Option<String>,
     plan_source: String,
+    usage_limits: Option<&UsageSummary>,
 ) -> serde_json::Value {
     // Provider from env or deduced from model id
     let provider_env = env::var("CLAUDE_PROVIDER").ok().map(|s| {
@@ -840,6 +925,15 @@ pub fn build_json_output(
             (None, None, None, None, None)
         };
 
+    let usage_limits_value = usage_limits.map(|summary| {
+        serde_json::json!({
+            "five_hour": usage_limit_json(&summary.window),
+            "seven_day": usage_limit_json(&summary.seven_day),
+            "seven_day_opus": usage_limit_json(&summary.seven_day_opus),
+            "seven_day_oauth_apps": usage_limit_json(&summary.seven_day_oauth_apps),
+        })
+    });
+
     serde_json::json!({
         "model": {"id": hook.model.id.clone(), "display_name": hook.model.display_name.clone()},
         "cwd": hook.workspace.current_dir.clone(),
@@ -881,6 +975,7 @@ pub fn build_json_output(
             "headroom_tokens": context_headroom,
             "eta_minutes": context_eta_minutes
         },
+        "usage_limits": usage_limits_value,
         "rate_limit": rate_limit.as_ref().map(|rl| serde_json::json!({
             "status": rl.status,
             "resets_at": rl.resets_at.map(|d| d.to_rfc3339()),
@@ -943,6 +1038,7 @@ pub fn print_json_output(
     oauth_org_type: Option<String>,
     oauth_rate_tier: Option<String>,
     plan_source: String,
+    usage_limits: Option<&UsageSummary>,
 ) -> anyhow::Result<()> {
     let json = build_json_output(
         hook,
@@ -981,6 +1077,7 @@ pub fn print_json_output(
         oauth_org_type,
         oauth_rate_tier,
         plan_source,
+        usage_limits,
     );
     println!("{}", serde_json::to_string(&json)?);
     Ok(())
