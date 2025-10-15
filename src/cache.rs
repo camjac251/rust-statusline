@@ -20,7 +20,8 @@ struct CacheEntry {
 }
 
 /// Global cache for parsed JSONL data
-static USAGE_CACHE: Lazy<Mutex<HashMap<String, CacheEntry>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static USAGE_CACHE: Lazy<Mutex<HashMap<String, CacheEntry>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Default cache TTL in seconds
 const CACHE_TTL_SECONDS: i64 = 60;
@@ -40,10 +41,10 @@ pub fn get_cached_usage(
 ) -> Option<(Vec<Entry>, f64, Option<DateTime<Utc>>, Option<String>)> {
     let key = make_cache_key(session_id, project_dir);
     let now = Utc::now();
-    
+
     let cache = USAGE_CACHE.lock().ok()?;
     let entry = cache.get(&key)?;
-    
+
     if entry.expires_at > now {
         Some((
             entry.entries.clone(),
@@ -70,14 +71,14 @@ pub fn cache_usage(
         .ok()
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(CACHE_TTL_SECONDS);
-    
+
     let expires_at = Utc::now() + Duration::seconds(ttl);
-    
+
     if let Ok(mut cache) = USAGE_CACHE.lock() {
         // Clean up expired entries while we have the lock
         let now = Utc::now();
         cache.retain(|_, entry| entry.expires_at > now);
-        
+
         // Add new entry
         cache.insert(
             key,

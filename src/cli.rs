@@ -114,7 +114,7 @@ pub struct Args {
     /// Window scope: global|project (default: global)
     #[arg(long, value_enum, default_value_t = WindowScopeArg::Global)]
     pub window_scope: WindowScopeArg,
-    
+
     /// Debug mode: show detailed calculation information
     #[arg(long, env = "CLAUDE_DEBUG")]
     pub debug: bool,
@@ -124,7 +124,6 @@ pub struct Args {
     /// log uses heuristic log-derived 5-hour blocks (monitor-style)
     #[arg(long, value_enum, default_value_t = WindowAnchorArg::Log)]
     pub window_anchor: WindowAnchorArg,
-
     // OAuth/API options removed for offline-only mode
 }
 

@@ -24,4 +24,3 @@ impl RateLimitInfo {
             && self.is_using_overage.is_none()
     }
 }
-

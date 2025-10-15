@@ -66,7 +66,7 @@ static PRICING_CONFIG: Lazy<Option<PricingConfig>> = Lazy::new(|| {
         Path::new("./pricing.json"),
         Path::new("pricing.json"),
     ];
-    
+
     for path in paths {
         if path.exists() {
             if let Ok(contents) = fs::read_to_string(path) {
@@ -76,7 +76,7 @@ static PRICING_CONFIG: Lazy<Option<PricingConfig>> = Lazy::new(|| {
             }
         }
     }
-    
+
     // Try from CLAUDE_PRICING_PATH environment variable
     if let Ok(custom_path) = env::var("CLAUDE_PRICING_PATH") {
         if let Ok(contents) = fs::read_to_string(&custom_path) {
@@ -85,7 +85,7 @@ static PRICING_CONFIG: Lazy<Option<PricingConfig>> = Lazy::new(|| {
             }
         }
     }
-    
+
     None
 });
 
@@ -93,7 +93,7 @@ static PRICING_CONFIG: Lazy<Option<PricingConfig>> = Lazy::new(|| {
 fn pricing_from_config(model_id: &str) -> Option<Pricing> {
     let config = PRICING_CONFIG.as_ref()?;
     let m = model_id.to_lowercase();
-    
+
     // Try exact match first
     if let Some(model_pricing) = config.models.get(&m) {
         return Some(Pricing {
@@ -103,7 +103,7 @@ fn pricing_from_config(model_id: &str) -> Option<Pricing> {
             cache_read_per_tok: model_pricing.cache_read,
         });
     }
-    
+
     // Try partial matches
     for (key, model_pricing) in &config.models {
         if m.contains(key) || key.contains(&m) {
@@ -115,7 +115,7 @@ fn pricing_from_config(model_id: &str) -> Option<Pricing> {
             });
         }
     }
-    
+
     None
 }
 
@@ -175,8 +175,8 @@ pub(crate) fn static_pricing_lookup(model_id: &str) -> Option<Pricing> {
     // Claude 3.5 Haiku ()
     if m.contains("3-5-haiku") {
         return Some(Pricing {
-            in_per_tok: 0.8e-6,      // $0.8 / 1M
-            out_per_tok: 4.0e-6,     // $4 / 1M
+            in_per_tok: 0.8e-6,  // $0.8 / 1M
+            out_per_tok: 4.0e-6, // $4 / 1M
             cache_create_per_tok: 1.0e-6,
             cache_read_per_tok: 0.08e-6,
         });
@@ -186,7 +186,7 @@ pub(crate) fn static_pricing_lookup(model_id: &str) -> Option<Pricing> {
 
 pub fn pricing_for_model(model_id: &str) -> Option<Pricing> {
     let m = model_id.to_lowercase();
-    
+
     // Priority 1: Environment variable overrides (when all four are provided)
     if let (Ok(gi), Ok(go), Ok(gc), Ok(gr)) = (
         env::var("CLAUDE_PRICE_INPUT").map(|s| s.parse::<f64>()),
@@ -203,17 +203,17 @@ pub fn pricing_for_model(model_id: &str) -> Option<Pricing> {
             });
         }
     }
-    
+
     // Priority 2: External pricing.json config
     if let Some(p) = pricing_from_config(&m) {
         return Some(p);
     }
-    
+
     // Priority 3: Built-in static pricing
     if let Some(p) = static_pricing_lookup(&m) {
         return Some(p);
     }
-    
+
     // Priority 4: Family heuristics fallback
     if m.contains("opus") {
         let in_pt = 15e-6; // $15 / 1M

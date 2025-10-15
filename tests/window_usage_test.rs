@@ -58,7 +58,8 @@ fn usage_percent_uses_noncache_tokens_and_projection_uses_global_nc_tpm() {
     assert!((up - expected_usage).abs() < 1e-6);
 
     // Projected percent uses global_nc_tpm and remaining minutes
-    let projected_nc = noncache + metrics.global_nc_tpm * metrics.remaining_minutes;
+    let projected_nc =
+        (noncache + metrics.global_nc_tpm * metrics.remaining_minutes).min(plan_max.unwrap());
     let expected_proj = projected_nc * 100.0 / plan_max.unwrap();
     let pp = metrics.projected_percent.unwrap();
     assert!((pp - expected_proj).abs() < 1e-6);

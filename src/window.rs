@@ -237,7 +237,7 @@ pub fn calculate_window_metrics(
     // Global duration/burn (account-wide)
     let duration_minutes_global = if global_entries.len() >= 2 {
         match (global_entries.first(), global_entries.last()) {
-            (Some(first), Some(last)) => ((last.ts - first.ts).num_seconds().max(0) as f64) / 60.0,
+            (Some(first), Some(last)) => ((last.ts - first.ts).num_seconds().max(60) as f64) / 60.0,
             _ => 0.0,
         }
     } else {
@@ -245,7 +245,7 @@ pub fn calculate_window_metrics(
     };
 
     let duration_minutes_session = match (session_first, session_last) {
-        (Some(f), Some(l)) => ((l - f).num_seconds().max(0) as f64) / 60.0,
+        (Some(f), Some(l)) => ((l - f).num_seconds().max(60) as f64) / 60.0,
         _ => 0.0,
     };
 
@@ -305,25 +305,27 @@ pub fn calculate_window_metrics(
     }
     let recent_duration_minutes = match (recent_first, recent_last) {
         (Some(first), Some(last)) if last > first => {
-            ((last - first).num_seconds().max(0) as f64) / 60.0
+            ((last - first).num_seconds().max(60) as f64) / 60.0
         }
         _ => 0.0,
     };
-    let recent_nc_tpm = if recent_duration_minutes >= 5.0 {
+    let recent_nc_tpm = if recent_duration_minutes >= 1.0 {
         (recent_input as f64 + recent_output as f64) / recent_duration_minutes
     } else {
         0.0
     };
 
-    let tpm_indicator = match burn_scope {
-        BurnScope::Session => complexity_adjusted_tpm,
-        BurnScope::Global => {
-            if recent_nc_tpm > 0.0 {
-                recent_nc_tpm
-            } else {
-                global_nc_tpm
-            }
-        }
+    let blended_nc_tpm = if recent_nc_tpm > 0.0 && global_nc_tpm > 0.0 {
+        let weight = (recent_duration_minutes / 30.0).clamp(0.0, 1.0);
+        let candidate = weight * recent_nc_tpm + (1.0 - weight) * global_nc_tpm;
+        let max_factor = 3.0;
+        candidate
+            .min(global_nc_tpm * max_factor)
+            .max(global_nc_tpm / max_factor)
+    } else if recent_nc_tpm > 0.0 {
+        recent_nc_tpm
+    } else {
+        global_nc_tpm
     };
 
     let cost_per_hour = if duration_minutes_global > 0.0 {
@@ -347,21 +349,46 @@ pub fn calculate_window_metrics(
         noncache_tokens
     };
 
+    let plan_cap_per_min = plan_max.and_then(|pm| {
+        if remaining_minutes > 0.0 {
+            Some(((pm - used_tokens_for_percent).max(0.0)) / remaining_minutes)
+        } else {
+            Some(0.0)
+        }
+    });
+
+    let mut tpm_indicator = match burn_scope {
+        BurnScope::Session => complexity_adjusted_tpm,
+        BurnScope::Global => blended_nc_tpm,
+    };
+    if let Some(cap) = plan_cap_per_min {
+        if cap.is_finite() && cap > 0.0 {
+            tpm_indicator = tpm_indicator.min(cap);
+        }
+    }
+
     // Use complexity-adjusted burn rate for more accurate projection
     // If we're in rapid exchange mode, use the enhanced rate
-    let projection_tpm = if is_rapid {
+    let mut projection_tpm = if is_rapid {
         // During rapid exchange, use the complexity-adjusted session rate for projection
         complexity_adjusted_tpm
     } else if include_cache {
         tpm
-    } else if recent_nc_tpm > 0.0 {
-        recent_nc_tpm
     } else {
-        global_nc_tpm
+        blended_nc_tpm
     };
+    if let Some(cap) = plan_cap_per_min {
+        if cap.is_finite() && cap > 0.0 {
+            projection_tpm = projection_tpm.min(cap);
+        }
+    }
 
     // Project tokens based on current burn rate and remaining time
-    let projected_tokens = used_tokens_for_percent + projection_tpm * remaining_minutes;
+    let projected_tokens = if let Some(pm) = plan_max {
+        (used_tokens_for_percent + projection_tpm * remaining_minutes).min(pm)
+    } else {
+        used_tokens_for_percent + projection_tpm * remaining_minutes
+    };
 
     // Calculate usage percentages
     let usage_percent =
