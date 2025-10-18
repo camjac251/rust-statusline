@@ -62,14 +62,11 @@ fn test_window_metrics_calculation() {
         None,
         WindowScope::Global,
         BurnScope::Session,
-        Some(200_000.0),
     );
 
     assert_eq!(metrics.tokens_input, 7500);
     assert_eq!(metrics.tokens_output, 3750);
     assert_eq!(metrics.total_cost, 0.75);
-    assert!(metrics.usage_percent.is_some());
-    assert!(metrics.projected_percent.is_some());
 }
 
 #[test]
@@ -102,7 +99,6 @@ fn test_window_scope_project_filtering() {
         None,
         WindowScope::Project,
         BurnScope::Session,
-        None,
     );
 
     // Should only include first entry
@@ -139,7 +135,6 @@ fn test_burn_scope_session_vs_global() {
         None,
         WindowScope::Global,
         BurnScope::Session,
-        None,
     );
 
     let global_metrics = calculate_window_metrics(
@@ -150,7 +145,6 @@ fn test_burn_scope_session_vs_global() {
         None,
         WindowScope::Global,
         BurnScope::Global,
-        None,
     );
 
     // Session burn should be different from global burn
@@ -183,7 +177,6 @@ fn test_reset_anchor_window_calculation() {
         Some(reset),
         WindowScope::Global,
         BurnScope::Session,
-        None,
     );
 
     // Only the second entry should be included (after reset)
@@ -204,38 +197,9 @@ fn test_empty_entries() {
         None,
         WindowScope::Global,
         BurnScope::Session,
-        Some(100_000.0),
     );
 
     assert_eq!(metrics.total_cost, 0.0);
     assert_eq!(metrics.total_tokens, 0.0);
     assert_eq!(metrics.tpm, 0.0);
-    assert_eq!(metrics.usage_percent, Some(0.0));
-}
-
-#[test]
-fn test_usage_percentage_calculation() {
-    let now = Utc::now();
-    let entries = vec![create_test_entry(
-        now - chrono::Duration::hours(2),
-        50_000,
-        25_000,
-        5.0,
-        "session1",
-    )];
-
-    let metrics = calculate_window_metrics(
-        &entries,
-        "session1",
-        None,
-        now,
-        None,
-        WindowScope::Global,
-        BurnScope::Session,
-        Some(200_000.0), // Plan max
-    );
-
-    // 75,000 non-cache tokens out of 200,000 = 37.5%
-    assert_eq!(metrics.usage_percent, Some(37.5));
-    assert!(metrics.projected_percent.unwrap() >= 37.5);
 }

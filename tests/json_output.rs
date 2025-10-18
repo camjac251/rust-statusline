@@ -52,13 +52,10 @@ fn json_output_shape_minimal() {
         Some((12345, 6)), // context
         Some("transcript"),
         Some("env".to_string()), // api_key_source
-        Some("pro".to_string()), // plan_tier
-        Some(200_000.0),         // plan_max
         None,                    // git_info
         None,                    // rate_limit
         None,                    // oauth_org_type
         None,                    // oauth_rate_tier
-        "inferred".to_string(),  // plan_source
         None,                    // usage_limits
         None,                    // sessions_info
     );
@@ -70,7 +67,6 @@ fn json_output_shape_minimal() {
         "project_dir",
         "version",
         "provider",
-        "plan",
         "reset_at",
         "session",
         "today",
@@ -158,9 +154,6 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         None,
         None,
         None,
-        None,
-        None,
-        "inferred".to_string(),
         None,
         None, // sessions_info
     );

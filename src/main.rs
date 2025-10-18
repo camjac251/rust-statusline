@@ -13,9 +13,7 @@ use claude_statusline::usage::{
     calc_context_from_any, calc_context_from_entries, calc_context_from_transcript, scan_usage,
 };
 use claude_statusline::usage_api::{get_usage_summary, UsageSummary};
-use claude_statusline::utils::{
-    auto_detect_plan_tier, claude_paths, read_stdin, resolve_plan_config,
-};
+use claude_statusline::utils::{claude_paths, read_stdin};
 use claude_statusline::window::{calculate_window_metrics, BurnScope, WindowScope};
 
 fn main() -> Result<()> {
@@ -99,8 +97,6 @@ fn main() -> Result<()> {
     }
 
     // Plan resolution: CLI args override env; max_tokens overrides tier. Offline-only: no API calls.
-    let (mut plan_tier_final, mut plan_max) = resolve_plan_config(&args);
-    let plan_source = "inferred".to_string();
     let oauth_org_type: Option<String> = None;
     let oauth_rate_tier: Option<String> = None;
 
@@ -120,7 +116,7 @@ fn main() -> Result<()> {
         BurnScopeArg::Global => BurnScope::Global,
     };
 
-    let mut metrics = calculate_window_metrics(
+    let metrics = calculate_window_metrics(
         &entries,
         &hook.session_id,
         hook.workspace.project_dir.as_deref(),
@@ -128,38 +124,12 @@ fn main() -> Result<()> {
         latest_reset,
         window_scope,
         burn_scope,
-        plan_max,
     );
 
-    // Auto-detect plan tier if not configured (and not set via OAuth), based on actual usage
-    if plan_tier_final.is_none() && metrics.noncache_tokens > 0.0 {
-        if let Some(detected_tier) = auto_detect_plan_tier(metrics.noncache_tokens) {
-            plan_tier_final = Some(detected_tier.clone());
-            // Set appropriate max tokens for detected tier
-            plan_max = match detected_tier.as_str() {
-                "max20x" => Some(claude_statusline::utils::five_hour_base_tokens() * 20.0),
-                "max5x" => Some(claude_statusline::utils::five_hour_base_tokens() * 5.0),
-                "pro" => Some(claude_statusline::utils::five_hour_base_tokens()),
-                _ => None,
-            };
-
-            // Recalculate metrics with the detected plan_max to get correct usage percentages
-            metrics = calculate_window_metrics(
-                &entries,
-                &hook.session_id,
-                hook.workspace.project_dir.as_deref(),
-                now_utc,
-                latest_reset,
-                window_scope,
-                burn_scope,
-                plan_max,
-            );
-        }
-    }
-
+    // Get OAuth usage data (replaces legacy plan tier system)
     let usage_summary: Option<UsageSummary> = get_usage_summary();
-    let mut usage_percent_display = metrics.usage_percent;
-    let projected_percent_display = metrics.projected_percent;
+    let mut usage_percent_display = None;
+    let projected_percent_display = None;
     let mut remaining_minutes_display = metrics.remaining_minutes;
     let mut latest_reset_effective = latest_reset;
 
@@ -201,10 +171,6 @@ fn main() -> Result<()> {
 
     if args.json {
         // Machine-readable output for statusline consumption
-        // Use the resolved/detected plan configuration
-        let plan_tier_json = plan_tier_final.clone();
-        let plan_max_json = plan_max;
-
         // Construct an active block descriptor for JSON start/end fields
         let (wb_start, wb_end) =
             claude_statusline::window::window_bounds(now_utc, latest_reset_effective);
@@ -249,13 +215,10 @@ fn main() -> Result<()> {
             context,
             context_source,
             api_key_source,
-            plan_tier_json,
-            plan_max_json,
             git_info,
             rate_limit_info.as_ref(),
             oauth_org_type,
             oauth_rate_tier,
-            plan_source,
             usage_summary.as_ref(),
             sessions_info.as_ref(),
         )?;
@@ -361,7 +324,6 @@ fn main() -> Result<()> {
                 "Burn rates: session={:.1}/m, global={:.1}/m",
                 metrics.session_nc_tpm, metrics.global_nc_tpm
             );
-            eprintln!("Plan: tier={:?}, max={:?} tokens", args.plan_tier, plan_max);
             eprintln!("Files scanned: cutoff=48h (env: CLAUDE_SCAN_LOOKBACK_HOURS)");
             #[cfg(feature = "git")]
             if let Some(ref git) = git_info {

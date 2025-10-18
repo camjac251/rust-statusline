@@ -115,8 +115,6 @@ pub struct WindowMetrics {
     pub global_nc_tpm: f64,
     pub cost_per_hour: f64,
     pub remaining_minutes: f64,
-    pub usage_percent: Option<f64>,
-    pub projected_percent: Option<f64>,
 }
 
 /// Scope for window calculations
@@ -143,7 +141,6 @@ pub fn calculate_window_metrics(
     latest_reset: Option<DateTime<Utc>>,
     window_scope: WindowScope,
     burn_scope: BurnScope,
-    plan_max: Option<f64>,
 ) -> WindowMetrics {
     // Calculate window start and end: prefer provider reset anchor; otherwise use
     // a heuristic active-block finder similar to ccstatusline/claude-powerline.
@@ -336,64 +333,10 @@ pub fn calculate_window_metrics(
 
     let remaining_minutes = ((end - now_utc).num_minutes()).max(0) as f64;
     // Usage percent reflects account-level (global) consumption against cap.
-    // By default, align with Claude Code Usage Monitor style: EXCLUDE cache tokens from percent.
-    // You can opt-in to including cache tokens by setting CLAUDE_USAGE_INCLUDE_CACHE=1/true.
-    let include_cache = match std::env::var("CLAUDE_USAGE_INCLUDE_CACHE") {
-        Ok(v) => v != "0" && v.to_lowercase() != "false",
-        // Default is false (monitor style)
-        Err(_) => false,
-    };
-    let used_tokens_for_percent = if include_cache {
-        total_tokens
-    } else {
-        noncache_tokens
-    };
-
-    let plan_cap_per_min = plan_max.and_then(|pm| {
-        if remaining_minutes > 0.0 {
-            Some(((pm - used_tokens_for_percent).max(0.0)) / remaining_minutes)
-        } else {
-            Some(0.0)
-        }
-    });
-
-    let mut tpm_indicator = match burn_scope {
+    let tpm_indicator = match burn_scope {
         BurnScope::Session => complexity_adjusted_tpm,
         BurnScope::Global => blended_nc_tpm,
     };
-    if let Some(cap) = plan_cap_per_min {
-        if cap.is_finite() && cap > 0.0 {
-            tpm_indicator = tpm_indicator.min(cap);
-        }
-    }
-
-    // Use complexity-adjusted burn rate for more accurate projection
-    // If we're in rapid exchange mode, use the enhanced rate
-    let mut projection_tpm = if is_rapid {
-        // During rapid exchange, use the complexity-adjusted session rate for projection
-        complexity_adjusted_tpm
-    } else if include_cache {
-        tpm
-    } else {
-        blended_nc_tpm
-    };
-    if let Some(cap) = plan_cap_per_min {
-        if cap.is_finite() && cap > 0.0 {
-            projection_tpm = projection_tpm.min(cap);
-        }
-    }
-
-    // Project tokens based on current burn rate and remaining time
-    let projected_tokens = if let Some(pm) = plan_max {
-        (used_tokens_for_percent + projection_tpm * remaining_minutes).min(pm)
-    } else {
-        used_tokens_for_percent + projection_tpm * remaining_minutes
-    };
-
-    // Calculate usage percentages
-    let usage_percent =
-        plan_max.map(|pm| ((used_tokens_for_percent * 100.0 / pm).max(0.0)).min(100.0));
-    let projected_percent = plan_max.map(|pm| (projected_tokens * 100.0 / pm).max(0.0));
 
     WindowMetrics {
         total_cost,
@@ -415,8 +358,6 @@ pub fn calculate_window_metrics(
         global_nc_tpm,
         cost_per_hour,
         remaining_minutes,
-        usage_percent,
-        projected_percent,
     }
 }
 
