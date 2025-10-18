@@ -60,14 +60,8 @@ Flags and options (also see `--help`):
   - Preferred time display (default: auto)
 - `--show-provider`
   - Show provider hints in the header (hidden by default)
-- `--plan-tier <pro|max5x|max20x>`
-  - Plan tier to derive window max tokens (overrides env)
-- `--plan-max-tokens <N>`
-  - Explicit per-window max tokens (overrides tier/env)
 - `--hints` (env: `CLAUDE_STATUS_HINTS=1`)
-  - Show optional hints: approaching-limit warnings, “resets@” emphasis near end, and auto-compact countdown when context ≥40%
- - `--plan-profile <standard|monitor>`
-   - Plan cap profile (overrides env). `standard`: pro=200k, max5x=1M, max20x=4M. `monitor`: pro≈19k, max5x≈88k, max20x≈220k
+  - Show optional hints: approaching-limit warnings, "resets@" emphasis near end, and auto-compact countdown when context ≥40%
 
 ## Environment variables
 
@@ -75,12 +69,6 @@ Flags and options (also see `--help`):
   - Controls provider display; "firstParty" coerces to "anthropic"
 - `CLAUDE_TIME_FORMAT`:
   - `"12"` forces 12h; otherwise auto-detects (e.g., en_US -> 12h)
-- `CLAUDE_PLAN_TIER`:
-  - `pro|max5x|max20x` mapped to 200k, 1M, 4M tokens per 5h window
-- `CLAUDE_PLAN_MAX_TOKENS`:
-  - Explicit numeric per-window max; takes precedence over tier
-- `CLAUDE_PLAN_PROFILE`:
-  - `standard|monitor` to select cap table. `standard` (default): pro=200k, max5x=1M, max20x=4M. `monitor`: pro≈19k, max5x≈88k, max20x≈220k
 - `CLAUDE_CONTEXT_LIMIT`:
   - Explicit context window tokens if not recognized from model id
 - Pricing overrides (if all are set, they take precedence):
@@ -98,7 +86,6 @@ Example fields (subject to additions):
   "project_dir": "/path",
   "version": "1.0.0",
   "provider": {"apiKeySource": "env|keychain|...","env": "anthropic|vertex|bedrock"},
-  "plan": {"tier": "pro|max5x|max20x", "max_tokens": 200000},
   "reset_at": "2025-08-16T12:00:00Z",
   "session": {"cost_usd": 0.42},
   "today": {"cost_usd": 3.14},
@@ -107,8 +94,7 @@ Example fields (subject to additions):
     "start": "2025-08-16T07:00:00Z",
     "end": "2025-08-16T12:00:00Z",
     "remaining_minutes": 85,
-    "usage_percent": 12.3,
-    "projected_percent": 25.0,
+    "usage_percent": 12.3, // Only present when OAuth API provides it
     "tokens_per_minute": 1500.0,
     "tokens_per_minute_indicator": 1200.0,
     "cost_per_hour": 1.50
