@@ -165,6 +165,7 @@ pub fn print_header(
     args: &Args,
     api_key_source: Option<&str>,
     sessions_info: Option<&crate::models::SessionsInfo>,
+    lines_delta: Option<(i64, i64)>,
 ) {
     let dir_fmt = format_path(&hook.workspace.current_dir);
     let mdisp = model_colored_name(&hook.model.id, &hook.model.display_name, args);
@@ -201,6 +202,16 @@ pub fn print_header(
                     git_seg.push(' ');
                 }
                 git_seg.push_str(&format!("↓{}", b));
+            }
+        }
+        // lines delta (working tree changes)
+        if let Some((added, removed)) = lines_delta {
+            if added != 0 || removed != 0 {
+                if !git_seg.is_empty() {
+                    git_seg.push_str(" ");
+                }
+                git_seg.push_str(&format!("+{}", added).green().to_string());
+                git_seg.push_str(&format!("-{}", removed.abs()).red().to_string());
             }
         }
         if !git_seg.is_empty() {
@@ -367,7 +378,7 @@ pub fn print_text_output(
     web_search_requests: u64,
     // Optional enrichments from Claude's provided cost block
     session_cost_per_hour: Option<f64>,
-    lines_delta: Option<(i64, i64)>,
+    _lines_delta: Option<(i64, i64)>,
     rate_limit: Option<&RateLimitInfo>,
     usage_limits: Option<&UsageSummary>,
 ) {
@@ -821,7 +832,8 @@ pub fn print_text_output(
 
         if args.hints {
             // Auto-compact hint: when context usage >= 40%, show headroom and ETA to full
-            if pct >= 40 {
+            // Only show if auto-compact is actually enabled
+            if pct >= 40 && crate::utils::auto_compact_enabled() {
                 let ctx_limit = context_limit_for_model_display(model_id, model_display_name) as f64;
                 let headroom_tokens = (ctx_limit - tokens as f64).max(0.0);
                 // Use tpm_indicator (non-cache) to estimate time until context fills
@@ -860,23 +872,6 @@ pub fn print_text_output(
             "N/A".bright_black().dimmed()
         );
         print!("{} ", "·".bright_black().dimmed());
-    }
-    // Optional: show delta lines when available and non-zero
-    if let Some((added, removed)) = lines_delta {
-        if added != 0 || removed != 0 {
-            if matches!(args.labels, LabelsArg::Long) || args.hints {
-                let add_val = added.max(0) as i64;
-                let add_str = format!("+{}", add_val).green().to_string();
-                let rem_str = format!("-{}", removed.abs()).red().to_string();
-                print!(
-                    " {}{} {}",
-                    "Δlines:".bright_black().dimmed(),
-                    add_str,
-                    rem_str
-                );
-                print!("{} ", "·".bright_black().dimmed());
-            }
-        }
     }
     println!();
 }

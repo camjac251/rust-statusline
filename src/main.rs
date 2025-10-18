@@ -86,6 +86,17 @@ fn main() -> Result<()> {
         .as_deref()
         .and_then(|p| claude_statusline::sessions::gather_sessions_info(Some(Path::new(p))));
 
+    // Extract lines delta from hook.cost for header display
+    let lines_delta = hook.cost.as_ref().and_then(|c| {
+        let la = c.total_lines_added.unwrap_or(0);
+        let lr = c.total_lines_removed.unwrap_or(0);
+        if la != 0 || lr != 0 {
+            Some((la, lr))
+        } else {
+            None
+        }
+    });
+
     if !args.json {
         print_header(
             &hook,
@@ -93,6 +104,7 @@ fn main() -> Result<()> {
             &args,
             api_key_source.as_deref(),
             sessions_info.as_ref(),
+            lines_delta,
         );
     }
 
@@ -223,10 +235,9 @@ fn main() -> Result<()> {
             sessions_info.as_ref(),
         )?;
     } else {
-        // Compute session-level cost per hour and line deltas from Claude's provided cost
-        let (session_cph_opt, lines_delta_opt) = if let Some(ref c) = hook.cost {
-            let sess_cph = c
-                .total_duration_ms
+        // Compute session-level cost per hour from Claude's provided cost
+        let session_cph_opt = hook.cost.as_ref().and_then(|c| {
+            c.total_duration_ms
                 .and_then(|ms| {
                     if ms > 0 {
                         Some((ms as f64) / 3_600_000.0)
@@ -240,13 +251,8 @@ fn main() -> Result<()> {
                     } else {
                         None
                     }
-                });
-            let la = c.total_lines_added.unwrap_or(0);
-            let lr = c.total_lines_removed.unwrap_or(0);
-            (sess_cph, Some((la, lr)))
-        } else {
-            (None, None)
-        };
+                })
+        });
 
         print_text_output(
             &args,
@@ -274,7 +280,7 @@ fn main() -> Result<()> {
             metrics.session_tokens_cache_read,
             metrics.web_search_requests,
             session_cph_opt,
-            lines_delta_opt,
+            lines_delta,
             rate_limit_info.as_ref(),
             usage_summary.as_ref(),
         );
