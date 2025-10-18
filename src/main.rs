@@ -81,8 +81,21 @@ fn main() -> Result<()> {
         }
     };
 
+    // cc-sessions integration (detects sessions state if present)
+    let sessions_info = hook
+        .workspace
+        .project_dir
+        .as_deref()
+        .and_then(|p| claude_statusline::sessions::gather_sessions_info(Some(Path::new(p))));
+
     if !args.json {
-        print_header(&hook, git_info.as_ref(), &args, api_key_source.as_deref());
+        print_header(
+            &hook,
+            git_info.as_ref(),
+            &args,
+            api_key_source.as_deref(),
+            sessions_info.as_ref(),
+        );
     }
 
     // Plan resolution: CLI args override env; max_tokens overrides tier. Offline-only: no API calls.
@@ -244,6 +257,7 @@ fn main() -> Result<()> {
             oauth_rate_tier,
             plan_source,
             usage_summary.as_ref(),
+            sessions_info.as_ref(),
         )?;
     } else {
         // Compute session-level cost per hour and line deltas from Claude's provided cost

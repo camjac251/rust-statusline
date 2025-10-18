@@ -37,6 +37,9 @@ pub mod models;
 /// Model-specific pricing calculations
 pub mod pricing;
 
+/// cc-sessions integration
+pub mod sessions;
+
 /// Usage tracking and block identification
 pub mod usage;
 

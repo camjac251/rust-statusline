@@ -164,6 +164,7 @@ pub fn print_header(
     git_info: Option<&GitInfo>,
     args: &Args,
     api_key_source: Option<&str>,
+    sessions_info: Option<&crate::models::SessionsInfo>,
 ) {
     let dir_fmt = format_path(&hook.workspace.current_dir);
     let mdisp = model_colored_name(&hook.model.id, &hook.model.display_name, args);
@@ -229,6 +230,78 @@ pub fn print_header(
             output_style.name.bright_blue(),
             "]".bright_black(),
         ));
+    }
+
+    // Sessions segment (if detected)
+    if let Some(si) = sessions_info {
+        let mut sess_parts: Vec<String> = Vec::new();
+
+        // Task
+        if let Some(ref task) = si.current_task {
+            sess_parts.push(format!(
+                "{}{}",
+                "task:".bright_black().dimmed(),
+                task.cyan()
+            ));
+        }
+
+        // Mode (lowercase to match existing style)
+        if let Some(ref mode) = si.mode {
+            let mode_text = match mode.as_str() {
+                "Implementation" => "implement",
+                _ => "discuss",
+            };
+            let mode_colored = match mode.as_str() {
+                "Implementation" => mode_text.yellow().to_string(),
+                _ => mode_text.white().to_string(),
+            };
+            sess_parts.push(format!(
+                "{}{}",
+                "mode:".bright_black().dimmed(),
+                mode_colored
+            ));
+        }
+
+        // Edited files count
+        if si.edited_files > 0 {
+            sess_parts.push(format!(
+                "{}{}",
+                "files:".bright_black().dimmed(),
+                si.edited_files.to_string().yellow()
+            ));
+        }
+
+        // Upstream (ahead/behind) - keep arrows as they're standard
+        if let Some(ref upstream) = si.upstream {
+            if upstream.ahead > 0 || upstream.behind > 0 {
+                let mut up_parts = Vec::new();
+                if upstream.ahead > 0 {
+                    up_parts.push(format!("↑{}", upstream.ahead).green().to_string());
+                }
+                if upstream.behind > 0 {
+                    up_parts.push(format!("↓{}", upstream.behind).red().to_string());
+                }
+                sess_parts.push(up_parts.join(" "));
+            }
+        }
+
+        // Open tasks
+        if si.open_tasks > 0 {
+            sess_parts.push(format!(
+                "{}{}",
+                "tasks:".bright_black().dimmed(),
+                si.open_tasks.to_string().cyan()
+            ));
+        }
+
+        if !sess_parts.is_empty() {
+            header_parts.push(format!(
+                "{}{}{}",
+                "[".bright_black(),
+                sess_parts.join(" "),
+                "]".bright_black(),
+            ));
+        }
     }
 
     // Optional provider hints grouped (only when --show-provider is set)
@@ -812,6 +885,7 @@ pub fn build_json_output(
     oauth_rate_tier: Option<String>,
     plan_source: String,
     usage_limits: Option<&UsageSummary>,
+    sessions_info: Option<&crate::models::SessionsInfo>,
 ) -> serde_json::Value {
     // Provider from env or deduced from model id
     let provider_env = env::var("CLAUDE_PROVIDER").ok().map(|s| {
@@ -996,7 +1070,18 @@ pub fn build_json_output(
             "remote_url": git_remote_url,
             "worktree_count": git_wt_count,
             "is_linked_worktree": git_is_wt
-        }
+        },
+        "sessions": sessions_info.map(|si| serde_json::json!({
+            "detected": si.detected,
+            "current_task": si.current_task,
+            "mode": si.mode,
+            "open_tasks": si.open_tasks,
+            "edited_files": si.edited_files,
+            "upstream": si.upstream.as_ref().map(|u| serde_json::json!({
+                "ahead": u.ahead,
+                "behind": u.behind
+            }))
+        }))
     })
 }
 #[allow(clippy::too_many_arguments)]
@@ -1039,6 +1124,7 @@ pub fn print_json_output(
     oauth_rate_tier: Option<String>,
     plan_source: String,
     usage_limits: Option<&UsageSummary>,
+    sessions_info: Option<&crate::models::SessionsInfo>,
 ) -> anyhow::Result<()> {
     let json = build_json_output(
         hook,
@@ -1078,6 +1164,7 @@ pub fn print_json_output(
         oauth_rate_tier,
         plan_source,
         usage_limits,
+        sessions_info,
     );
     println!("{}", serde_json::to_string(&json)?);
     Ok(())

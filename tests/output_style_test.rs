@@ -62,6 +62,7 @@ fn test_output_style_in_json() {
         None,                   // oauth_rate_tier
         "inferred".to_string(), // plan_source
         None,                   // usage_limits
+        None,                   // sessions_info
     );
 
     // Verify output_style is present in JSON
@@ -124,6 +125,7 @@ fn test_output_style_in_json() {
         None,                   // oauth_rate_tier
         "inferred".to_string(), // plan_source
         None,                   // usage_limits
+        None,                   // sessions_info
     );
 
     // Verify output_style is null when not present
@@ -192,6 +194,7 @@ fn test_multiple_output_styles() {
             None,                   // oauth_rate_tier
             "inferred".to_string(), // plan_source
             None,                   // usage_limits
+            None,                   // sessions_info
         );
 
         assert_eq!(

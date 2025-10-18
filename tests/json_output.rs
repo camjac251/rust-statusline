@@ -60,6 +60,7 @@ fn json_output_shape_minimal() {
         None,                    // oauth_rate_tier
         "inferred".to_string(),  // plan_source
         None,                    // usage_limits
+        None,                    // sessions_info
     );
 
     // High-level keys exist
@@ -161,6 +162,7 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         None,
         "inferred".to_string(),
         None,
+        None, // sessions_info
     );
 
     assert_eq!(json["context"]["limit"], 1_000_000);
