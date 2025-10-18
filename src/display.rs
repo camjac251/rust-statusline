@@ -182,7 +182,6 @@ pub fn print_header(
         }
         if let (Some(br), Some(sc)) = (gi.branch.as_ref(), gi.short_commit.as_ref()) {
             // branch and short sha
-            git_seg.push_str("⎇ ");
             git_seg.push_str(&format!("{}@{}", br, sc));
         } else if let Some(sc) = gi.short_commit.as_ref() {
             git_seg.push_str(&format!("(detached@{})", sc));
@@ -520,20 +519,18 @@ pub fn print_text_output(
                     let fmt = if use_12h { "%a %-I:%M %p" } else { "%a %H:%M" };
                     print!(
                         "{}{} ",
-                        "7d↻:".bright_black().dimmed(),
+                        "7d:".bright_black().dimmed(),
                         local.format(fmt).to_string().white()
                     );
-                    print!("{} ", "·".bright_black().dimmed());
                 }
                 if let Some(reset) = summary.seven_day_opus.resets_at {
                     let local = reset.with_timezone(&Local);
                     let fmt = if use_12h { "%a %-I:%M %p" } else { "%a %H:%M" };
                     print!(
                         "{}{} ",
-                        "opus↻:".bright_black().dimmed(),
+                        "opus:".bright_black().dimmed(),
                         local.format(fmt).to_string().white()
                     );
-                    print!("{} ", "·".bright_black().dimmed());
                 }
             }
         }
@@ -686,10 +683,9 @@ pub fn print_text_output(
     } else if !use_12h && midnight {
         // 24h mode hint for next day
         print!(
-            "{}{}{} ",
-            "↻ ".bright_black(),
-            reset_disp.white(),
-            " (+1d)".bright_black()
+            "{}{} ",
+            "reset:".bright_black().dimmed(),
+            reset_disp.white()
         );
     } else {
         print!(
