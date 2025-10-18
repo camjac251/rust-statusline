@@ -82,11 +82,26 @@ pub fn format_currency(v: f64) -> String {
 
 pub fn format_tokens(n: u64) -> String {
     if n >= 1_000_000_000 {
-        format!("{:.1}B", n as f64 / 1e9)
+        let val = n as f64 / 1e9;
+        if val.fract() == 0.0 {
+            format!("{}B", val as u64)
+        } else {
+            format!("{:.1}B", val)
+        }
     } else if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1e6)
+        let val = n as f64 / 1e6;
+        if val.fract() == 0.0 {
+            format!("{}M", val as u64)
+        } else {
+            format!("{:.1}M", val)
+        }
     } else if n >= 1_000 {
-        format!("{:.1}K", n as f64 / 1e3)
+        let val = n as f64 / 1e3;
+        if val.fract() == 0.0 {
+            format!("{}K", val as u64)
+        } else {
+            format!("{:.1}K", val)
+        }
     } else {
         n.to_string()
     }
