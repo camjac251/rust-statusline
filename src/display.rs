@@ -107,13 +107,22 @@ use crate::utils::{
 };
 use crate::window::window_bounds;
 
-fn colorize_percent(pct: f64) -> String {
-    if pct >= 95.0 {
-        format!("{pct:.1}%").red().bold().to_string()
-    } else if pct >= 80.0 {
-        format!("{pct:.1}%").yellow().bold().to_string()
+fn format_pct(pct: f64) -> String {
+    if pct.fract() == 0.0 {
+        format!("{:.0}%", pct)
     } else {
-        format!("{pct:.1}%").green().to_string()
+        format!("{:.1}%", pct)
+    }
+}
+
+fn colorize_percent(pct: f64) -> String {
+    let formatted = format_pct(pct);
+    if pct >= 95.0 {
+        formatted.red().bold().to_string()
+    } else if pct >= 80.0 {
+        formatted.yellow().bold().to_string()
+    } else {
+        formatted.green().to_string()
     }
 }
 
@@ -476,11 +485,11 @@ pub fn print_text_output(
         // Also show remaining percentage for clarity (what's left in window)
         let left = (100.0 - usage_value).max(0.0);
         let left_colored = if left <= 5.0 {
-            format!("{left:.1}%").red().bold().to_string()
+            format_pct(left).red().bold().to_string()
         } else if left <= 20.0 {
-            format!("{left:.1}%").yellow().bold().to_string()
+            format_pct(left).yellow().bold().to_string()
         } else {
-            format!("{left:.1}%").green().to_string()
+            format_pct(left).green().to_string()
         };
 
         if let Some(projected_value) = projected_percent {
