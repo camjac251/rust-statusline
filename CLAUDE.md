@@ -51,6 +51,7 @@ This statusline utility processes Claude Code session data through a pipeline of
 - **`usage.rs`** - Analyzes transcript history to compute session/window/daily metrics and burn rates
 - **`pricing.rs`** - Model-specific pricing tables (loaded from `pricing.json`) and cost calculations with cache support
 - **`cache.rs`** - In-memory usage caching keyed by session_id + project_dir to avoid re-parsing transcripts
+- **`db.rs`** - SQLite-based persistent caching for global usage tracking across multiple concurrent sessions
 - **`git.rs`** - Repository inspection using gix (feature-gated) for branch/commit/status context
 - **`display.rs`** - Formatting logic for both text (with optional colors) and JSON output modes
 - **`utils.rs`** - Time formatting, path resolution, and helper functions
@@ -79,6 +80,8 @@ Configuration via environment variables (also see CLI `--help`):
 - **`CLAUDE_PROVIDER`** - Controls provider display; "firstParty" coerces to "anthropic"
 - **`CLAUDE_TIME_FORMAT`** - `"12"` forces 12h; otherwise auto-detects (e.g., en_US → 12h)
 - **`CLAUDE_CONTEXT_LIMIT`** - Explicit context window tokens if not recognized from model id
+- **`CLAUDE_STATUSLINE_DB_PATH`** - Override default SQLite DB location (default: `~/.claude/statusline.db`)
+- **`CLAUDE_DB_CACHE_DISABLE`** - Set to `1` to disable SQLite caching (falls back to scan_usage)
 - **`CLAUDE_STATUS_HINTS`** - Set to `1` to show optional hints (approaching-limit warnings, "resets@" emphasis, auto-compact countdown)
 - **Pricing overrides** (if all are set, they take precedence over `pricing.json`):
   - `CLAUDE_PRICE_INPUT`, `CLAUDE_PRICE_OUTPUT`, `CLAUDE_PRICE_CACHE_CREATE`, `CLAUDE_PRICE_CACHE_READ`
@@ -124,9 +127,15 @@ Configuration via environment variables (also see CLI `--help`):
 
 ## IMPORTANT
 
-- **Binary Size**: Release builds with all features should be <4MB on Linux (CI enforces this)
+- **Binary Size**: Release builds with all features should be <7MB on Linux (CI enforces this)
 - **MSRV**: Minimum Supported Rust Version is 1.74.0 (edition 2021)
 - **Pricing Data**: `pricing.json` must be updated manually when model pricing changes (last updated: 2025-10-18)
-- **Cache Behavior**: Usage data is cached in-memory keyed by `(session_id, project_dir)` with 30s TTL to avoid re-parsing transcripts
+- **Cache Behavior**:
+  - In-memory cache: Usage entries cached per `(session_id, project_dir)` with 30s TTL for window calculations
+  - SQLite persistent cache at `~/.claude/statusline.db`:
+    - Global today cost: Cached with mtime-based invalidation for global usage tracking
+    - OAuth API responses: Cached with 60s TTL to reduce API calls across process invocations
+  - DB cache enables accurate global usage tracking across multiple concurrent sessions
+  - Cache disable: Set `CLAUDE_DB_CACHE_DISABLE=1` to disable SQLite caching (falls back to scan_usage)
 - **Git Detection**: Git features are optional; build without `--features git` for lean statusbars
 - **Time Format**: Auto-detects locale (en_US → 12h, others → 24h) unless overridden by `CLAUDE_TIME_FORMAT` or `--time`

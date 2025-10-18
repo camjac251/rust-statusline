@@ -31,7 +31,7 @@ fn main() -> Result<()> {
 
     // Compute metrics (from logs)
     let paths = claude_paths(args.claude_config_dir.as_deref());
-    let (mut session_cost, today_cost, entries, latest_reset, api_key_source, rate_limit_info) =
+    let (mut session_cost, mut today_cost, entries, latest_reset, api_key_source, rate_limit_info) =
         scan_usage(
             &paths,
             &hook.session_id,
@@ -39,6 +39,29 @@ fn main() -> Result<()> {
             Some(&hook.model.id),
         )
         .unwrap_or((0.0, 0.0, Vec::new(), None, None, None));
+
+    // Global usage tracking: try SQLite-based aggregation across all sessions
+    // Pass today_cost from scan_usage to avoid re-parsing the transcript
+    let mut sessions_count = 1;
+    if let Some(ref project_dir) = hook.workspace.project_dir {
+        // Skip DB cache if --no-db-cache flag is set
+        if !args.no_db_cache {
+            match claude_statusline::db::get_global_usage(
+                &hook.session_id,
+                project_dir,
+                Path::new(&hook.transcript_path),
+                Some(today_cost),
+            ) {
+                Ok(global_usage) => {
+                    today_cost = global_usage.global_today;
+                    sessions_count = global_usage.sessions_count;
+                }
+                Err(e) => {
+                    eprintln!("DB cache error (using scan_usage fallback): {}", e);
+                }
+            }
+        }
+    }
 
     // By default prefer log-derived session cost for Pro/Max/Team usage; allow opting into
     // hook-provided totals via CLAUDE_SESSION_COST_SOURCE=hook
@@ -204,6 +227,7 @@ fn main() -> Result<()> {
             &hook,
             session_cost,
             today_cost,
+            sessions_count,
             metrics.total_cost,
             metrics.total_tokens,
             metrics.noncache_tokens,

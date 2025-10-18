@@ -26,6 +26,7 @@ fn json_output_shape_minimal() {
         &hook,
         0.42,     // session_cost
         3.13,     // today_cost
+        1,        // sessions_count
         1.23,     // total_cost
         123456.0, // total_tokens
         100000.0, // noncache_tokens
@@ -124,6 +125,7 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         &hook,
         0.0,
         0.0,
+        0, // sessions_count
         0.0,
         0.0,
         0.0,

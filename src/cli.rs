@@ -97,6 +97,11 @@ pub struct Args {
     /// log uses heuristic log-derived 5-hour blocks (monitor-style)
     #[arg(long, value_enum, default_value_t = WindowAnchorArg::Log)]
     pub window_anchor: WindowAnchorArg,
+
+    /// Disable SQLite database cache for global usage tracking
+    /// Falls back to per-session scan_usage calculation (no global aggregation)
+    #[arg(long, env = "CLAUDE_DB_CACHE_DISABLE")]
+    pub no_db_cache: bool,
     // OAuth/API options removed for offline-only mode
 }
 

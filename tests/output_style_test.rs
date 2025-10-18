@@ -28,6 +28,7 @@ fn test_output_style_in_json() {
         &hook_with_style,
         0.0,  // session_cost
         0.0,  // today_cost
+        0,    // sessions_count
         0.0,  // total_cost
         0.0,  // total_tokens
         0.0,  // noncache_tokens
@@ -88,6 +89,7 @@ fn test_output_style_in_json() {
         &hook_without_style,
         0.0,  // session_cost
         0.0,  // today_cost
+        0,    // sessions_count
         0.0,  // total_cost
         0.0,  // total_tokens
         0.0,  // noncache_tokens
@@ -153,6 +155,7 @@ fn test_multiple_output_styles() {
         let json: Value = build_json_output(
             &hook, 0.0,  // session_cost
             0.0,  // today_cost
+            0,    // sessions_count
             0.0,  // total_cost
             0.0,  // total_tokens
             0.0,  // noncache_tokens

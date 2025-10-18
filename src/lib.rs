@@ -21,6 +21,9 @@
 /// In-memory caching for parsed JSONL data
 pub mod cache;
 
+/// SQLite-based persistent caching for global usage tracking
+pub mod db;
+
 /// Command-line argument parsing and configuration
 pub mod cli;
 

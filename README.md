@@ -8,6 +8,8 @@ Lightweight statusline utility for Claude Code sessions. Reads a single JSON lin
 - One-line text output with live session/window cost, burn rate, usage, and countdown
 - Machine-readable JSON output for bar/statusline integration
 - Usage analysis from Claude Code project JSONL history
+- **Global usage tracking**: Aggregates `today:` cost across all concurrent Claude Code sessions via SQLite cache
+- Persistent caching with mtime-based invalidation for performance
 - Optional Git and color support via feature flags for lean builds
 
 ## Build
@@ -88,7 +90,7 @@ Example fields (subject to additions):
   "provider": {"apiKeySource": "env|keychain|...","env": "anthropic|vertex|bedrock"},
   "reset_at": "2025-08-16T12:00:00Z",
   "session": {"cost_usd": 0.42},
-  "today": {"cost_usd": 3.14},
+  "today": {"cost_usd": 3.14, "sessions_count": 3},
   "window": {
     "cost_usd": 1.23,
     "start": "2025-08-16T07:00:00Z",
@@ -132,3 +134,9 @@ The library surface is exposed via `src/lib.rs` to facilitate integration tests:
 - For lean status bars, consider building without git and/or colors:
   - `cargo build --release --no-default-features`
 - If Git header is not desired at runtime, omit `--show-provider` to keep the header minimal.
+- **Global usage tracking and API caching**:
+  - `today:` cost aggregates across ALL Claude Code sessions using SQLite cache at `~/.claude/statusline.db`
+  - OAuth API responses cached with 60s TTL to reduce redundant API calls across process invocations
+  - Mtime-based cache invalidation ensures accurate costs when transcripts update
+  - Disable with `CLAUDE_DB_CACHE_DISABLE=1` to revert to per-session tracking
+  - Concurrent session support via WAL mode (safe for 10+ simultaneous sessions)

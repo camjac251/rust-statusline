@@ -1,15 +1,14 @@
 use chrono::{DateTime, Utc};
 use directories::BaseDirs;
-use once_cell::sync::OnceCell;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const USER_AGENT: &str = "claude-code";
 const USAGE_ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
-const CACHE_TTL: Duration = Duration::from_secs(60);
+const CACHE_TTL_SECONDS: i64 = 60;
 const ANTHROPIC_BETA: &str = "oauth-2025-04-20";
+const API_CACHE_KEY: &str = "oauth_usage_summary";
 
 fn fetch_enabled() -> bool {
     match std::env::var("CLAUDE_STATUSLINE_FETCH_USAGE") {
@@ -25,7 +24,7 @@ fn fetch_enabled() -> bool {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageLimit {
     pub utilization: Option<f64>,
     pub used: Option<f64>,
@@ -33,7 +32,7 @@ pub struct UsageLimit {
     pub resets_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageSummary {
     pub window: UsageLimit,
     pub seven_day: UsageLimit,
@@ -62,34 +61,27 @@ struct UsageResponseDto {
     seven_day_oauth_apps: Option<UsageLimitDto>,
 }
 
-struct CachedUsage {
-    fetched_at: Instant,
-    data: Option<UsageSummary>,
-}
-
-static USAGE_CACHE: OnceCell<Mutex<CachedUsage>> = OnceCell::new();
-
-fn cache() -> &'static Mutex<CachedUsage> {
-    USAGE_CACHE.get_or_init(|| {
-        Mutex::new(CachedUsage {
-            fetched_at: Instant::now() - CACHE_TTL,
-            data: None,
-        })
-    })
-}
-
 pub fn get_usage_summary() -> Option<UsageSummary> {
     if !fetch_enabled() {
         return None;
     }
-    let mut cache_guard = cache().lock().ok()?;
-    if cache_guard.fetched_at.elapsed() < CACHE_TTL {
-        return cache_guard.data.clone();
+
+    // Try to get from persistent SQLite cache first
+    if let Ok(Some(cached_json)) = crate::db::get_api_cache(API_CACHE_KEY) {
+        if let Ok(summary) = serde_json::from_str::<UsageSummary>(&cached_json) {
+            return Some(summary);
+        }
     }
 
-    cache_guard.fetched_at = Instant::now();
-    cache_guard.data = fetch_usage_summary();
-    cache_guard.data.clone()
+    // Cache miss or invalid - fetch from API
+    let summary = fetch_usage_summary()?;
+
+    // Store in persistent cache
+    if let Ok(json) = serde_json::to_string(&summary) {
+        let _ = crate::db::set_api_cache(API_CACHE_KEY, &json, CACHE_TTL_SECONDS);
+    }
+
+    Some(summary)
 }
 
 fn fetch_usage_summary() -> Option<UsageSummary> {

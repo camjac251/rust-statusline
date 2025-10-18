@@ -108,8 +108,8 @@ jobs:
         run: |
           SIZE=$(stat -c%s target/release/claude_statusline)
           echo "Binary size: $SIZE bytes"
-          if [ $SIZE -gt 4000000 ]; then
-            echo "Warning: Binary size exceeds 4MB"
+          if [ $SIZE -gt 7000000 ]; then
+            echo "Warning: Binary size exceeds 7MB"
             exit 1
           fi
 

@@ -935,6 +935,7 @@ pub fn build_json_output(
     hook: &HookJson,
     session_cost: f64,
     today_cost: f64,
+    sessions_count: usize,
     total_cost: f64,
     total_tokens: f64,
     noncache_tokens: f64,
@@ -1117,7 +1118,10 @@ pub fn build_json_output(
                 "total_tokens": (sess_tokens_input + sess_tokens_output + sess_tokens_cache_create + sess_tokens_cache_read)
             }
         },
-        "today": {"cost_usd": (today_cost * 100.0).round() / 100.0},
+        "today": {
+            "cost_usd": (today_cost * 100.0).round() / 100.0,
+            "sessions_count": sessions_count
+        },
         "block": block_json.clone(),
         "window": block_json,
         "context": {
@@ -1173,6 +1177,7 @@ pub fn print_json_output(
     hook: &HookJson,
     session_cost: f64,
     today_cost: f64,
+    sessions_count: usize,
     total_cost: f64,
     total_tokens: f64,
     noncache_tokens: f64,
@@ -1211,6 +1216,7 @@ pub fn print_json_output(
         hook,
         session_cost,
         today_cost,
+        sessions_count,
         total_cost,
         total_tokens,
         noncache_tokens,
