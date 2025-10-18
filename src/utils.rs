@@ -166,8 +166,9 @@ pub fn context_limit_for_model_display(model_id: &str, display_name: &str) -> u6
     200_000
 }
 
-const DEFAULT_OUTPUT_RESERVE: u64 = 0;
-const SMALL_MODEL_OUTPUT_RESERVE: u64 = 0;
+const DEFAULT_OUTPUT_RESERVE: u64 = 32_000;
+const SMALL_MODEL_OUTPUT_RESERVE: u64 = 8_192;
+const MAX_OUTPUT_CAP: u64 = 32_000;
 const DEFAULT_AUTOCOMPACT_HEADROOM: u64 = 13_000;
 
 fn parse_bool_env(var: &str) -> bool {
@@ -188,13 +189,13 @@ fn parse_u64_env(var: &str) -> Option<u64> {
 pub fn reserved_output_tokens_for_model(model_id: &str) -> u64 {
     let lower = model_id.to_lowercase();
     if lower.contains("3-5") || lower.contains("haiku") {
+        if let Some(val) = parse_u64_env("CLAUDE_CODE_MAX_OUTPUT_TOKENS") {
+            return val.min(SMALL_MODEL_OUTPUT_RESERVE);
+        }
         return SMALL_MODEL_OUTPUT_RESERVE;
     }
     if let Some(val) = parse_u64_env("CLAUDE_CODE_MAX_OUTPUT_TOKENS") {
-        if val == 0 {
-            return DEFAULT_OUTPUT_RESERVE;
-        }
-        return val.min(DEFAULT_OUTPUT_RESERVE);
+        return val.min(MAX_OUTPUT_CAP);
     }
     DEFAULT_OUTPUT_RESERVE
 }
@@ -678,5 +679,73 @@ mod tests {
             123456
         );
         env::remove_var("CLAUDE_CONTEXT_LIMIT");
+    }
+
+    #[test]
+    #[serial]
+    fn test_reserved_output_tokens_for_model() {
+        // Test 3-5/haiku models get 8192 reserve
+        assert_eq!(reserved_output_tokens_for_model("claude-3-5-sonnet"), 8_192);
+        assert_eq!(reserved_output_tokens_for_model("claude-3-5-haiku"), 8_192);
+
+        // Test Sonnet 4.5 gets 32000 reserve
+        assert_eq!(
+            reserved_output_tokens_for_model("claude-sonnet-4-5"),
+            32_000
+        );
+
+        // Test env override for Sonnet 4.5 (capped at 32000)
+        env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "16000");
+        assert_eq!(
+            reserved_output_tokens_for_model("claude-sonnet-4-5"),
+            16_000
+        );
+
+        // Test env override exceeding cap
+        env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000");
+        assert_eq!(
+            reserved_output_tokens_for_model("claude-sonnet-4-5"),
+            32_000
+        );
+
+        // Test env override for 3-5 model (capped at 8192)
+        env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4000");
+        assert_eq!(reserved_output_tokens_for_model("claude-3-5-sonnet"), 4_000);
+
+        env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "16000");
+        assert_eq!(reserved_output_tokens_for_model("claude-3-5-sonnet"), 8_192);
+
+        env::remove_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS");
+    }
+
+    #[test]
+    #[serial]
+    fn test_usable_context_limit() {
+        // Test Sonnet 4.5: 200k - 32k = 168k
+        assert_eq!(
+            usable_context_limit("claude-sonnet-4-5", "Claude Sonnet 4.5"),
+            168_000
+        );
+
+        // Test 3.5 Sonnet: 200k - 8192 = 191808
+        assert_eq!(
+            usable_context_limit("claude-3-5-sonnet", "Claude 3.5 Sonnet"),
+            191_808
+        );
+
+        // Test 1M context variant: 1M - 32k = 968k
+        assert_eq!(
+            usable_context_limit("claude-sonnet-4-5", "Claude Sonnet 4.5 [1m]"),
+            968_000
+        );
+
+        // Test with env override
+        env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "16000");
+        assert_eq!(
+            usable_context_limit("claude-sonnet-4-5", "Claude Sonnet 4.5"),
+            184_000
+        );
+
+        env::remove_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS");
     }
 }

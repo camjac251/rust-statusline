@@ -165,5 +165,6 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         None, // sessions_info
     );
 
-    assert_eq!(json["context"]["limit"], 1_000_000);
+    // 1M context - 32k output reserve = 968k usable
+    assert_eq!(json["context"]["limit"], 968_000);
 }
