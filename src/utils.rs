@@ -181,11 +181,10 @@ const SMALL_MODEL_OUTPUT_RESERVE: u64 = 8_192;
 const MAX_OUTPUT_CAP: u64 = 32_000;
 const DEFAULT_AUTOCOMPACT_HEADROOM: u64 = 13_000;
 
-// Model max output capabilities (from API docs)
-const MAX_OUTPUT_SONNET_4: u64 = 64_000;     // Sonnet 4/4.5
-const MAX_OUTPUT_OPUS_4: u64 = 32_000;       // Opus 4
-const MAX_OUTPUT_HAIKU_4: u64 = 64_000;      // Haiku 4.5
-const MAX_OUTPUT_LEGACY: u64 = 8_192;        // Claude 3-5 models
+const MAX_OUTPUT_SONNET_4: u64 = 64_000;
+const MAX_OUTPUT_OPUS_4: u64 = 32_000;
+const MAX_OUTPUT_HAIKU_4: u64 = 64_000;
+const MAX_OUTPUT_LEGACY: u64 = 8_192;
 
 fn parse_bool_env(var: &str) -> bool {
     if let Ok(val) = env::var(var) {
@@ -221,15 +220,11 @@ pub fn auto_compact_enabled() -> bool {
 }
 
 pub fn auto_compact_headroom_tokens() -> u64 {
-    // First check for percentage override (like CLI's CLAUDE_AUTOCOMPACT_PCT_OVERRIDE)
     if let Some(pct) = parse_u64_env("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") {
-        // Calculate percentage of usable limit, capped at 13K default
-        // This matches Claude Code behavior: cushion = pct% of usable limit, capped at 13K
         let pct_fraction = (pct as f64 / 100.0).min(1.0);
-        let calculated = (168_000.0 * pct_fraction) as u64; // Rough estimate for Sonnet 4.5
+        let calculated = (168_000.0 * pct_fraction) as u64;
         return calculated.min(DEFAULT_AUTOCOMPACT_HEADROOM);
     }
-    // Fall back to fixed token amount
     parse_u64_env("CLAUDE_AUTO_COMPACT_HEADROOM").unwrap_or(DEFAULT_AUTOCOMPACT_HEADROOM)
 }
 
@@ -238,19 +233,17 @@ pub fn system_overhead_tokens() -> u64 {
 }
 
 pub fn max_output_capability(model_id: &str) -> u64 {
-    // From Claude Code docs: models have different max output capabilities
-    // https://docs.claude.com/en/docs/claude-code/settings
     let lower = model_id.to_lowercase();
     if lower.contains("4") {
         if lower.contains("opus") {
-            MAX_OUTPUT_OPUS_4  // 32K
+            MAX_OUTPUT_OPUS_4
         } else if lower.contains("haiku") {
-            MAX_OUTPUT_HAIKU_4  // 64K
+            MAX_OUTPUT_HAIKU_4
         } else {
-            MAX_OUTPUT_SONNET_4  // 64K (Sonnet 4/4.5)
+            MAX_OUTPUT_SONNET_4
         }
     } else {
-        MAX_OUTPUT_LEGACY  // 8192 for Claude 3-5
+        MAX_OUTPUT_LEGACY
     }
 }
 
