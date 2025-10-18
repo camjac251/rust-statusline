@@ -1,4 +1,10 @@
 use chrono::{DateTime, Local, Timelike};
+
+// Statusline palette - harmonious colors for dark theme
+const COLOR_PURPLE: (u8, u8, u8) = (200, 160, 255);  // Opus model
+const COLOR_AMBER: (u8, u8, u8) = (255, 200, 100);   // Sonnet model (bright)
+const COLOR_PINK: (u8, u8, u8) = (253, 93, 177);     // warnings/high values
+const COLOR_CYAN: (u8, u8, u8) = (100, 220, 255);    // Haiku model (bright)
 use std::env;
 
 #[cfg(feature = "colors")]
@@ -138,19 +144,19 @@ pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String 
     let use_true = is_truecolor_enabled(args);
     if lower.contains("opus") {
         if use_true {
-            format!("{}", display.truecolor(168, 85, 247))
+            format!("{}", display.truecolor(COLOR_PURPLE.0, COLOR_PURPLE.1, COLOR_PURPLE.2))
         } else {
             format!("{}", display.bright_magenta())
         }
     } else if lower.contains("sonnet") {
         if use_true {
-            format!("{}", display.truecolor(245, 158, 11))
+            format!("{}", display.truecolor(COLOR_AMBER.0, COLOR_AMBER.1, COLOR_AMBER.2))
         } else {
             format!("{}", display.bright_yellow())
         }
     } else if lower.contains("haiku") {
         if use_true {
-            format!("{}", display.truecolor(6, 182, 212))
+            format!("{}", display.truecolor(COLOR_CYAN.0, COLOR_CYAN.1, COLOR_CYAN.2))
         } else {
             format!("{}", display.bright_cyan())
         }
@@ -422,10 +428,19 @@ pub fn print_text_output(
     } else {
         "window:"
     };
+    let use_true = is_truecolor_enabled(args);
     let window_cost_color = if total_cost >= 50.0 {
-        format_currency(total_cost).bold().red().to_string()
+        if use_true {
+            format_currency(total_cost).bold().truecolor(COLOR_PINK.0, COLOR_PINK.1, COLOR_PINK.2).to_string()
+        } else {
+            format_currency(total_cost).bold().red().to_string()
+        }
     } else if total_cost >= 20.0 {
-        format_currency(total_cost).bold().yellow().to_string()
+        if use_true {
+            format_currency(total_cost).bold().truecolor(COLOR_PURPLE.0, COLOR_PURPLE.1, COLOR_PURPLE.2).to_string()
+        } else {
+            format_currency(total_cost).bold().yellow().to_string()
+        }
     } else if total_cost >= 10.0 {
         format_currency(total_cost).yellow().to_string()
     } else {
@@ -827,14 +842,19 @@ pub fn print_text_output(
         }
 
         if args.hints {
-            // Auto-compact hint: when context usage >= 40%, show headroom and ETA to full
+            // Auto-compact hint: when context usage >= 40%, show headroom and ETA to compact trigger
             // Only show if auto-compact is actually enabled
             if pct >= 40 && crate::utils::auto_compact_enabled() {
-                let ctx_limit = context_limit_for_model_display(model_id, model_display_name) as f64;
-                let headroom_tokens = (ctx_limit - tokens as f64).max(0.0);
-                // Use tpm_indicator (non-cache) to estimate time until context fills
-                if tpm_indicator > 0.0 && headroom_tokens > 0.0 {
-                    let eta_min = headroom_tokens / tpm_indicator;
+                // Calculate compact trigger point: usable - cushion (13K default)
+                let usable = context_limit_for_model_display(model_id, model_display_name)
+                    .saturating_sub(reserved_output_tokens_for_model(model_id));
+                let cushion = crate::utils::auto_compact_headroom_tokens();
+                let compact_trigger = usable.saturating_sub(cushion) as f64;
+                let headroom_to_compact = (compact_trigger - tokens as f64).max(0.0);
+
+                // Use tpm_indicator (non-cache) to estimate time until compact triggers
+                if tpm_indicator > 0.0 && headroom_to_compact > 0.0 {
+                    let eta_min = headroom_to_compact / tpm_indicator;
                     let eta_min_i = eta_min.round() as i64;
                     let eta_disp = if eta_min_i >= 120 {
                         format!("~{}h", eta_min_i / 60)
@@ -847,16 +867,16 @@ pub fn print_text_output(
                         " {}{}{}{}",
                         "·".bright_black().dimmed(),
                         "compact:".bright_black().dimmed(),
-                        "≥40% ".yellow(),
+                        format!("@{}K ", compact_trigger as u64 / 1000).yellow(),
                         eta_disp.yellow()
                     );
                 } else {
-                    // Show a simple hint if we cannot estimate time
+                    // Show compact trigger point even if we can't estimate time
                     print!(
                         " {}{}{}",
                         "·".bright_black().dimmed(),
                         "compact:".bright_black().dimmed(),
-                        "≥40%".yellow()
+                        format!("@{}K", compact_trigger as u64 / 1000).yellow()
                     );
                 }
             }
