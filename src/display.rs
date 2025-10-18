@@ -553,7 +553,7 @@ pub fn print_text_output(
         print!("{} ", "·".bright_black().dimmed());
 
         if args.hints {
-            // Approaching limit hint 
+            // Approaching limit hint
             // Show a friendly warning and a nudge to try /model when near cap
             let is_opus = model_id.to_lowercase().contains("opus");
             if usage_value >= 95.0 {

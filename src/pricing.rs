@@ -172,7 +172,6 @@ pub(crate) fn static_pricing_lookup(model_id: &str) -> Option<Pricing> {
             cache_read_per_tok: in_pt * 0.1,
         });
     }
-    // Claude 3.5 Haiku ()
     if m.contains("3-5-haiku") {
         return Some(Pricing {
             in_per_tok: 0.8e-6,  // $0.8 / 1M

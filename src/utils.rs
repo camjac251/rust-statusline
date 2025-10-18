@@ -147,7 +147,7 @@ pub fn context_limit_for_model(model_id: &str) -> u64 {
     200_000
 }
 
-// Context limit detection that mirrors Claude Code behavior:
+// Context limit detection:
 // - If display name contains "[1m]" then treat context limit as 1,000,000 tokens
 // - Otherwise use the model-id lookup and default to 200,000
 // - Environment variable CLAUDE_CONTEXT_LIMIT, if set, always wins

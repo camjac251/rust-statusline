@@ -7,7 +7,7 @@ use crate::usage::{calculate_session_complexity, detect_rapid_exchange};
 use crate::utils::{sanitized_project_name, WINDOW_DURATION_HOURS, WINDOW_DURATION_SECONDS};
 use chrono::{DateTime, Duration, Local, Timelike, Utc};
 
-// Session reset hours in local time: 1am, 7am, 1pm, 7pm (from JavaScript implementation)
+// Session reset hours in local time: 1am, 7am, 1pm, 7pm
 // These align with Claude's actual reset schedule
 pub const RESET_HOURS: [u32; 4] = [1, 7, 13, 19];
 
@@ -143,7 +143,6 @@ pub fn calculate_window_metrics(
     burn_scope: BurnScope,
 ) -> WindowMetrics {
     // Calculate window start and end: prefer provider reset anchor; otherwise use
-    // a heuristic active-block finder similar to ccstatusline/claude-powerline.
     let ignore_anchor = match std::env::var("CLAUDE_WINDOW_ANCHOR") {
         Ok(v) => {
             let v = v.to_lowercase();
@@ -264,7 +263,7 @@ pub fn calculate_window_metrics(
         0.0
     };
 
-    // Enhanced burn rate with rapid exchange detection (from JavaScript implementation)
+    // Enhanced burn rate with rapid exchange detection
     let (is_rapid, enhanced_burn_rate) = detect_rapid_exchange(entries, session_id, 15);
 
     // Adjust burn rate if rapid exchange detected (indicates active development)

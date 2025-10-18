@@ -31,7 +31,7 @@ use crate::utils::{
 static ASSISTANT_LIMIT_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)limit\s+reached.*resets\s+(\d{1,2})\s*(am|pm)").unwrap());
 
-// Context warning message patterns (from Python implementation)
+// Context warning message patterns
 static CONTEXT_AUTO_COMPACT_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"Context left until auto-compact: (\d+)%").unwrap());
 
@@ -133,7 +133,7 @@ pub fn calc_context_from_transcript(
 
         // First try to parse as JSON
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(t) {
-            // Check for system messages with context warnings (like Python implementation)
+            // Check for system messages with context warnings
             if parsed.get("type").and_then(|v| v.as_str()) == Some("system_message") {
                 if let Some(content) = parsed.get("content").and_then(|v| v.as_str()) {
                     // Parse "Context left until auto-compact: X%"
@@ -601,7 +601,7 @@ pub fn scan_usage(
                     }
                 }
 
-                // Track Task/Agent tool invocations and tool_use blocks (from JavaScript implementation)
+                // Track Task/Agent tool invocations and tool_use blocks
                 if v.get("type").and_then(|s| s.as_str()) == Some("assistant") {
                     if let Some(msg) = v.get("message") {
                         if let Some(content) = msg.get("content") {
@@ -898,7 +898,7 @@ pub fn scan_usage(
                                 || std::env::var("CLAUDE_PRICE_CACHE_CREATE").is_err()
                                 || std::env::var("CLAUDE_PRICE_CACHE_READ").is_err();
                             let mdl_l = mdl.to_lowercase();
-                            // Tiered pricing forSonnet-family when uncached input > 200k
+                            // Tier bump for Sonnet-family when uncached input > 200k
                             if no_explicit_env && total_in > 200_000 && mdl_l.contains("sonnet") {
                                 // in: 3 -> 6, out: 15 -> 22.5, cache_write: 3.75 -> 7.5, cache_read: 0.3 -> 0.6
                                 p.in_per_tok *= 2.0;
@@ -1125,7 +1125,7 @@ fn normalize_reset_anchor(n: i64) -> i64 {
     }
 }
 
-// Calculate message complexity weight based on token usage (from JavaScript implementation)
+// Calculate message complexity weight based on token usage
 // Pro plan limits are based on message complexity, not just count
 pub fn calculate_message_weight(entry: &Entry) -> f64 {
     // Average Claude Code message is ~500 tokens
@@ -1174,7 +1174,7 @@ pub fn calculate_session_complexity(entries: &[Entry], session_id: &str) -> Mess
     complexity
 }
 
-// Detect rapid message exchange patterns for burn rate calculation (from JavaScript implementation)
+// Detect rapid message exchange patterns for burn rate calculation
 pub fn detect_rapid_exchange(
     entries: &[Entry],
     session_id: &str,
