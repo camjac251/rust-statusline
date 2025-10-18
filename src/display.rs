@@ -825,8 +825,9 @@ pub fn print_text_output(
             );
         }
 
-        // Show output reserve usage if we're over the usable limit
+        // Show warnings about approaching/using output reserve
         if let Some((used, remaining)) = over_usable {
+            // Already eating into output reserve
             print!(
                 " {}",
                 format!(
@@ -839,6 +840,19 @@ pub fn print_text_output(
                 .yellow()
                 .bold()
             );
+        } else if args.hints {
+            // Approaching the usable limit (within 10K tokens)
+            let headroom_to_usable = ctx_limit_usable.saturating_sub(tokens);
+            if headroom_to_usable > 0 && headroom_to_usable <= 10_000 {
+                print!(
+                    " {}",
+                    format!(
+                        "⚠ {} until output reserve",
+                        format_tokens(headroom_to_usable)
+                    )
+                    .yellow()
+                );
+            }
         }
 
         if args.hints {
