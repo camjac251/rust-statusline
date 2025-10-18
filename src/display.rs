@@ -96,8 +96,9 @@ use crate::cli::{Args, LabelsArg, TimeFormatArg};
 use crate::models::{Block, GitInfo, HookJson, RateLimitInfo};
 use crate::usage_api::{UsageLimit, UsageSummary};
 use crate::utils::{
-    deduce_provider_from_model, format_currency, format_path, format_tokens,
-    system_overhead_tokens, usable_context_limit,
+    context_limit_for_model_display, deduce_provider_from_model, format_currency, format_path,
+    format_tokens, reserved_output_tokens_for_model, system_overhead_tokens,
+    usable_context_limit,
 };
 use crate::window::window_bounds;
 
@@ -769,24 +770,52 @@ pub fn print_text_output(
         } else {
             format!("{}%", pct).green().to_string()
         };
-        let ctx_limit = usable_context_limit(model_id, model_display_name);
+        let ctx_limit_usable = usable_context_limit(model_id, model_display_name);
+        let ctx_limit_full = context_limit_for_model_display(model_id, model_display_name);
+        let output_reserve = reserved_output_tokens_for_model(model_id);
         let overhead = system_overhead_tokens();
         let raw_tokens = tokens.saturating_sub(overhead);
+
+        // Check if we're eating into the output reserve
+        let over_usable = if tokens > ctx_limit_usable {
+            let reserve_used = tokens - ctx_limit_usable;
+            let reserve_remaining = output_reserve.saturating_sub(reserve_used);
+            Some((reserve_used, reserve_remaining))
+        } else {
+            None
+        };
+
         if overhead > 0 {
             print!(
                 "{} +{} sys = {}/{} ({})",
                 format_tokens(raw_tokens),
                 format_tokens(overhead),
                 format_tokens(tokens),
-                format_tokens(ctx_limit),
+                format_tokens(ctx_limit_usable),
                 pct_colored
             );
         } else {
             print!(
                 "{}/{} ({})",
                 format_tokens(tokens),
-                format_tokens(ctx_limit),
+                format_tokens(ctx_limit_usable),
                 pct_colored
+            );
+        }
+
+        // Show output reserve usage if we're over the usable limit
+        if let Some((used, remaining)) = over_usable {
+            print!(
+                " {}",
+                format!(
+                    "⚠ using {} of {} output reserve ({} left, {} max)",
+                    format_tokens(used),
+                    format_tokens(output_reserve),
+                    format_tokens(remaining),
+                    format_tokens(ctx_limit_full)
+                )
+                .yellow()
+                .bold()
             );
         }
 
@@ -1048,6 +1077,9 @@ pub fn build_json_output(
             "system_overhead_tokens": overhead_display,
             "percent": ctx_pct,
             "limit": ctx_limit,
+            "limit_full": context_limit_for_model_display(&hook.model.id, &hook.model.display_name),
+            "output_reserve": reserved_output_tokens_for_model(&hook.model.id),
+            "output_reserve_used": ctx_tokens.map(|t| if t > ctx_limit { t - ctx_limit } else { 0 }),
             "source": context_source,
             "headroom_tokens": context_headroom,
             "eta_minutes": context_eta_minutes
