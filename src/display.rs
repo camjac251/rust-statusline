@@ -769,18 +769,25 @@ pub fn print_text_output(
         } else {
             format!("{}%", pct).green().to_string()
         };
+        let ctx_limit = usable_context_limit(model_id, model_display_name);
         let overhead = system_overhead_tokens();
         let raw_tokens = tokens.saturating_sub(overhead);
         if overhead > 0 {
             print!(
-                "{} +{} sys = {} ({})",
+                "{} +{} sys = {}/{} ({})",
                 format_tokens(raw_tokens),
                 format_tokens(overhead),
                 format_tokens(tokens),
+                format_tokens(ctx_limit),
                 pct_colored
             );
         } else {
-            print!("{} ({})", format_tokens(tokens), pct_colored);
+            print!(
+                "{}/{} ({})",
+                format_tokens(tokens),
+                format_tokens(ctx_limit),
+                pct_colored
+            );
         }
 
         if args.hints {
