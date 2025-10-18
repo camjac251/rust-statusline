@@ -98,7 +98,6 @@ use crate::usage_api::{UsageLimit, UsageSummary};
 use crate::utils::{
     context_limit_for_model_display, deduce_provider_from_model, format_currency, format_path,
     format_tokens, reserved_output_tokens_for_model, system_overhead_tokens,
-    usable_context_limit,
 };
 use crate::window::window_bounds;
 
@@ -770,7 +769,8 @@ pub fn print_text_output(
         } else {
             format!("{}%", pct).green().to_string()
         };
-        let ctx_limit_usable = usable_context_limit(model_id, model_display_name);
+        let ctx_limit_usable = context_limit_for_model_display(model_id, model_display_name)
+            .saturating_sub(reserved_output_tokens_for_model(model_id));
         let ctx_limit_full = context_limit_for_model_display(model_id, model_display_name);
         let output_reserve = reserved_output_tokens_for_model(model_id);
         let overhead = system_overhead_tokens();
@@ -791,14 +791,14 @@ pub fn print_text_output(
                 format_tokens(raw_tokens),
                 format_tokens(overhead),
                 format_tokens(tokens),
-                format_tokens(ctx_limit_usable),
+                format_tokens(ctx_limit_full),
                 pct_colored
             );
         } else {
             print!(
                 "{}/{} ({})",
                 format_tokens(tokens),
-                format_tokens(ctx_limit_usable),
+                format_tokens(ctx_limit_full),
                 pct_colored
             );
         }
@@ -822,7 +822,7 @@ pub fn print_text_output(
         if args.hints {
             // Auto-compact hint: when context usage >= 40%, show headroom and ETA to full
             if pct >= 40 {
-                let ctx_limit = usable_context_limit(model_id, model_display_name) as f64;
+                let ctx_limit = context_limit_for_model_display(model_id, model_display_name) as f64;
                 let headroom_tokens = (ctx_limit - tokens as f64).max(0.0);
                 // Use tpm_indicator (non-cache) to estimate time until context fills
                 if tpm_indicator > 0.0 && headroom_tokens > 0.0 {
@@ -936,7 +936,7 @@ pub fn build_json_output(
     let (ctx_tokens, ctx_pct) = context
         .map(|(t, p)| (Some(t), Some(p)))
         .unwrap_or((None, None));
-    let ctx_limit = usable_context_limit(&hook.model.id, &hook.model.display_name);
+    let ctx_limit = context_limit_for_model_display(&hook.model.id, &hook.model.display_name);
     let overhead_value = system_overhead_tokens();
     let overhead_display = if ctx_tokens.is_some() && overhead_value > 0 {
         Some(overhead_value)

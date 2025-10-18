@@ -23,7 +23,8 @@ use crate::models::{Entry, MessageUsage, RateLimitInfo, TranscriptLine};
 // Offline-only: no OAuth/profile lookups here
 use crate::pricing::pricing_for_model;
 use crate::utils::{
-    parse_iso_date, sanitized_project_name, system_overhead_tokens, usable_context_limit,
+    context_limit_for_model_display, parse_iso_date, sanitized_project_name,
+    system_overhead_tokens,
 };
 
 // Helper: detect reset time from assistant text like "... limit reached ... resets 5am" with DST correction
@@ -177,7 +178,7 @@ pub fn calc_context_from_transcript(
     }
 
     // Prefer token-based calculation if available, fall back to context warning
-    let budget = usable_context_limit(model_id, model_display_name);
+    let budget = context_limit_for_model_display(model_id, model_display_name);
     if let Some(total_in) = last_total_in {
         let overhead = system_overhead_tokens();
         let adjusted = total_in.saturating_add(overhead);
@@ -221,7 +222,7 @@ pub fn calc_context_from_entries(
     let total_in = last.input + last.output + last.cache_create + last.cache_read;
     let overhead = system_overhead_tokens();
     let adjusted = total_in.saturating_add(overhead);
-    let limit = usable_context_limit(model_id, model_display_name);
+    let limit = context_limit_for_model_display(model_id, model_display_name);
     let pct = if limit == 0 {
         if adjusted == 0 {
             0
@@ -249,7 +250,7 @@ pub fn calc_context_from_any(
     let total_in = last.input + last.output + last.cache_create + last.cache_read;
     let overhead = system_overhead_tokens();
     let adjusted = total_in.saturating_add(overhead);
-    let limit = usable_context_limit(model_id, model_display_name);
+    let limit = context_limit_for_model_display(model_id, model_display_name);
     let pct = if limit == 0 {
         if adjusted == 0 {
             0
