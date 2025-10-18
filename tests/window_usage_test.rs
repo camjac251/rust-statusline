@@ -4,7 +4,6 @@ use claude_statusline::models::Entry;
 use claude_statusline::window::{calculate_window_metrics, BurnScope, WindowScope};
 
 #[test]
-#[test]
 fn heuristic_block_start_is_floored_to_hour_when_no_anchor() {
     let now = Utc::now()
         .with_nanosecond(0)

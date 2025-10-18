@@ -9,6 +9,9 @@ use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+/// Type alias for cached usage data: (entries, today_cost, latest_reset, api_key_source)
+pub type CachedUsageData = (Vec<Entry>, f64, Option<DateTime<Utc>>, Option<String>);
+
 /// Cache entry with expiration
 #[derive(Clone, Debug)]
 struct CacheEntry {
@@ -35,10 +38,7 @@ fn make_cache_key(session_id: &str, project_dir: Option<&str>) -> String {
 }
 
 /// Get cached usage data if available and not expired
-pub fn get_cached_usage(
-    session_id: &str,
-    project_dir: Option<&str>,
-) -> Option<(Vec<Entry>, f64, Option<DateTime<Utc>>, Option<String>)> {
+pub fn get_cached_usage(session_id: &str, project_dir: Option<&str>) -> Option<CachedUsageData> {
     let key = make_cache_key(session_id, project_dir);
     let now = Utc::now();
 

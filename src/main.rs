@@ -150,10 +150,13 @@ fn main() -> Result<()> {
             usage_percent_display = Some(pct);
         }
         if let Some(reset) = summary.window.resets_at {
+            // Normalize OAuth reset time to :00 if it's slightly off
+            let reset_normalized = claude_statusline::usage::normalize_reset_time(reset);
             latest_reset_effective = Some(
-                reset - chrono::TimeDelta::hours(claude_statusline::utils::WINDOW_DURATION_HOURS),
+                reset_normalized
+                    - chrono::TimeDelta::hours(claude_statusline::utils::WINDOW_DURATION_HOURS),
             );
-            let remaining_secs = (reset - now_utc).num_seconds();
+            let remaining_secs = (reset_normalized - now_utc).num_seconds();
             remaining_minutes_display = if remaining_secs > 0 {
                 remaining_secs as f64 / 60.0
             } else {

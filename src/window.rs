@@ -417,7 +417,7 @@ fn progressive_lookback_block(
         return None;
     }
 
-    let session_duration = Duration::hours(WINDOW_DURATION_HOURS as i64);
+    let session_duration = Duration::hours(WINDOW_DURATION_HOURS);
     let lookback_windows = [
         Duration::hours(10), // 2x session duration - catches most cases
         Duration::hours(24), // Full day for longer sessions

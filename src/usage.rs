@@ -21,15 +21,46 @@ use std::path::{Path, PathBuf};
 
 use crate::models::{Entry, MessageUsage, RateLimitInfo, TranscriptLine};
 // Offline-only: no OAuth/profile lookups here
-use crate::pricing::pricing_for_model;
+use crate::pricing::{apply_tiered_pricing, pricing_for_model};
 use crate::utils::{
-    context_limit_for_model_display, parse_iso_date, sanitized_project_name,
-    system_overhead_tokens,
+    context_limit_for_model_display, parse_iso_date, sanitized_project_name, system_overhead_tokens,
 };
 
 // Helper: detect reset time from assistant text like "... limit reached ... resets 5am" with DST correction
 static ASSISTANT_LIMIT_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)limit\s+reached.*resets\s+(\d{1,2})\s*(am|pm)").unwrap());
+
+/// Round reset time to top of hour (:00) if it's slightly off (within 1 minute)
+pub fn normalize_reset_time(dt: DateTime<Utc>) -> DateTime<Utc> {
+    let minute = dt.minute();
+    let second = dt.second();
+
+    // If already at :00:00, return as-is
+    if minute == 0 && second == 0 {
+        return dt;
+    }
+
+    // If within 1 minute of top of hour (either side), round to :00
+    if minute <= 1 || minute >= 59 {
+        // Round to nearest hour
+        let rounded_hour = if minute >= 59 {
+            // Round up to next hour
+            dt + chrono::TimeDelta::hours(1)
+        } else {
+            // Round down to current hour
+            dt
+        };
+
+        rounded_hour
+            .with_minute(0)
+            .and_then(|d| d.with_second(0))
+            .and_then(|d| d.with_nanosecond(0))
+            .unwrap_or(dt)
+    } else {
+        // More than 5 minutes off, keep as-is
+        dt
+    }
+}
 
 // Context warning message patterns
 static CONTEXT_AUTO_COMPACT_RE: Lazy<Regex> =
@@ -52,12 +83,10 @@ fn parse_am_pm_reset(ts_utc: DateTime<Utc>, text: &str) -> Option<DateTime<Utc>>
         } else {
             base_hour
         }
+    } else if base_hour == 12 {
+        12
     } else {
-        if base_hour == 12 {
-            12
-        } else {
-            (base_hour + 12) % 24
-        }
+        (base_hour + 12) % 24
     };
     // Convert ts to local
     let ts_local = ts_utc.with_timezone(&Local);
@@ -97,7 +126,7 @@ fn parse_am_pm_reset(ts_utc: DateTime<Utc>, text: &str) -> Option<DateTime<Utc>>
         let cur_off = ts_local.offset().local_minus_utc();
         let diff_minutes = cur_off - min_off; // typically 0 or +60 during DST
         if diff_minutes != 0 {
-            same_day = same_day + chrono::TimeDelta::minutes(diff_minutes as i64);
+            same_day += chrono::TimeDelta::minutes(diff_minutes as i64);
         }
     }
     // If we've already passed that time today, use tomorrow
@@ -106,7 +135,7 @@ fn parse_am_pm_reset(ts_utc: DateTime<Utc>, text: &str) -> Option<DateTime<Utc>>
     } else {
         same_day + chrono::TimeDelta::days(1)
     };
-    Some(reset_local.with_timezone(&Utc))
+    Some(normalize_reset_time(reset_local.with_timezone(&Utc)))
 }
 
 pub fn calc_context_from_transcript(
@@ -469,6 +498,7 @@ pub fn scan_usage(
                                                                 0,
                                                             )
                                                         {
+                                                            let dt = normalize_reset_time(dt);
                                                             if latest_reset
                                                                 .map(|x| dt > x)
                                                                 .unwrap_or(true)
@@ -513,6 +543,7 @@ pub fn scan_usage(
                                             if let Some(dt) =
                                                 DateTime::<Utc>::from_timestamp(normalized_epoch, 0)
                                             {
+                                                let dt = normalize_reset_time(dt);
                                                 if latest_reset.map(|x| dt > x).unwrap_or(true) {
                                                     latest_reset = Some(dt);
                                                 }
@@ -728,6 +759,7 @@ pub fn scan_usage(
                                                                 0,
                                                             )
                                                         {
+                                                            let dt = normalize_reset_time(dt);
                                                             if latest_reset
                                                                 .map(|x| dt > x)
                                                                 .unwrap_or(true)
@@ -762,6 +794,7 @@ pub fn scan_usage(
                                                     normalized_epoch,
                                                     0,
                                                 ) {
+                                                    let dt = normalize_reset_time(dt);
                                                     if latest_reset.map(|x| dt > x).unwrap_or(true)
                                                     {
                                                         latest_reset = Some(dt);
@@ -890,23 +923,12 @@ pub fn scan_usage(
                 }
                 if cost == 0.0 {
                     if let Some(ref mdl) = model {
-                        if let Some(mut p) = pricing_for_model(mdl) {
-                            // Large-uncached-input bump for sonnet/haiku-style pricing when total input > 200k
+                        if let Some(base_p) = pricing_for_model(mdl) {
+                            // Apply tiered pricing if applicable (e.g., long-context pricing)
                             let total_in = input + cache_create + cache_read;
-                            let no_explicit_env = std::env::var("CLAUDE_PRICE_INPUT").is_err()
-                                || std::env::var("CLAUDE_PRICE_OUTPUT").is_err()
-                                || std::env::var("CLAUDE_PRICE_CACHE_CREATE").is_err()
-                                || std::env::var("CLAUDE_PRICE_CACHE_READ").is_err();
-                            let mdl_l = mdl.to_lowercase();
-                            // Tier bump for Sonnet-family when uncached input > 200k
-                            if no_explicit_env && total_in > 200_000 && mdl_l.contains("sonnet") {
-                                // in: 3 -> 6, out: 15 -> 22.5, cache_write: 3.75 -> 7.5, cache_read: 0.3 -> 0.6
-                                p.in_per_tok *= 2.0;
-                                p.out_per_tok *= 1.5;
-                                p.cache_create_per_tok *= 2.0;
-                                p.cache_read_per_tok *= 2.0;
-                            }
-                            // Fallback: include cache + web search pricing
+                            let p = apply_tiered_pricing(base_p, mdl, total_in);
+
+                            // Calculate cost with applied pricing
                             cost = (input as f64) * p.in_per_tok
                                 + (output as f64) * p.out_per_tok
                                 + (cache_create as f64) * p.cache_create_per_tok
@@ -1139,7 +1161,7 @@ pub fn calculate_message_weight(entry: &Entry) -> f64 {
         let weight = total_tokens / AVERAGE_MESSAGE_TOKENS;
 
         // Cap at reasonable limits (0.1 to 5.0)
-        weight.max(0.1).min(5.0)
+        weight.clamp(0.1, 5.0)
     } else {
         // Default to average weight if no token data
         1.0
@@ -1253,7 +1275,8 @@ fn read_persisted_reset_state() -> Option<ResetState> {
     let reset_at = v
         .get("reset_at")
         .and_then(|x| x.as_i64())
-        .and_then(|e| chrono::DateTime::<chrono::Utc>::from_timestamp(e, 0));
+        .and_then(|e| chrono::DateTime::<chrono::Utc>::from_timestamp(e, 0))
+        .map(normalize_reset_time);
     let last_checked = v
         .get("last_checked")
         .and_then(|x| x.as_i64())
@@ -1277,7 +1300,8 @@ fn read_persisted_reset_state() -> Option<ResetState> {
     let overage_resets_at = v
         .get("overage_resets_at")
         .and_then(|x| x.as_i64())
-        .and_then(|e| chrono::DateTime::<chrono::Utc>::from_timestamp(e, 0));
+        .and_then(|e| chrono::DateTime::<chrono::Utc>::from_timestamp(e, 0))
+        .map(normalize_reset_time);
     let fallback_percentage = v.get("fallback_percentage").and_then(|x| x.as_f64());
     Some(ResetState {
         reset_at,
@@ -1291,6 +1315,7 @@ fn read_persisted_reset_state() -> Option<ResetState> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_persisted_reset_state(
     reset_at: Option<chrono::DateTime<chrono::Utc>>,
     last_checked: Option<chrono::DateTime<chrono::Utc>>,

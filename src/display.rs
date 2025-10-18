@@ -1,10 +1,10 @@
 use chrono::{DateTime, Local, Timelike};
 
 // Statusline palette - harmonious colors for dark theme
-const COLOR_PURPLE: (u8, u8, u8) = (200, 160, 255);  // Opus model
-const COLOR_AMBER: (u8, u8, u8) = (255, 200, 100);   // Sonnet model (bright)
-const COLOR_PINK: (u8, u8, u8) = (253, 93, 177);     // warnings/high values
-const COLOR_CYAN: (u8, u8, u8) = (100, 220, 255);    // Haiku model (bright)
+const COLOR_PURPLE: (u8, u8, u8) = (200, 160, 255); // Opus model
+const COLOR_AMBER: (u8, u8, u8) = (255, 200, 100); // Sonnet model (bright)
+const COLOR_PINK: (u8, u8, u8) = (253, 93, 177); // warnings/high values
+const COLOR_CYAN: (u8, u8, u8) = (100, 220, 255); // Haiku model (bright)
 use std::env;
 
 #[cfg(feature = "colors")]
@@ -153,19 +153,28 @@ pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String 
     let use_true = is_truecolor_enabled(args);
     if lower.contains("opus") {
         if use_true {
-            format!("{}", display.truecolor(COLOR_PURPLE.0, COLOR_PURPLE.1, COLOR_PURPLE.2))
+            format!(
+                "{}",
+                display.truecolor(COLOR_PURPLE.0, COLOR_PURPLE.1, COLOR_PURPLE.2)
+            )
         } else {
             format!("{}", display.bright_magenta())
         }
     } else if lower.contains("sonnet") {
         if use_true {
-            format!("{}", display.truecolor(COLOR_AMBER.0, COLOR_AMBER.1, COLOR_AMBER.2))
+            format!(
+                "{}",
+                display.truecolor(COLOR_AMBER.0, COLOR_AMBER.1, COLOR_AMBER.2)
+            )
         } else {
             format!("{}", display.bright_yellow())
         }
     } else if lower.contains("haiku") {
         if use_true {
-            format!("{}", display.truecolor(COLOR_CYAN.0, COLOR_CYAN.1, COLOR_CYAN.2))
+            format!(
+                "{}",
+                display.truecolor(COLOR_CYAN.0, COLOR_CYAN.1, COLOR_CYAN.2)
+            )
         } else {
             format!("{}", display.bright_cyan())
         }
@@ -222,7 +231,7 @@ pub fn print_header(
         if let Some((added, removed)) = lines_delta {
             if added != 0 || removed != 0 {
                 if !git_seg.is_empty() {
-                    git_seg.push_str(" ");
+                    git_seg.push(' ');
                 }
                 git_seg.push_str(&format!("+{}", added).green().to_string());
                 git_seg.push_str(&format!("-{}", removed.abs()).red().to_string());
@@ -440,13 +449,19 @@ pub fn print_text_output(
     let use_true = is_truecolor_enabled(args);
     let window_cost_color = if total_cost >= 50.0 {
         if use_true {
-            format_currency(total_cost).bold().truecolor(COLOR_PINK.0, COLOR_PINK.1, COLOR_PINK.2).to_string()
+            format_currency(total_cost)
+                .bold()
+                .truecolor(COLOR_PINK.0, COLOR_PINK.1, COLOR_PINK.2)
+                .to_string()
         } else {
             format_currency(total_cost).bold().red().to_string()
         }
     } else if total_cost >= 20.0 {
         if use_true {
-            format_currency(total_cost).bold().truecolor(COLOR_PURPLE.0, COLOR_PURPLE.1, COLOR_PURPLE.2).to_string()
+            format_currency(total_cost)
+                .bold()
+                .truecolor(COLOR_PURPLE.0, COLOR_PURPLE.1, COLOR_PURPLE.2)
+                .to_string()
         } else {
             format_currency(total_cost).bold().yellow().to_string()
         }
@@ -1113,7 +1128,7 @@ pub fn build_json_output(
             "limit": ctx_limit,
             "limit_full": context_limit_for_model_display(&hook.model.id, &hook.model.display_name),
             "output_reserve": reserved_output_tokens_for_model(&hook.model.id),
-            "output_reserve_used": ctx_tokens.map(|t| if t > ctx_limit { t - ctx_limit } else { 0 }),
+            "output_reserve_used": ctx_tokens.map(|t| t.saturating_sub(ctx_limit)),
             "source": context_source,
             "headroom_tokens": context_headroom,
             "eta_minutes": context_eta_minutes

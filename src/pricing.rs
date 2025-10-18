@@ -45,11 +45,43 @@ struct ModelPricing {
     cache_read: f64,
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct PricingMultipliers {
+    input: f64,
+    output: f64,
+    cache_create: f64,
+    #[serde(default)]
+    cache_create_1h: Option<f64>,
+    cache_read: f64,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct PricingTier {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    threshold: u64,
+    applies_to: Vec<String>,
+    multipliers: PricingMultipliers,
+}
+
+#[derive(Deserialize, Serialize, Debug, Default)]
+struct TieredPricing {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    comment: Option<String>,
+    #[serde(default)]
+    tiers: Vec<PricingTier>,
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 struct PricingConfig {
     models: HashMap<String, ModelPricing>,
     #[serde(default)]
     additional_costs: AdditionalCosts,
+    #[serde(default)]
+    tiered_pricing: TieredPricing,
 }
 
 #[derive(Deserialize, Serialize, Debug, Default)]
@@ -241,6 +273,45 @@ pub fn pricing_for_model(model_id: &str) -> Option<Pricing> {
     } else {
         None
     }
+}
+
+/// Apply tiered pricing multipliers if applicable based on token count
+/// Returns modified pricing if a tier applies, otherwise returns the input pricing unchanged
+pub fn apply_tiered_pricing(
+    base_pricing: Pricing,
+    model_id: &str,
+    total_input_tokens: u64,
+) -> Pricing {
+    // Check if tiered pricing is enabled and configured
+    let config = match PRICING_CONFIG.as_ref() {
+        Some(c) if c.tiered_pricing.enabled => c,
+        _ => return base_pricing,
+    };
+
+    let model_lower = model_id.to_lowercase();
+
+    // Find applicable tier
+    for tier in &config.tiered_pricing.tiers {
+        // Check if this tier applies to the model
+        let applies = tier
+            .applies_to
+            .iter()
+            .any(|pattern| model_lower.contains(&pattern.to_lowercase()));
+
+        if applies && total_input_tokens > tier.threshold {
+            // Apply multipliers
+            return Pricing {
+                in_per_tok: base_pricing.in_per_tok * tier.multipliers.input,
+                out_per_tok: base_pricing.out_per_tok * tier.multipliers.output,
+                cache_create_per_tok: base_pricing.cache_create_per_tok
+                    * tier.multipliers.cache_create,
+                cache_read_per_tok: base_pricing.cache_read_per_tok * tier.multipliers.cache_read,
+            };
+        }
+    }
+
+    // No tier applies, return base pricing
+    base_pricing
 }
 
 #[cfg(test)]
