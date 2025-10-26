@@ -23,6 +23,50 @@ Advanced (optional): feature flags exist in Cargo.toml (default enables both; CI
 - `git`: enables git repository inspection using gix
 - `colors`: enables colorized output using owo-colors
 
+## Installation
+
+After building, configure Claude Code to use the statusline:
+
+1. Copy the binary and pricing data to your `.claude` directory:
+
+   **Linux/macOS:**
+   ```bash
+   cp target/release/claude_statusline ~/.claude/
+   cp pricing.json ~/.claude/
+   ```
+
+   **Windows (PowerShell):**
+   ```powershell
+   Copy-Item target\release\claude_statusline.exe $env:USERPROFILE\.claude\
+   Copy-Item pricing.json $env:USERPROFILE\.claude\
+   ```
+
+2. Update your Claude Code `settings.json`:
+
+   **Linux/macOS** (`~/.claude/settings.json`):
+   ```json
+   {
+     "statusLine": {
+       "type": "command",
+       "command": "/home/<username>/.claude/claude_statusline --window-anchor provider --hints"
+     }
+   }
+   ```
+
+   **Windows** (`C:\Users\<username>\.claude\settings.json`):
+   ```json
+   {
+     "statusLine": {
+       "type": "command",
+       "command": "C:\\Users\\<username>\\.claude\\claude_statusline.exe --window-anchor provider --hints"
+     }
+   }
+   ```
+
+3. Restart Claude Code to see the statusline in action.
+
+**Note:** You can omit `--window-anchor provider --hints` to use defaults, or customize with other CLI flags (see below).
+
 ## Usage
 
 This tool expects a single-line JSON "hook" on stdin (as provided by Claude Code). Example:
