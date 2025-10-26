@@ -1,14 +1,143 @@
 use chrono::{DateTime, Utc};
 use directories::BaseDirs;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::fs;
+use std::process::Command;
 use std::time::Duration;
 
-const USER_AGENT: &str = "claude-code";
+use crate::db;
+
+const DEFAULT_USER_AGENT: &str = "claude-code";
 const USAGE_ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 const CACHE_TTL_SECONDS: i64 = 60;
 const ANTHROPIC_BETA: &str = "oauth-2025-04-20";
 const API_CACHE_KEY: &str = "oauth_usage_summary";
+const USER_AGENT_CACHE_KEY: &str = "user_agent_header";
+const USER_AGENT_CACHE_TTL_SECONDS: i64 = 86_400;
+
+static USER_AGENT: Lazy<String> = Lazy::new(resolve_user_agent);
+static VERSION_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?)").unwrap());
+
+fn resolve_user_agent() -> String {
+    if let Some(explicit) = env_user_agent_override() {
+        persist_user_agent(&explicit);
+        return explicit;
+    }
+
+    let version_override = env_version_override();
+
+    if version_override.is_none() && !force_refresh_user_agent() {
+        if let Some(cached) = cached_user_agent() {
+            return cached;
+        }
+    }
+
+    if let Some(version) = version_override
+        .or_else(package_json_version)
+        .or_else(cli_version)
+    {
+        let agent = format!("claude-code/{version}");
+        persist_user_agent(&agent);
+        return agent;
+    }
+
+    let fallback = DEFAULT_USER_AGENT.to_string();
+    persist_user_agent(&fallback);
+    fallback
+}
+
+fn cached_user_agent() -> Option<String> {
+    match db::load_metadata(USER_AGENT_CACHE_KEY) {
+        Ok(Some(entry)) => {
+            if let Some(ts) = entry.updated_at {
+                let age = Utc::now().timestamp().saturating_sub(ts);
+                if age > USER_AGENT_CACHE_TTL_SECONDS {
+                    return None;
+                }
+            }
+            Some(entry.value)
+        }
+        _ => None,
+    }
+}
+
+fn persist_user_agent(value: &str) {
+    let _ = db::store_metadata(USER_AGENT_CACHE_KEY, value);
+}
+
+fn force_refresh_user_agent() -> bool {
+    match env::var("CLAUDE_STATUSLINE_FORCE_REFRESH_USER_AGENT") {
+        Ok(val) => matches!(
+            val.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
+fn env_user_agent_override() -> Option<String> {
+    env::var("CLAUDE_STATUSLINE_USER_AGENT")
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+}
+
+fn env_version_override() -> Option<String> {
+    for key in ["CLAUDE_STATUSLINE_CLAUDE_VERSION", "CLAUDE_CODE_VERSION"] {
+        if let Ok(value) = env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn package_json_version() -> Option<String> {
+    let path = env::var("CLAUDE_STATUSLINE_CLAUDE_PACKAGE_JSON")
+        .or_else(|_| env::var("CLAUDE_CODE_PACKAGE_JSON"))
+        .ok()?;
+
+    let contents = fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    json.get("version")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+}
+
+fn cli_version() -> Option<String> {
+    let output = Command::new("claude").arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(version) = extract_version(stdout.as_ref()) {
+        return Some(version);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    extract_version(stderr.as_ref())
+}
+
+fn extract_version(text: &str) -> Option<String> {
+    VERSION_RE
+        .captures(text)
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str().to_string())
+}
 
 fn fetch_enabled() -> bool {
     match std::env::var("CLAUDE_STATUSLINE_FETCH_USAGE") {
@@ -94,7 +223,7 @@ fn fetch_usage_summary() -> Option<UsageSummary> {
     let response = agent
         .get(USAGE_ENDPOINT)
         .set("Authorization", &format!("Bearer {}", token))
-        .set("User-Agent", USER_AGENT)
+        .set("User-Agent", USER_AGENT.as_str())
         .set("Accept", "application/json")
         .set("anthropic-beta", ANTHROPIC_BETA)
         .call()

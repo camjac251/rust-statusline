@@ -27,6 +27,13 @@ pub struct GlobalUsage {
     pub sessions_count: usize,
 }
 
+/// Metadata value with optional timestamp
+#[derive(Debug, Clone)]
+pub struct MetadataEntry {
+    pub value: String,
+    pub updated_at: Option<i64>,
+}
+
 /// Get the database file path
 ///
 /// Checks `CLAUDE_STATUSLINE_DB_PATH` environment variable first,
@@ -74,6 +81,18 @@ fn open_db() -> Result<Connection> {
     }
 }
 
+/// Fetch metadata value by key (opens a short-lived connection)
+pub fn load_metadata(key: &str) -> Result<Option<MetadataEntry>> {
+    let conn = open_db()?;
+    get_metadata(&conn, key)
+}
+
+/// Persist metadata value by key (opens a short-lived connection)
+pub fn store_metadata(key: &str, value: &str) -> Result<()> {
+    let conn = open_db()?;
+    set_metadata(&conn, key, value)
+}
+
 /// Initialize database schema
 ///
 /// Creates tables and indexes if they don't exist.
@@ -102,11 +121,45 @@ fn init_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_expires_at ON api_cache(expires_at);
         CREATE TABLE IF NOT EXISTS metadata (
             key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
+            value TEXT NOT NULL,
+            updated_at INTEGER
         );
         INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '1');",
     )?;
 
+    // Ensure updated_at column exists (older installs may lack it)
+    if let Err(e) = conn.execute("ALTER TABLE metadata ADD COLUMN updated_at INTEGER", []) {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column name") {
+            return Err(e.into());
+        }
+    }
+
+    Ok(())
+}
+
+/// Fetch metadata value and optional timestamp
+pub fn get_metadata(conn: &Connection, key: &str) -> Result<Option<MetadataEntry>> {
+    let mut stmt = conn.prepare("SELECT value, updated_at FROM metadata WHERE key = ?1")?;
+    let result = stmt
+        .query_row(params![key], |row| {
+            let value: String = row.get(0)?;
+            let updated_at: Option<i64> = row.get::<_, Option<i64>>(1).unwrap_or(None);
+            Ok(MetadataEntry { value, updated_at })
+        })
+        .optional()?;
+    Ok(result)
+}
+
+/// Set metadata value with current timestamp
+pub fn set_metadata(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    let now = Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO metadata (key, value, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        params![key, value, now],
+    )?;
     Ok(())
 }
 
