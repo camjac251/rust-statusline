@@ -41,7 +41,7 @@ This statusline utility processes Claude Code session data through a pipeline of
 ### Core Data Flow
 1. **Hook Input** (`models/hook.rs`) - Receives JSON hook from Claude Code on stdin containing session metadata
 2. **Transcript Processing** (`usage.rs`) - Parses JSONL transcript files to extract usage blocks and calculate token consumption
-3. **Pricing Calculation** (`pricing.rs`) - Computes costs based on model-specific pricing tiers and token usage from `pricing.json`
+3. **Pricing Calculation** (`pricing.rs`) - Computes costs based on model-specific pricing tiers and token usage (embedded fallback, external `pricing.json` optional)
 4. **Display Generation** (`display.rs`) - Formats output as either colorized text or structured JSON
 
 ### Module Responsibilities
@@ -49,7 +49,7 @@ This statusline utility processes Claude Code session data through a pipeline of
 - **`cli.rs`** - Command-line argument parsing with environment variable fallbacks (CLAUDE_*)
 - **`models/`** - Data structures for hook input, transcript entries, usage blocks, git state, and rate limits
 - **`usage.rs`** - Analyzes transcript history to compute session/window/daily metrics and burn rates
-- **`pricing.rs`** - Model-specific pricing tables (loaded from `pricing.json`) and cost calculations with cache support
+- **`pricing.rs`** - Model-specific pricing tables (compile-time embedded, overridable via `pricing.json` or env vars) and cost calculations with cache support
 - **`cache.rs`** - In-memory usage caching keyed by session_id + project_dir to avoid re-parsing transcripts
 - **`db.rs`** - SQLite-based persistent caching for global usage tracking across multiple concurrent sessions
 - **`git.rs`** - Repository inspection using gix (feature-gated) for branch/commit/status context
@@ -69,7 +69,7 @@ The codebase uses Cargo features for optional functionality:
 - Searches for transcript files in Claude config directories (default: `~/.config/claude`, `~/.claude`)
 - Supports both 5-hour window tracking (pro/max tiers) and daily usage aggregation
 - Provides machine-readable JSON output for statusline/bar integration
-- Uses `pricing.json` for model pricing data (updated manually; last: 2025-10-18)
+- Pricing data: embedded at compile-time (last: 2025-10-18), overridable via `pricing.json` in cwd or `CLAUDE_PRICING_PATH` env var
 - Web search requests are charged at $0.01 per request when `costUSD` is not provided in usage logs
 
 ## Environment Variables
@@ -83,7 +83,8 @@ Configuration via environment variables (also see CLI `--help`):
 - **`CLAUDE_STATUSLINE_DB_PATH`** - Override default SQLite DB location (default: `~/.claude/statusline.db`)
 - **`CLAUDE_DB_CACHE_DISABLE`** - Set to `1` to disable SQLite caching (falls back to scan_usage)
 - **`CLAUDE_STATUS_HINTS`** - Set to `1` to show optional hints (approaching-limit warnings, "resets@" emphasis, auto-compact countdown)
-- **Pricing overrides** (if all are set, they take precedence over `pricing.json`):
+- **`CLAUDE_PRICING_PATH`** - Path to custom pricing.json file (overrides embedded pricing)
+- **Pricing overrides** (if all are set, they take precedence over all other sources):
   - `CLAUDE_PRICE_INPUT`, `CLAUDE_PRICE_OUTPUT`, `CLAUDE_PRICE_CACHE_CREATE`, `CLAUDE_PRICE_CACHE_READ`
 
 ## Testing and Review Expectations
@@ -129,7 +130,8 @@ Configuration via environment variables (also see CLI `--help`):
 
 - **Binary Size**: Release builds with all features should be <7MB on Linux (CI enforces this)
 - **MSRV**: Minimum Supported Rust Version is 1.74.0 (edition 2021)
-- **Pricing Data**: `pricing.json` must be updated manually when model pricing changes (last updated: 2025-10-18)
+- **Pricing Data**: Embedded at compile-time (last: 2025-10-18); releases bundle `pricing.json` for easy updates without recompilation
+- **Pricing Resolution Order**: 1) `pricing.json` in cwd, 2) `CLAUDE_PRICING_PATH` env var, 3) embedded fallback, 4) env var overrides (all four must be set)
 - **Cache Behavior**:
   - In-memory cache: Usage entries cached per `(session_id, project_dir)` with 30s TTL for window calculations
   - SQLite persistent cache at `~/.claude/statusline.db`:

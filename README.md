@@ -73,7 +73,9 @@ Flags and options (also see `--help`):
   - `"12"` forces 12h; otherwise auto-detects (e.g., en_US -> 12h)
 - `CLAUDE_CONTEXT_LIMIT`:
   - Explicit context window tokens if not recognized from model id
-- Pricing overrides (if all are set, they take precedence):
+- `CLAUDE_PRICING_PATH`:
+  - Path to custom pricing.json file (overrides embedded pricing)
+- Pricing overrides (if all are set, they take precedence over all sources):
   - `CLAUDE_PRICE_INPUT`, `CLAUDE_PRICE_OUTPUT`, `CLAUDE_PRICE_CACHE_CREATE`, `CLAUDE_PRICE_CACHE_READ`
 - Web search requests are charged at $0.01 per request when `costUSD` is not provided in usage logs
 
@@ -134,6 +136,10 @@ The library surface is exposed via `src/lib.rs` to facilitate integration tests:
 - For lean status bars, consider building without git and/or colors:
   - `cargo build --release --no-default-features`
 - If Git header is not desired at runtime, omit `--show-provider` to keep the header minimal.
+- **Pricing data**:
+  - Embedded at compile-time for zero-configuration operation
+  - Release artifacts bundle `pricing.json` for easy updates without recompilation
+  - Resolution order: 1) `pricing.json` in cwd, 2) `CLAUDE_PRICING_PATH` env, 3) embedded fallback, 4) env var overrides
 - **Global usage tracking and API caching**:
   - `today:` cost aggregates across ALL Claude Code sessions using SQLite cache at `~/.claude/statusline.db`
   - OAuth API responses cached with 60s TTL to reduce redundant API calls across process invocations

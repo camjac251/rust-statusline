@@ -45,9 +45,16 @@ jobs:
           name="claude_statusline-${{ runner.os }}"
           bin="target/release/claude_statusline"
           archive="$name.tar.gz"
-          tar -czf "$archive" -C "$(dirname "$bin")" "$(basename "$bin")"
+
+          # Create staging directory with binary and pricing.json
+          mkdir -p dist
+          cp "$bin" dist/
+          cp pricing.json dist/
+
+          # Create archive from staging directory
+          tar -czf "$archive" -C dist .
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
-          
+
           # Generate checksum
           sha256sum "$archive" > "$archive.sha256"
           echo "CHECKSUM=$archive.sha256" >> "$GITHUB_ENV"
@@ -60,9 +67,16 @@ jobs:
           $name = "claude_statusline-${{ runner.os }}"
           $bin  = "target\\release\\claude_statusline.exe"
           $archive = "$name.zip"
-          Compress-Archive -Path $bin -DestinationPath $archive
+
+          # Create staging directory with binary and pricing.json
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item $bin dist/
+          Copy-Item pricing.json dist/
+
+          # Create archive from staging directory
+          Compress-Archive -Path dist/* -DestinationPath $archive
           echo "ARCHIVE=$archive" >> $env:GITHUB_ENV
-          
+
           # Generate checksum
           $checksum = "$archive.sha256"
           (Get-FileHash -Path $archive -Algorithm SHA256).Hash + "  $archive" | Out-File -FilePath $checksum -Encoding ascii

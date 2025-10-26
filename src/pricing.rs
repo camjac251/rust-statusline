@@ -6,25 +6,27 @@
 //!
 //! Each model has pricing for:
 //! - Input tokens
-//! - Output tokens  
+//! - Output tokens
 //! - Cache creation (typically 1.25x input price, with 5m/1h tiers)
 //! - Cache reads (typically 0.1x input price)
 //!
-//! Prices can be loaded from:
-//! 1. External pricing.json file (preferred)
-//! 2. Environment variables (overrides JSON):
+//! ## Pricing Resolution Order
+//!
+//! Prices are loaded in the following priority order:
+//! 1. `pricing.json` in current working directory
+//! 2. `CLAUDE_PRICING_PATH` environment variable (path to custom JSON)
+//! 3. Compile-time embedded pricing.json (always available)
+//! 4. Environment variable overrides (if all four are set):
 //!    - `CLAUDE_PRICE_INPUT`
 //!    - `CLAUDE_PRICE_OUTPUT`
 //!    - `CLAUDE_PRICE_CACHE_CREATE`
 //!    - `CLAUDE_PRICE_CACHE_READ`
-//! 3. Built-in defaults (fallback)
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::Path;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Pricing {
@@ -90,32 +92,28 @@ struct AdditionalCosts {
     web_search_per_request: f64,
 }
 
-/// Load pricing from external JSON file
+/// Load pricing from external JSON file, with compile-time embedded fallback
 static PRICING_CONFIG: Lazy<Option<PricingConfig>> = Lazy::new(|| {
-    // Try multiple locations for pricing.json
-    let paths = vec![
-        Path::new("pricing.json"),
-        Path::new("./pricing.json"),
-        Path::new("pricing.json"),
-    ];
-
-    for path in paths {
-        if path.exists() {
-            if let Ok(contents) = fs::read_to_string(path) {
-                if let Ok(config) = serde_json::from_str::<PricingConfig>(&contents) {
-                    return Some(config);
-                }
-            }
+    // Try pricing.json in current directory
+    if let Ok(contents) = fs::read_to_string("pricing.json") {
+        if let Ok(config) = serde_json::from_str::<PricingConfig>(&contents) {
+            return Some(config);
         }
     }
 
-    // Try from CLAUDE_PRICING_PATH environment variable
+    // Try CLAUDE_PRICING_PATH environment variable
     if let Ok(custom_path) = env::var("CLAUDE_PRICING_PATH") {
         if let Ok(contents) = fs::read_to_string(&custom_path) {
             if let Ok(config) = serde_json::from_str::<PricingConfig>(&contents) {
                 return Some(config);
             }
         }
+    }
+
+    // Fallback to embedded pricing.json (compiled into binary)
+    const EMBEDDED_PRICING: &str = include_str!("../pricing.json");
+    if let Ok(config) = serde_json::from_str::<PricingConfig>(EMBEDDED_PRICING) {
+        return Some(config);
     }
 
     None
