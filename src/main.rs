@@ -131,7 +131,6 @@ fn main() -> Result<()> {
         );
     }
 
-    // Plan resolution: CLI args override env; max_tokens overrides tier. Offline-only: no API calls.
     let oauth_org_type: Option<String> = None;
     let oauth_rate_tier: Option<String> = None;
 

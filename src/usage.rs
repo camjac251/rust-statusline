@@ -20,7 +20,6 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::models::{Entry, MessageUsage, RateLimitInfo, TranscriptLine};
-// Offline-only: no OAuth/profile lookups here
 use crate::pricing::{apply_tiered_pricing, pricing_for_model};
 use crate::utils::{
     context_limit_for_model_display, parse_iso_date, sanitized_project_name, system_overhead_tokens,
@@ -30,7 +29,7 @@ use crate::utils::{
 static ASSISTANT_LIMIT_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)limit\s+reached.*resets\s+(\d{1,2})\s*(am|pm)").unwrap());
 
-/// Round reset time to top of hour (:00) if it's slightly off (within 1 minute)
+/// Round reset time to nearest hour (:00) to handle timezone/clock offset issues
 pub fn normalize_reset_time(dt: DateTime<Utc>) -> DateTime<Utc> {
     let minute = dt.minute();
     let second = dt.second();
@@ -40,26 +39,21 @@ pub fn normalize_reset_time(dt: DateTime<Utc>) -> DateTime<Utc> {
         return dt;
     }
 
-    // If within 1 minute of top of hour (either side), round to :00
-    if minute <= 1 || minute >= 59 {
-        // Round to nearest hour
-        let rounded_hour = if minute >= 59 {
-            // Round up to next hour
-            dt + chrono::TimeDelta::hours(1)
-        } else {
-            // Round down to current hour
-            dt
-        };
-
-        rounded_hour
-            .with_minute(0)
-            .and_then(|d| d.with_second(0))
-            .and_then(|d| d.with_nanosecond(0))
-            .unwrap_or(dt)
+    // Always round to nearest hour (:00) to handle timezone/clock offset issues
+    // Round up if minute >= 30, otherwise round down
+    let rounded_hour = if minute >= 30 {
+        // Round up to next hour
+        dt + chrono::TimeDelta::hours(1)
     } else {
-        // More than 5 minutes off, keep as-is
+        // Round down to current hour
         dt
-    }
+    };
+
+    rounded_hour
+        .with_minute(0)
+        .and_then(|d| d.with_second(0))
+        .and_then(|d| d.with_nanosecond(0))
+        .unwrap_or(dt)
 }
 
 // Context warning message patterns

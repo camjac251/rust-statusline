@@ -102,7 +102,6 @@ pub struct Args {
     /// Falls back to per-session scan_usage calculation (no global aggregation)
     #[arg(long, env = "CLAUDE_DB_CACHE_DISABLE")]
     pub no_db_cache: bool,
-    // OAuth/API options removed for offline-only mode
 }
 
 impl Args {

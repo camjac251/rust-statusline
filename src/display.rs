@@ -405,7 +405,6 @@ pub fn print_text_output(
     rate_limit: Option<&RateLimitInfo>,
     usage_limits: Option<&UsageSummary>,
 ) {
-    // Line 2
     print!("{} ", "❯".bright_cyan());
 
     // Labels preference

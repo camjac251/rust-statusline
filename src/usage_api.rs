@@ -251,7 +251,7 @@ impl From<UsageLimitDto> for UsageLimit {
             utilization: value.utilization,
             used: value.used,
             remaining: value.remaining,
-            resets_at: value.resets_at,
+            resets_at: value.resets_at.map(crate::usage::normalize_reset_time),
         }
     }
 }
