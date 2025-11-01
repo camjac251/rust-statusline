@@ -5,6 +5,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
@@ -190,7 +191,7 @@ struct UsageResponseDto {
     seven_day_oauth_apps: Option<UsageLimitDto>,
 }
 
-pub fn get_usage_summary() -> Option<UsageSummary> {
+pub fn get_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
     if !fetch_enabled() {
         return None;
     }
@@ -203,7 +204,7 @@ pub fn get_usage_summary() -> Option<UsageSummary> {
     }
 
     // Cache miss or invalid - fetch from API
-    let summary = fetch_usage_summary()?;
+    let summary = fetch_usage_summary(claude_paths)?;
 
     // Store in persistent cache
     if let Ok(json) = serde_json::to_string(&summary) {
@@ -213,8 +214,8 @@ pub fn get_usage_summary() -> Option<UsageSummary> {
     Some(summary)
 }
 
-fn fetch_usage_summary() -> Option<UsageSummary> {
-    let token = find_oauth_token()?;
+fn fetch_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
+    let token = find_oauth_token(claude_paths)?;
     let agent = ureq::AgentBuilder::new()
         .timeout_read(Duration::from_secs(5))
         .timeout_write(Duration::from_secs(5))
@@ -256,7 +257,8 @@ impl From<UsageLimitDto> for UsageLimit {
     }
 }
 
-fn find_oauth_token() -> Option<String> {
+fn find_oauth_token(claude_paths: &[PathBuf]) -> Option<String> {
+    // Check environment variables first
     for env in ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"] {
         if let Ok(val) = std::env::var(env) {
             let trimmed = val.trim().to_string();
@@ -266,23 +268,114 @@ fn find_oauth_token() -> Option<String> {
         }
     }
 
-    let base_dirs = BaseDirs::new()?;
-    let credentials_path = base_dirs
-        .home_dir()
-        .join(".claude")
-        .join(".credentials.json");
-    let raw = fs::read_to_string(credentials_path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let access = json
+    // macOS: Try Keychain first (credentials stored in Keychain, not file)
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(token) = read_from_macos_keychain() {
+            return Some(token);
+        }
+    }
+
+    // Search through all provided claude paths for .credentials.json (Linux/Windows)
+    for base_path in claude_paths {
+        let credentials_path = base_path.join(".credentials.json");
+        if let Ok(raw) = fs::read_to_string(&credentials_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(access) = json
+                    .get("claudeAiOauth")
+                    .and_then(|v| v.get("accessToken"))
+                    .and_then(|v| v.as_str())
+                {
+                    let trimmed = access.trim().to_string();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback to legacy hardcoded path for backwards compatibility
+    if let Some(base_dirs) = BaseDirs::new() {
+        let credentials_path = base_dirs
+            .home_dir()
+            .join(".claude")
+            .join(".credentials.json");
+        if let Ok(raw) = fs::read_to_string(credentials_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(access) = json
+                    .get("claudeAiOauth")
+                    .and_then(|v| v.get("accessToken"))
+                    .and_then(|v| v.as_str())
+                {
+                    let trimmed = access.trim().to_string();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn read_from_macos_keychain() -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    // Get current username for account field
+    let username = env::var("USER").ok()?;
+
+    // Build service name: "Claude Code-credentials"
+    // If CLAUDE_CONFIG_DIR is set, append 8-char SHA256 suffix
+    let mut service_name = "Claude Code-credentials".to_string();
+
+    if let Ok(config_dir) = env::var("CLAUDE_CONFIG_DIR") {
+        let mut hasher = Sha256::new();
+        hasher.update(config_dir.as_bytes());
+        let hash = hasher.finalize();
+        let suffix = format!("{:x}", hash).chars().take(8).collect::<String>();
+        service_name.push('-');
+        service_name.push_str(&suffix);
+    }
+
+    // Query macOS Keychain for the credentials JSON
+    let output = Command::new("security")
+        .args(&[
+            "find-generic-password",
+            "-a",
+            &username, // Account name
+            "-s",
+            &service_name, // Service name
+            "-w",          // Output password only
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    // Parse the JSON payload stored in Keychain
+    let json_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if json_str.is_empty() {
+        return None;
+    }
+
+    // The stored value is the full credentials JSON
+    let json: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+    let access_token = json
         .get("claudeAiOauth")
         .and_then(|v| v.get("accessToken"))
         .and_then(|v| v.as_str())?
         .trim()
         .to_string();
-    if access.is_empty() {
+
+    if access_token.is_empty() {
         None
     } else {
-        Some(access)
+        Some(access_token)
     }
 }
 
