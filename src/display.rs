@@ -7,6 +7,12 @@ const COLOR_PINK: (u8, u8, u8) = (253, 93, 177); // warnings/high values
 const COLOR_CYAN: (u8, u8, u8) = (100, 220, 255); // Haiku model (bright)
 use std::env;
 
+// Terminal width thresholds for responsive formatting
+const WIDTH_NARROW: u16 = 140;
+const WIDTH_MEDIUM: u16 = 200;
+// Account for Claude CLI padding/margins (status line container has padding)
+const TERMINAL_MARGIN: u16 = 15;
+
 #[cfg(feature = "colors")]
 use owo_colors::OwoColorize;
 
@@ -142,6 +148,44 @@ fn is_truecolor_enabled(args: &Args) -> bool {
         }
     }
     args.truecolor
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalWidth {
+    Narrow, // < 140 cols
+    Medium, // 140-200 cols
+    Wide,   // > 200 cols
+}
+
+fn get_terminal_width() -> TerminalWidth {
+    // Check for override via env var (useful for testing)
+    if let Ok(override_width) = env::var("CLAUDE_TERMINAL_WIDTH") {
+        if let Ok(width) = override_width.parse::<u16>() {
+            let effective_width = width.saturating_sub(TERMINAL_MARGIN);
+            return if effective_width < WIDTH_NARROW {
+                TerminalWidth::Narrow
+            } else if effective_width < WIDTH_MEDIUM {
+                TerminalWidth::Medium
+            } else {
+                TerminalWidth::Wide
+            };
+        }
+    }
+
+    // Detect actual terminal width and subtract margin for CLI padding
+    if let Some((terminal_size::Width(w), _)) = terminal_size::terminal_size() {
+        let effective_width = w.saturating_sub(TERMINAL_MARGIN);
+        if effective_width < WIDTH_NARROW {
+            TerminalWidth::Narrow
+        } else if effective_width < WIDTH_MEDIUM {
+            TerminalWidth::Medium
+        } else {
+            TerminalWidth::Wide
+        }
+    } else {
+        // Fallback to medium if detection fails
+        TerminalWidth::Medium
+    }
 }
 
 pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String {
@@ -405,13 +449,20 @@ pub fn print_text_output(
     rate_limit: Option<&RateLimitInfo>,
     usage_limits: Option<&UsageSummary>,
 ) {
+    // Detect terminal width for responsive formatting
+    let term_width = get_terminal_width();
+
     print!("{} ", "❯".bright_cyan());
 
     // Labels preference
-    let long_labels = matches!(args.labels, LabelsArg::Long);
+    let long_labels = matches!(args.labels, LabelsArg::Long) && term_width != TerminalWidth::Narrow;
 
-    // session
-    let session_label = "session:";
+    // session - ultra-compact for narrow
+    let session_label = match term_width {
+        TerminalWidth::Narrow => "s:",
+        TerminalWidth::Medium => "sess:",
+        TerminalWidth::Wide => "session:",
+    };
     print!(
         "{}{}{} ",
         session_label.bright_black().dimmed(),
@@ -420,8 +471,11 @@ pub fn print_text_output(
     );
     print!("{} ", "·".bright_black().dimmed());
 
-    // today
-    let today_label = "today:";
+    // today - ultra-compact for narrow
+    let today_label = match term_width {
+        TerminalWidth::Narrow => "t:",
+        _ => "today:",
+    };
     let today_cost_color = if today_cost >= 100.0 {
         format_currency(today_cost).bold().red().to_string()
     } else if today_cost >= 50.0 {
@@ -439,11 +493,12 @@ pub fn print_text_output(
     );
     print!("{} ", "·".bright_black().dimmed());
 
-    // window (formerly block)
-    let window_label = if long_labels {
-        "current window:"
-    } else {
-        "window:"
+    // window (formerly block) - ultra-compact for narrow
+    let window_label = match term_width {
+        TerminalWidth::Narrow => "w:",
+        TerminalWidth::Medium => "win:",
+        TerminalWidth::Wide if long_labels => "current window:",
+        TerminalWidth::Wide => "window:",
     };
     let use_true = is_truecolor_enabled(args);
     let window_cost_color = if total_cost >= 50.0 {
@@ -506,23 +561,29 @@ pub fn print_text_output(
             format_pct(left).green().to_string()
         };
 
+        // Compact labels for narrow terminals
+        let (usage_label, left_label) = match term_width {
+            TerminalWidth::Narrow => ("u:", "l:"),
+            _ => ("usage:", "left:"),
+        };
+
         if let Some(projected_value) = projected_percent {
             let proj_colored = colorize_percent(projected_value);
             print!(
                 "{}{}{}{} {}{} ",
-                "usage:".bright_black().dimmed(),
+                usage_label.bright_black().dimmed(),
                 usage_colored,
                 "→".bright_black().dimmed(),
                 proj_colored,
-                "left:".bright_black().dimmed(),
+                left_label.bright_black().dimmed(),
                 left_colored
             );
         } else {
             print!(
                 "{}{} {}{} ",
-                "usage:".bright_black().dimmed(),
+                usage_label.bright_black().dimmed(),
                 usage_colored,
-                "left:".bright_black().dimmed(),
+                left_label.bright_black().dimmed(),
                 left_colored
             );
         }
@@ -609,13 +670,24 @@ pub fn print_text_output(
         }
     }
 
-    // countdown and reset time
+    // countdown and reset time - compact for narrow
     let rem_h = (remaining_minutes as i64) / 60;
     let rem_m = (remaining_minutes as i64) % 60;
-    let countdown = if rem_h > 0 {
-        format!("{}h {}m left", rem_h, rem_m)
-    } else {
-        format!("{}m left", rem_m)
+    let countdown = match term_width {
+        TerminalWidth::Narrow => {
+            if rem_h > 0 {
+                format!("{}h{}m", rem_h, rem_m)
+            } else {
+                format!("{}m", rem_m)
+            }
+        }
+        _ => {
+            if rem_h > 0 {
+                format!("{}h {}m left", rem_h, rem_m)
+            } else {
+                format!("{}m left", rem_m)
+            }
+        }
     };
     // Emphasize as we get closer to the reset time
     let countdown_colored = if remaining_minutes < 30.0 {
@@ -804,8 +876,12 @@ pub fn print_text_output(
         print!("{} ", "·".bright_black().dimmed());
     }
 
-    // context
-    print!("{}", "context:".bright_black().dimmed());
+    // context - compact for narrow
+    let ctx_label = match term_width {
+        TerminalWidth::Narrow => "ctx:",
+        _ => "context:",
+    };
+    print!("{}", ctx_label.bright_black().dimmed());
     if let Some((tokens, pct)) = context {
         let pct_colored = if pct as f64 >= 80.0 {
             format!("{}%", pct).red().bold().to_string()
