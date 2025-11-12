@@ -31,17 +31,24 @@ fn main() -> Result<()> {
 
     // Compute metrics (from logs)
     let paths = claude_paths(args.claude_config_dir.as_deref());
-    let (mut session_cost, mut today_cost, entries, latest_reset, api_key_source, rate_limit_info) =
-        scan_usage(
-            &paths,
-            &hook.session_id,
-            hook.workspace.project_dir.as_deref(),
-            Some(&hook.model.id),
-        )
-        .unwrap_or((0.0, 0.0, Vec::new(), None, None, None));
+    let (
+        mut session_cost,
+        session_today_cost,
+        mut today_cost,
+        entries,
+        latest_reset,
+        api_key_source,
+        rate_limit_info,
+    ) = scan_usage(
+        &paths,
+        &hook.session_id,
+        hook.workspace.project_dir.as_deref(),
+        Some(&hook.model.id),
+    )
+    .unwrap_or((0.0, 0.0, 0.0, Vec::new(), None, None, None));
 
-    // Global usage tracking: try SQLite-based aggregation across all sessions
-    // Pass today_cost from scan_usage to avoid re-parsing the transcript
+    // Global usage tracking: SQLite-based aggregation across all sessions
+    // Pass session_today_cost (this session only) for proper aggregation
     let mut sessions_count = 1;
     if let Some(ref project_dir) = hook.workspace.project_dir {
         // Skip DB cache if --no-db-cache flag is set
@@ -50,7 +57,7 @@ fn main() -> Result<()> {
                 &hook.session_id,
                 project_dir,
                 Path::new(&hook.transcript_path),
-                Some(today_cost),
+                Some(session_today_cost),
             ) {
                 Ok(global_usage) => {
                     today_cost = global_usage.global_today;

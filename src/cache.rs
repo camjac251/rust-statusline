@@ -4,7 +4,7 @@
 //! on frequent statusline updates.
 
 use crate::models::Entry;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -12,11 +12,12 @@ use std::sync::Mutex;
 /// Type alias for cached usage data: (entries, today_cost, latest_reset, api_key_source)
 pub type CachedUsageData = (Vec<Entry>, f64, Option<DateTime<Utc>>, Option<String>);
 
-/// Cache entry with expiration
+/// Cache entry with expiration and date tracking
 #[derive(Clone, Debug)]
 struct CacheEntry {
     entries: Vec<Entry>,
     today_cost: f64,
+    cached_date: NaiveDate, // Track which day this cost is for
     latest_reset: Option<DateTime<Utc>>,
     api_key_source: Option<String>,
     expires_at: DateTime<Utc>,
@@ -37,15 +38,17 @@ fn make_cache_key(session_id: &str, project_dir: Option<&str>) -> String {
     }
 }
 
-/// Get cached usage data if available and not expired
+/// Get cached usage data if available, not expired, and for the current day
 pub fn get_cached_usage(session_id: &str, project_dir: Option<&str>) -> Option<CachedUsageData> {
     let key = make_cache_key(session_id, project_dir);
     let now = Utc::now();
+    let today = Local::now().date_naive();
 
     let cache = USAGE_CACHE.lock().ok()?;
     let entry = cache.get(&key)?;
 
-    if entry.expires_at > now {
+    // Only return cached data if not expired AND cached for current day (prevents using yesterday's cost after midnight)
+    if entry.expires_at > now && entry.cached_date == today {
         Some((
             entry.entries.clone(),
             entry.today_cost,
@@ -57,7 +60,7 @@ pub fn get_cached_usage(session_id: &str, project_dir: Option<&str>) -> Option<C
     }
 }
 
-/// Store usage data in cache
+/// Store usage data in cache with current date
 pub fn cache_usage(
     session_id: &str,
     project_dir: Option<&str>,
@@ -72,19 +75,21 @@ pub fn cache_usage(
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(CACHE_TTL_SECONDS);
 
-    let expires_at = Utc::now() + Duration::seconds(ttl);
+    let now = Utc::now();
+    let today = Local::now().date_naive();
+    let expires_at = now + Duration::seconds(ttl);
 
     if let Ok(mut cache) = USAGE_CACHE.lock() {
-        // Clean up expired entries while we have the lock
-        let now = Utc::now();
-        cache.retain(|_, entry| entry.expires_at > now);
+        // Clean up expired or outdated entries while we have the lock
+        cache.retain(|_, entry| entry.expires_at > now && entry.cached_date == today);
 
-        // Add new entry
+        // Add new entry with current date
         cache.insert(
             key,
             CacheEntry {
                 entries,
                 today_cost,
+                cached_date: today,
                 latest_reset,
                 api_key_source,
                 expires_at,

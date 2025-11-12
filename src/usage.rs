@@ -326,6 +326,7 @@ pub fn scan_usage(
     _model_id_for_probe: Option<&str>,
 ) -> Result<(
     f64, /*session*/
+    f64, /*session_today*/
     f64, /*today*/
     Vec<Entry>,
     Option<DateTime<Utc>>,
@@ -336,14 +337,24 @@ pub fn scan_usage(
     if let Some((cached_entries, cached_today_cost, cached_reset, cached_api_key)) =
         crate::cache::get_cached_usage(session_id, project_dir)
     {
-        // Calculate session cost from cached entries
-        let session_cost = cached_entries
-            .iter()
-            .filter(|e| e.session_id.as_deref() == Some(session_id))
-            .map(|e| e.cost)
-            .sum();
+        let today = Local::now().date_naive();
+        // Calculate session cost and session today cost from cached entries
+        let mut session_cost = 0.0;
+        let mut session_today_cost = 0.0;
+        for e in &cached_entries {
+            if e.session_id.as_deref() == Some(session_id) {
+                session_cost += e.cost;
+                let ts_s = e.ts.to_rfc3339();
+                if let Some(d) = parse_iso_date(&ts_s) {
+                    if d == today {
+                        session_today_cost += e.cost;
+                    }
+                }
+            }
+        }
         return Ok((
             session_cost,
+            session_today_cost,
             cached_today_cost,
             cached_entries,
             cached_reset,
@@ -1068,15 +1079,24 @@ pub fn scan_usage(
     // Finalize aggregated entries and compute totals
     let mut entries: Vec<Entry> = aggregated.into_values().collect();
     entries.sort_by_key(|e| e.ts);
+    let mut session_today_cost = 0.0f64; // This session's cost for today only
     for e in &entries {
+        let ts_s = e.ts.to_rfc3339();
+        let is_today = if let Some(d) = parse_iso_date(&ts_s) {
+            d == today
+        } else {
+            false
+        };
+
         if e.session_id.as_deref() == Some(session_id) {
             session_cost += e.cost;
-        }
-        let ts_s = e.ts.to_rfc3339();
-        if let Some(d) = parse_iso_date(&ts_s) {
-            if d == today {
-                today_cost += e.cost;
+            if is_today {
+                session_today_cost += e.cost; // Track this session's today cost
             }
+        }
+
+        if is_today {
+            today_cost += e.cost; // Global today cost (all sessions)
         }
     }
     // Prefer result-derived session cost if present
@@ -1121,6 +1141,7 @@ pub fn scan_usage(
 
     Ok((
         session_cost,
+        session_today_cost,
         today_cost,
         entries,
         latest_reset,

@@ -342,14 +342,24 @@ pub fn get_global_usage(
 
     let cached = conn
         .query_row(
-            "SELECT transcript_mtime, today_cost FROM sessions WHERE session_key = ?",
+            "SELECT transcript_mtime, today_cost, today_date FROM sessions WHERE session_key = ?",
             params![session_key],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
         .optional()?;
 
-    let current_session_cost = if let Some((cached_mtime, cached_cost)) = cached {
-        if cached_mtime == current_mtime {
+    // Track whether we modified the DB (to invalidate global sum cache)
+    let mut db_was_modified = false;
+
+    let current_session_cost = if let Some((cached_mtime, cached_cost, cached_date)) = cached {
+        // Only use cached cost if both mtime and date match (prevents using yesterday's cost after midnight)
+        if cached_mtime == current_mtime && cached_date == today {
             cached_cost
         } else {
             // Use provided session_today_cost if available (avoids re-parsing)
@@ -367,6 +377,7 @@ pub fn get_global_usage(
                 cost,
                 count,
             )?;
+            db_was_modified = true;
             cost
         }
     } else {
@@ -385,22 +396,66 @@ pub fn get_global_usage(
             cost,
             count,
         )?;
+        db_was_modified = true;
         cost
     };
 
     conn.execute("DELETE FROM sessions WHERE today_date != ?", params![today])?;
 
-    let global_today: f64 = conn.query_row(
-        "SELECT COALESCE(SUM(today_cost), 0.0) FROM sessions WHERE today_date = ?",
-        params![today],
-        |row| row.get(0),
-    )?;
+    // Check cache for global sum (5s TTL to reduce redundant SUM queries across concurrent sessions)
+    // Skip cache if we just modified the DB (invalidates cache)
+    let cache_key = format!("global_sum:{}", today);
+    let now = Utc::now().timestamp();
+    let cached_sum: Option<(f64, usize)> = if !db_was_modified {
+        if let Ok(Some(entry)) = get_metadata(&conn, &cache_key) {
+            if let Some(updated_at) = entry.updated_at {
+                if now - updated_at < 5 {
+                    // Cache is fresh (< 5 seconds old)
+                    entry
+                        .value
+                        .split_once(':')
+                        .and_then(|(sum_str, count_str)| {
+                            sum_str
+                                .parse::<f64>()
+                                .ok()
+                                .zip(count_str.parse::<usize>().ok())
+                        })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None // DB was modified, so cache is invalid
+    };
 
-    let sessions_count: usize = conn.query_row(
-        "SELECT COUNT(*) FROM sessions WHERE today_date = ?",
-        params![today],
-        |row| row.get::<_, i64>(0).map(|n| n as usize),
-    )?;
+    let (global_today, sessions_count) = if let Some((sum, count)) = cached_sum {
+        // Use cached value
+        (sum, count)
+    } else {
+        // Cache miss or expired - run the query
+        let global_today: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(today_cost), 0.0) FROM sessions WHERE today_date = ?",
+            params![today],
+            |row| row.get(0),
+        )?;
+
+        let sessions_count: usize = conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE today_date = ?",
+            params![today],
+            |row| row.get::<_, i64>(0).map(|n| n as usize),
+        )?;
+
+        // Cache the result for 5 seconds
+        let cache_value = format!("{}:{}", global_today, sessions_count);
+        let _ = set_metadata(&conn, &cache_key, &cache_value); // Ignore errors on cache write
+
+        (global_today, sessions_count)
+    };
 
     Ok(GlobalUsage {
         session_cost: current_session_cost,
