@@ -121,14 +121,44 @@ fn format_pct(pct: f64) -> String {
     }
 }
 
-fn colorize_percent(pct: f64) -> String {
-    let formatted = format_pct(pct);
-    if pct >= 95.0 {
-        formatted.red().bold().to_string()
-    } else if pct >= 80.0 {
-        formatted.yellow().bold().to_string()
+// Interpolate between Green Shimmer (low), Yellow Shimmer (mid), and Red Shimmer (high)
+// Green Shimmer: rgb(185, 230, 180)
+// Yellow Shimmer: rgb(255, 225, 155)
+// Red Shimmer: rgb(250, 155, 147)
+fn color_scale_rgb(value: f64, max: f64) -> (u8, u8, u8) {
+    let ratio = (value / max).max(0.0).min(1.0);
+    
+    if ratio < 0.5 {
+        // Green to Yellow
+        let t = ratio * 2.0;
+        let r = (185.0 + (255.0 - 185.0) * t) as u8;
+        let g = (230.0 + (225.0 - 230.0) * t) as u8;
+        let b = (180.0 + (155.0 - 180.0) * t) as u8;
+        (r, g, b)
     } else {
-        formatted.green().to_string()
+        // Yellow to Red
+        let t = (ratio - 0.5) * 2.0;
+        let r = (255.0 + (250.0 - 255.0) * t) as u8;
+        let g = (225.0 + (155.0 - 225.0) * t) as u8;
+        let b = (155.0 + (147.0 - 155.0) * t) as u8;
+        (r, g, b)
+    }
+}
+
+fn colorize_percent(pct: f64, args: &Args) -> String {
+    let formatted = format_pct(pct);
+    if is_truecolor_enabled(args) {
+        // Gradient: 0% -> 100%
+        let (r, g, b) = color_scale_rgb(pct, 100.0);
+        formatted.truecolor(r, g, b).to_string()
+    } else {
+        if pct >= 95.0 {
+            formatted.red().bold().to_string()
+        } else if pct >= 80.0 {
+            formatted.yellow().bold().to_string()
+        } else {
+            formatted.green().to_string()
+        }
     }
 }
 
@@ -142,12 +172,22 @@ fn usage_limit_json(limit: &UsageLimit) -> serde_json::Value {
 }
 
 fn is_truecolor_enabled(args: &Args) -> bool {
+    if args.truecolor {
+        return true; // Explicit flag always overrides
+    }
     if let Ok(v) = env::var("CLAUDE_TRUECOLOR") {
         if v.trim() == "1" {
             return true;
         }
     }
-    args.truecolor
+    // Auto-detect common truecolor environment variables
+    if env::var("COLORTERM").map_or(false, |v| v.contains("truecolor") || v.contains("24bit")) {
+        return true;
+    }
+    if env::var("TERM").map_or(false, |v| v.contains("xterm-truecolor") || v.contains("xterm-256color")) {
+        return true;
+    }
+    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,9 +233,12 @@ pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String 
     if env::var("NO_COLOR").is_ok() {
         return display.to_string();
     }
-    let lower = model_id.to_lowercase();
+    let lower_id = model_id.to_lowercase();
+    let lower_disp = display.to_lowercase();
     let use_true = is_truecolor_enabled(args);
-    if lower.contains("opus") {
+
+    // Opus family (and Claude 2 legacy) -> Purple
+    if lower_id.contains("opus") || lower_disp.contains("opus") || lower_id.contains("claude-2") {
         if use_true {
             format!(
                 "{}",
@@ -204,7 +247,9 @@ pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String 
         } else {
             format!("{}", display.bright_magenta())
         }
-    } else if lower.contains("sonnet") {
+    }
+    // Sonnet family -> Amber/Yellow
+    else if lower_id.contains("sonnet") || lower_disp.contains("sonnet") {
         if use_true {
             format!(
                 "{}",
@@ -213,7 +258,12 @@ pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String 
         } else {
             format!("{}", display.bright_yellow())
         }
-    } else if lower.contains("haiku") {
+    }
+    // Haiku family (and Instant legacy) -> Cyan/Blue
+    else if lower_id.contains("haiku")
+        || lower_disp.contains("haiku")
+        || lower_id.contains("claude-instant")
+    {
         if use_true {
             format!(
                 "{}",
@@ -223,6 +273,7 @@ pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String 
             format!("{}", display.bright_cyan())
         }
     } else {
+        // Unknown/Other -> White
         format!("{}", display.bright_white())
     }
 }
@@ -451,6 +502,7 @@ pub fn print_text_output(
 ) {
     // Detect terminal width for responsive formatting
     let term_width = get_terminal_width();
+    let use_true = is_truecolor_enabled(args);
 
     print!("{} ", "❯".bright_cyan());
 
@@ -476,14 +528,20 @@ pub fn print_text_output(
         TerminalWidth::Narrow => "t:",
         _ => "today:",
     };
-    let today_cost_color = if today_cost >= 100.0 {
-        format_currency(today_cost).bold().red().to_string()
-    } else if today_cost >= 50.0 {
-        format_currency(today_cost).bold().yellow().to_string()
-    } else if today_cost >= 20.0 {
-        format_currency(today_cost).yellow().to_string()
+    // Scale today's cost: $0-10
+    let today_cost_color = if use_true {
+        let (r, g, b) = color_scale_rgb(today_cost, 10.0);
+        format_currency(today_cost).truecolor(r, g, b).to_string()
     } else {
-        format_currency(today_cost).white().to_string()
+        if today_cost >= 100.0 {
+            format_currency(today_cost).bold().red().to_string()
+        } else if today_cost >= 50.0 {
+            format_currency(today_cost).bold().yellow().to_string()
+        } else if today_cost >= 20.0 {
+            format_currency(today_cost).yellow().to_string()
+        } else {
+            format_currency(today_cost).white().to_string()
+        }
     };
     print!(
         "{}{}{} ",
@@ -500,29 +558,20 @@ pub fn print_text_output(
         TerminalWidth::Wide if long_labels => "current window:",
         TerminalWidth::Wide => "window:",
     };
-    let use_true = is_truecolor_enabled(args);
-    let window_cost_color = if total_cost >= 50.0 {
-        if use_true {
-            format_currency(total_cost)
-                .bold()
-                .truecolor(COLOR_PINK.0, COLOR_PINK.1, COLOR_PINK.2)
-                .to_string()
-        } else {
-            format_currency(total_cost).bold().red().to_string()
-        }
-    } else if total_cost >= 20.0 {
-        if use_true {
-            format_currency(total_cost)
-                .bold()
-                .truecolor(COLOR_PURPLE.0, COLOR_PURPLE.1, COLOR_PURPLE.2)
-                .to_string()
-        } else {
-            format_currency(total_cost).bold().yellow().to_string()
-        }
-    } else if total_cost >= 10.0 {
-        format_currency(total_cost).yellow().to_string()
+    // Scale window cost: $0-5
+    let window_cost_color = if use_true {
+        let (r, g, b) = color_scale_rgb(total_cost, 5.0);
+        format_currency(total_cost).truecolor(r, g, b).bold().to_string()
     } else {
-        format_currency(total_cost).bright_white().to_string()
+        if total_cost >= 50.0 {
+            format_currency(total_cost).bold().red().to_string()
+        } else if total_cost >= 20.0 {
+            format_currency(total_cost).bold().yellow().to_string()
+        } else if total_cost >= 10.0 {
+            format_currency(total_cost).yellow().to_string()
+        } else {
+            format_currency(total_cost).bright_white().to_string()
+        }
     };
     print!(
         "{}{}{} ",
@@ -550,41 +599,28 @@ pub fn print_text_output(
 
     // usage (only if a plan/window max is configured)
     if let Some(usage_value) = usage_percent {
-        let usage_colored = colorize_percent(usage_value);
-        // Also show remaining percentage for clarity (what's left in window)
-        let left = (100.0 - usage_value).max(0.0);
-        let left_colored = if left <= 5.0 {
-            format_pct(left).red().bold().to_string()
-        } else if left <= 20.0 {
-            format_pct(left).yellow().bold().to_string()
-        } else {
-            format_pct(left).green().to_string()
-        };
-
+        let usage_colored = colorize_percent(usage_value, args);
+        
         // Compact labels for narrow terminals
-        let (usage_label, left_label) = match term_width {
-            TerminalWidth::Narrow => ("u:", "l:"),
-            _ => ("usage:", "left:"),
+        let usage_label = match term_width {
+            TerminalWidth::Narrow => "u:",
+            _ => "usage:",
         };
 
         if let Some(projected_value) = projected_percent {
-            let proj_colored = colorize_percent(projected_value);
+            let proj_colored = colorize_percent(projected_value, args);
             print!(
-                "{}{}{}{} {}{} ",
+                "{}{}{}{} ",
                 usage_label.bright_black().dimmed(),
                 usage_colored,
                 "→".bright_black().dimmed(),
-                proj_colored,
-                left_label.bright_black().dimmed(),
-                left_colored
+                proj_colored
             );
         } else {
             print!(
-                "{}{} {}{} ",
+                "{}{} ",
                 usage_label.bright_black().dimmed(),
-                usage_colored,
-                left_label.bright_black().dimmed(),
-                left_colored
+                usage_colored
             );
         }
 
@@ -595,14 +631,21 @@ pub fn print_text_output(
                 segments.push(format!(
                     "{}{}",
                     label.bright_black().dimmed(),
-                    colorize_percent(pct)
+                    colorize_percent(pct, args)
                 ));
             }
             if let Some(pct) = summary.seven_day_opus.utilization {
                 segments.push(format!(
                     "{}{}",
                     "opus:".bright_black().dimmed(),
-                    colorize_percent(pct)
+                    colorize_percent(pct, args)
+                ));
+            }
+            if let Some(pct) = summary.seven_day_sonnet.utilization {
+                segments.push(format!(
+                    "{}{}",
+                    "sonnet:".bright_black().dimmed(),
+                    colorize_percent(pct, args)
                 ));
             }
             if !segments.is_empty() {
@@ -610,27 +653,6 @@ pub fn print_text_output(
                 let separator = format!(" {} ", "·".bright_black().dimmed());
                 let joined = segments.join(&separator);
                 print!("{} ", joined);
-            }
-
-            if args.hints {
-                if let Some(reset) = summary.seven_day.resets_at {
-                    let local = reset.with_timezone(&Local);
-                    let fmt = if use_12h { "%a %-I:%M %p" } else { "%a %H:%M" };
-                    print!(
-                        "{}{} ",
-                        "7d:".bright_black().dimmed(),
-                        local.format(fmt).to_string().white()
-                    );
-                }
-                if let Some(reset) = summary.seven_day_opus.resets_at {
-                    let local = reset.with_timezone(&Local);
-                    let fmt = if use_12h { "%a %-I:%M %p" } else { "%a %H:%M" };
-                    print!(
-                        "{}{} ",
-                        "opus:".bright_black().dimmed(),
-                        local.format(fmt).to_string().white()
-                    );
-                }
             }
         }
 
@@ -670,25 +692,15 @@ pub fn print_text_output(
         }
     }
 
-    // countdown and reset time - compact for narrow
+    // countdown and reset time - combined
     let rem_h = (remaining_minutes as i64) / 60;
     let rem_m = (remaining_minutes as i64) % 60;
-    let countdown = match term_width {
-        TerminalWidth::Narrow => {
-            if rem_h > 0 {
-                format!("{}h{}m", rem_h, rem_m)
-            } else {
-                format!("{}m", rem_m)
-            }
-        }
-        _ => {
-            if rem_h > 0 {
-                format!("{}h {}m left", rem_h, rem_m)
-            } else {
-                format!("{}m left", rem_m)
-            }
-        }
+    let countdown = if rem_h > 0 {
+        format!("{}h{}m", rem_h, rem_m)
+    } else {
+        format!("{}m", rem_m)
     };
+    
     // Emphasize as we get closer to the reset time
     let countdown_colored = if remaining_minutes < 30.0 {
         countdown.red().bold().to_string()
@@ -699,60 +711,6 @@ pub fn print_text_output(
     } else {
         countdown.white().to_string()
     };
-    print!("{}{} ", "time:".bright_black().dimmed(), countdown_colored);
-    print!("{} ", "·".bright_black().dimmed());
-
-    // Rate limit indicators
-    if let Some(rl) = rate_limit {
-        if let Some(ref s) = rl.status {
-            let s_col = match s.as_str() {
-                "allowed_warning" => "warn".yellow().bold().to_string(),
-                "rejected" => "rejected".red().bold().to_string(),
-                _ => s.to_string().green().to_string(),
-            };
-            print!("{}{} ", "rl:".bright_black().dimmed(), s_col);
-            print!("{} ", "·".bright_black().dimmed());
-        }
-        if rl.is_using_overage.unwrap_or(false) {
-            let over = rl
-                .overage_resets_at
-                .map(|d| d.with_timezone(&Local))
-                .map(|d| {
-                    if matches!(args.time_fmt, TimeFormatArg::H12) {
-                        d.format("%I:%M %p").to_string().trim().to_string()
-                    } else {
-                        d.format("%H:%M").to_string()
-                    }
-                })
-                .unwrap_or_else(|| "n/a".to_string());
-            print!(
-                "{}{}{}{} ",
-                "overage:".bright_black().dimmed(),
-                "on ".red().bold(),
-                "until ".bright_black().dimmed(),
-                over.white()
-            );
-            print!("{} ", "·".bright_black().dimmed());
-        }
-        if rl.fallback_available.unwrap_or(false) {
-            let pct = rl
-                .fallback_percentage
-                .map(|p| format!("{:.0}%", p * 100.0))
-                .unwrap_or_else(|| "".to_string());
-            print!(
-                "{}{}{}{} ",
-                "fallback:".bright_black().dimmed(),
-                "available".green(),
-                if pct.is_empty() {
-                    "".to_string()
-                } else {
-                    " ".to_string()
-                },
-                pct
-            );
-            print!("{} ", "·".bright_black().dimmed());
-        }
-    }
 
     // Reset clock at window end (active end if available; else computed using shared window_bounds)
     let window_end_local = if let Some(b) = active_block {
@@ -764,87 +722,23 @@ pub fn print_text_output(
         end.with_timezone(&Local)
     };
 
-    let use_12h = match args.time_fmt {
-        TimeFormatArg::H12 => true,
-        TimeFormatArg::H24 => false,
-        TimeFormatArg::Auto => {
-            if let Ok(forced) = env::var("CLAUDE_TIME_FORMAT") {
-                forced.trim() == "12"
-            } else {
-                let lc = env::var("LC_TIME")
-                    .or_else(|_| env::var("LANG"))
-                    .unwrap_or_default()
-                    .to_lowercase();
-                lc.contains("en_us")
-            }
-        }
-    };
-
-    let fmt = if use_12h { "%-I:%M %p" } else { "%H:%M" };
+    let fmt = if use_12h { "%-I:%M%p" } else { "%H:%M" };
     let reset_disp = window_end_local.format(fmt).to_string();
-    let midnight = window_end_local.hour() == 0 && window_end_local.minute() == 0;
-    // Prefer a more explicit "resets@" once close to window end (hints only)
-    if args.hints && remaining_minutes <= 60.0 {
-        print!(
-            "{}{} ",
-            "resets@".bright_black().dimmed(),
-            reset_disp.white()
-        );
-    } else if !use_12h && midnight {
-        // 24h mode hint for next day
-        print!(
-            "{}{} ",
-            "reset:".bright_black().dimmed(),
-            reset_disp.white()
-        );
-    } else {
-        print!(
-            "{}{} ",
-            "reset:".bright_black().dimmed(),
-            reset_disp.white()
-        );
-    }
-    print!("{} ", "·".bright_black().dimmed());
+    
+    let reset_label = match term_width {
+        TerminalWidth::Narrow => "r:",
+        _ => "reset:",
+    };
 
-    // burn: show non-cache tokens per minute (indicator); usage% now based on TOTAL tokens
-    let burn_val = format!("{}/m", format_tokens(tpm_indicator.round() as u64));
-    let burn_colored = if tpm_indicator >= 5000.0 {
-        format!("{}", burn_val.red().bold())
-    } else if tpm_indicator >= 2000.0 {
-        format!("{}", burn_val.yellow())
-    } else {
-        format!("{}", burn_val.green())
-    };
-    // Color cost/hour: green < $1/h, yellow $1–$5/h, red ≥ $5/h
-    let cph_str = format!("${}/h", format_currency(cost_per_hour));
-    let cph_colored = if cost_per_hour >= 5.0 {
-        cph_str.red().bold().to_string()
-    } else if cost_per_hour >= 1.0 {
-        cph_str.yellow().to_string()
-    } else {
-        cph_str.green().to_string()
-    };
     print!(
-        "{}{} {} ",
-        "burn:".bright_black().dimmed(),
-        burn_colored,
-        cph_colored
+        "{}{} {} ", 
+        reset_label.bright_black().dimmed(),
+        countdown_colored,
+        format!("({})", reset_disp).bright_black().dimmed()
     );
-    // (Usage percent already printed earlier as "usage (nc)" when plan caps are configured.)
-    if let Some(sess_cph) = session_cost_per_hour {
-        let sess_str = format!("${}/h", format_currency(sess_cph));
-        let sess_colored = if sess_cph >= 5.0 {
-            sess_str.red().bold().to_string()
-        } else if sess_cph >= 1.0 {
-            sess_str.yellow().to_string()
-        } else {
-            sess_str.green().to_string()
-        };
-        print!(" {}{} ", "sess:".bright_black().dimmed(), sess_colored);
-    }
     print!("{} ", "·".bright_black().dimmed());
 
-    // tokens breakdown (optional)
+    // tokens breakdown (optional) - Moved before context as context is often the last main item
     if args.show_breakdown {
         let ti = format_tokens(tokens_input);
         let to = format_tokens(tokens_output);
@@ -859,19 +753,6 @@ pub fn print_text_output(
             format!("{}/{}", tcc, tcr).white(),
             "ws:".bright_black().dimmed(),
             ws.to_string().white()
-        );
-        // Also show session-scoped breakdown for clarity
-        let sti = format_tokens(sess_tokens_input);
-        let sto = format_tokens(sess_tokens_output);
-        let stcc = format_tokens(sess_tokens_cache_create);
-        let stcr = format_tokens(sess_tokens_cache_read);
-        print!(
-            " {}{}{} {}{} ",
-            "·".bright_black().dimmed(),
-            "sess:".bright_black().dimmed(),
-            format!("{}/{}", sti, sto).white(),
-            "cache:".bright_black().dimmed(),
-            format!("{}/{}", stcc, stcr).white()
         );
         print!("{} ", "·".bright_black().dimmed());
     }
@@ -1162,7 +1043,14 @@ pub fn build_json_output(
             "five_hour": usage_limit_json(&summary.window),
             "seven_day": usage_limit_json(&summary.seven_day),
             "seven_day_opus": usage_limit_json(&summary.seven_day_opus),
+            "seven_day_sonnet": usage_limit_json(&summary.seven_day_sonnet),
             "seven_day_oauth_apps": usage_limit_json(&summary.seven_day_oauth_apps),
+            "extra_usage": summary.extra_usage.as_ref().map(|e| serde_json::json!({
+                "is_enabled": e.is_enabled,
+                "monthly_limit": e.monthly_limit,
+                "used_credits": e.used_credits,
+                "utilization": e.utilization
+            }))
         })
     });
 

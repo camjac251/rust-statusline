@@ -27,6 +27,13 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
+
+    // Debug: Write hook input to tmp file
+    if let Ok(mut f) = std::fs::File::create("") {
+        use std::io::Write;
+        let _ = f.write_all(&stdin);
+    }
+
     let hook: HookJson = serde_json::from_slice(&stdin).context("parse hook json")?;
 
     // Compute metrics (from logs)

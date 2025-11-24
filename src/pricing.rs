@@ -152,6 +152,16 @@ fn pricing_from_config(model_id: &str) -> Option<Pricing> {
 pub(crate) fn static_pricing_lookup(model_id: &str) -> Option<Pricing> {
     // Prefer exact/known variants before family heuristics
     let m = model_id.to_lowercase();
+    // Opus 4.5 (and catch generic "claude-4-5" as flagship/Opus)
+    if m.contains("opus-4-5") || m == "claude-4-5" {
+        let in_pt = 15e-6; // $15 / 1M (assumed)
+        return Some(Pricing {
+            in_per_tok: in_pt,
+            out_per_tok: 75e-6,
+            cache_create_per_tok: in_pt * 1.25,
+            cache_read_per_tok: in_pt * 0.1,
+        });
+    }
     // Opus 4.1
     if m.contains("opus-4-1") {
         let in_pt = 15e-6; // $15 / 1M

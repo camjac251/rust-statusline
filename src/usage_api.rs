@@ -163,11 +163,30 @@ pub struct UsageLimit {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExtraUsage {
+    pub is_enabled: bool,
+    pub monthly_limit: Option<f64>,
+    pub used_credits: Option<f64>,
+    pub utilization: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageSummary {
     pub window: UsageLimit,
     pub seven_day: UsageLimit,
     pub seven_day_opus: UsageLimit,
+    pub seven_day_sonnet: UsageLimit,
     pub seven_day_oauth_apps: UsageLimit,
+    pub extra_usage: Option<ExtraUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtraUsageDto {
+    #[serde(default)]
+    is_enabled: bool,
+    monthly_limit: Option<f64>,
+    used_credits: Option<f64>,
+    utilization: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,7 +207,11 @@ struct UsageResponseDto {
     #[serde(default)]
     seven_day_opus: Option<UsageLimitDto>,
     #[serde(default)]
+    seven_day_sonnet: Option<UsageLimitDto>,
+    #[serde(default)]
     seven_day_oauth_apps: Option<UsageLimitDto>,
+    #[serde(default)]
+    extra_usage: Option<ExtraUsageDto>,
 }
 
 pub fn get_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
@@ -239,10 +262,20 @@ fn fetch_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
         window: dto.five_hour.map(UsageLimit::from).unwrap_or_default(),
         seven_day: dto.seven_day.map(UsageLimit::from).unwrap_or_default(),
         seven_day_opus: dto.seven_day_opus.map(UsageLimit::from).unwrap_or_default(),
+        seven_day_sonnet: dto
+            .seven_day_sonnet
+            .map(UsageLimit::from)
+            .unwrap_or_default(),
         seven_day_oauth_apps: dto
             .seven_day_oauth_apps
             .map(UsageLimit::from)
             .unwrap_or_default(),
+        extra_usage: dto.extra_usage.map(|e| ExtraUsage {
+            is_enabled: e.is_enabled,
+            monthly_limit: e.monthly_limit,
+            used_credits: e.used_credits,
+            utilization: e.utilization,
+        }),
     })
 }
 
