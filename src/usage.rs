@@ -258,34 +258,6 @@ pub fn calc_context_from_entries(
     Some((adjusted, pct.min(100)))
 }
 
-// Fallback: compute context from the most recent entry regardless of session.
-pub fn calc_context_from_any(
-    entries: &[Entry],
-    model_id: &str,
-    model_display_name: &str,
-) -> Option<(u64, u32)> {
-    if entries.is_empty() {
-        return None;
-    }
-    let mut sorted: Vec<&Entry> = entries.iter().collect();
-    sorted.sort_by_key(|e| e.ts);
-    let last = sorted.last()?;
-    let total_in = last.input + last.output + last.cache_create + last.cache_read;
-    let overhead = system_overhead_tokens();
-    let adjusted = total_in.saturating_add(overhead);
-    let limit = context_limit_for_model_display(model_id, model_display_name);
-    let pct = if limit == 0 {
-        if adjusted == 0 {
-            0
-        } else {
-            100
-        }
-    } else {
-        ((adjusted as f64 / limit as f64) * 100.0).round() as u32
-    };
-    Some((adjusted, pct.min(100)))
-}
-
 // Additional usage metrics for enhanced tracking
 #[derive(Debug, Clone)]
 pub struct EnhancedMetrics {

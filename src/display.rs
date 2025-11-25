@@ -1,9 +1,8 @@
-use chrono::{DateTime, Local, Timelike};
+use chrono::{DateTime, Local};
 
 // Statusline palette - harmonious colors for dark theme
 const COLOR_PURPLE: (u8, u8, u8) = (200, 160, 255); // Opus model
 const COLOR_AMBER: (u8, u8, u8) = (255, 200, 100); // Sonnet model (bright)
-const COLOR_PINK: (u8, u8, u8) = (253, 93, 177); // warnings/high values
 const COLOR_CYAN: (u8, u8, u8) = (100, 220, 255); // Haiku model (bright)
 use std::env;
 
@@ -126,8 +125,8 @@ fn format_pct(pct: f64) -> String {
 // Yellow Shimmer: rgb(255, 225, 155)
 // Red Shimmer: rgb(250, 155, 147)
 fn color_scale_rgb(value: f64, max: f64) -> (u8, u8, u8) {
-    let ratio = (value / max).max(0.0).min(1.0);
-    
+    let ratio = (value / max).clamp(0.0, 1.0);
+
     if ratio < 0.5 {
         // Green to Yellow
         let t = ratio * 2.0;
@@ -151,14 +150,12 @@ fn colorize_percent(pct: f64, args: &Args) -> String {
         // Gradient: 0% -> 100%
         let (r, g, b) = color_scale_rgb(pct, 100.0);
         formatted.truecolor(r, g, b).to_string()
+    } else if pct >= 95.0 {
+        formatted.red().bold().to_string()
+    } else if pct >= 80.0 {
+        formatted.yellow().bold().to_string()
     } else {
-        if pct >= 95.0 {
-            formatted.red().bold().to_string()
-        } else if pct >= 80.0 {
-            formatted.yellow().bold().to_string()
-        } else {
-            formatted.green().to_string()
-        }
+        formatted.green().to_string()
     }
 }
 
@@ -181,10 +178,11 @@ fn is_truecolor_enabled(args: &Args) -> bool {
         }
     }
     // Auto-detect common truecolor environment variables
-    if env::var("COLORTERM").map_or(false, |v| v.contains("truecolor") || v.contains("24bit")) {
+    if env::var("COLORTERM").is_ok_and(|v| v.contains("truecolor") || v.contains("24bit")) {
         return true;
     }
-    if env::var("TERM").map_or(false, |v| v.contains("xterm-truecolor") || v.contains("xterm-256color")) {
+    if env::var("TERM").is_ok_and(|v| v.contains("xterm-truecolor") || v.contains("xterm-256color"))
+    {
         return true;
     }
     false
@@ -482,22 +480,22 @@ pub fn print_text_output(
     latest_reset: Option<DateTime<chrono::Utc>>,
     _tpm: f64,
     tpm_indicator: f64,
-    cost_per_hour: f64,
+    _cost_per_hour: f64,
     context: Option<(u64, u32)>,
     tokens_input: u64,
     tokens_output: u64,
     tokens_cache_create: u64,
     tokens_cache_read: u64,
     // session-scoped tokens within the current window
-    sess_tokens_input: u64,
-    sess_tokens_output: u64,
-    sess_tokens_cache_create: u64,
-    sess_tokens_cache_read: u64,
+    _sess_tokens_input: u64,
+    _sess_tokens_output: u64,
+    _sess_tokens_cache_create: u64,
+    _sess_tokens_cache_read: u64,
     web_search_requests: u64,
     // Optional enrichments from Claude's provided cost block
-    session_cost_per_hour: Option<f64>,
+    _session_cost_per_hour: Option<f64>,
     _lines_delta: Option<(i64, i64)>,
-    rate_limit: Option<&RateLimitInfo>,
+    _rate_limit: Option<&RateLimitInfo>,
     usage_limits: Option<&UsageSummary>,
 ) {
     // Detect terminal width for responsive formatting
@@ -532,16 +530,14 @@ pub fn print_text_output(
     let today_cost_color = if use_true {
         let (r, g, b) = color_scale_rgb(today_cost, 10.0);
         format_currency(today_cost).truecolor(r, g, b).to_string()
+    } else if today_cost >= 100.0 {
+        format_currency(today_cost).bold().red().to_string()
+    } else if today_cost >= 50.0 {
+        format_currency(today_cost).bold().yellow().to_string()
+    } else if today_cost >= 20.0 {
+        format_currency(today_cost).yellow().to_string()
     } else {
-        if today_cost >= 100.0 {
-            format_currency(today_cost).bold().red().to_string()
-        } else if today_cost >= 50.0 {
-            format_currency(today_cost).bold().yellow().to_string()
-        } else if today_cost >= 20.0 {
-            format_currency(today_cost).yellow().to_string()
-        } else {
-            format_currency(today_cost).white().to_string()
-        }
+        format_currency(today_cost).white().to_string()
     };
     print!(
         "{}{}{} ",
@@ -561,17 +557,18 @@ pub fn print_text_output(
     // Scale window cost: $0-5
     let window_cost_color = if use_true {
         let (r, g, b) = color_scale_rgb(total_cost, 5.0);
-        format_currency(total_cost).truecolor(r, g, b).bold().to_string()
+        format_currency(total_cost)
+            .truecolor(r, g, b)
+            .bold()
+            .to_string()
+    } else if total_cost >= 50.0 {
+        format_currency(total_cost).bold().red().to_string()
+    } else if total_cost >= 20.0 {
+        format_currency(total_cost).bold().yellow().to_string()
+    } else if total_cost >= 10.0 {
+        format_currency(total_cost).yellow().to_string()
     } else {
-        if total_cost >= 50.0 {
-            format_currency(total_cost).bold().red().to_string()
-        } else if total_cost >= 20.0 {
-            format_currency(total_cost).bold().yellow().to_string()
-        } else if total_cost >= 10.0 {
-            format_currency(total_cost).yellow().to_string()
-        } else {
-            format_currency(total_cost).bright_white().to_string()
-        }
+        format_currency(total_cost).bright_white().to_string()
     };
     print!(
         "{}{}{} ",
@@ -600,7 +597,7 @@ pub fn print_text_output(
     // usage (only if a plan/window max is configured)
     if let Some(usage_value) = usage_percent {
         let usage_colored = colorize_percent(usage_value, args);
-        
+
         // Compact labels for narrow terminals
         let usage_label = match term_width {
             TerminalWidth::Narrow => "u:",
@@ -617,11 +614,7 @@ pub fn print_text_output(
                 proj_colored
             );
         } else {
-            print!(
-                "{}{} ",
-                usage_label.bright_black().dimmed(),
-                usage_colored
-            );
+            print!("{}{} ", usage_label.bright_black().dimmed(), usage_colored);
         }
 
         if let Some(summary) = usage_limits {
@@ -700,7 +693,7 @@ pub fn print_text_output(
     } else {
         format!("{}m", rem_m)
     };
-    
+
     // Emphasize as we get closer to the reset time
     let countdown_colored = if remaining_minutes < 30.0 {
         countdown.red().bold().to_string()
@@ -724,14 +717,14 @@ pub fn print_text_output(
 
     let fmt = if use_12h { "%-I:%M%p" } else { "%H:%M" };
     let reset_disp = window_end_local.format(fmt).to_string();
-    
+
     let reset_label = match term_width {
         TerminalWidth::Narrow => "r:",
         _ => "reset:",
     };
 
     print!(
-        "{}{} {} ", 
+        "{}{} {} ",
         reset_label.bright_black().dimmed(),
         countdown_colored,
         format!("({})", reset_disp).bright_black().dimmed()

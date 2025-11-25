@@ -10,7 +10,7 @@ use claude_statusline::display::color_shim::ColorizeShim;
 use claude_statusline::display::{print_header, print_json_output, print_text_output};
 use claude_statusline::models::HookJson;
 use claude_statusline::usage::{
-    calc_context_from_any, calc_context_from_entries, calc_context_from_transcript, scan_usage,
+    calc_context_from_entries, calc_context_from_transcript, scan_usage,
 };
 use claude_statusline::usage_api::{get_usage_summary, UsageSummary};
 use claude_statusline::utils::{claude_paths, read_stdin};
@@ -213,12 +213,9 @@ fn main() -> Result<()> {
             context_source = Some("entries");
         }
     }
-    if context.is_none() {
-        context = calc_context_from_any(&entries, &hook.model.id, &hook.model.display_name);
-        if context.is_some() {
-            context_source = Some("latest");
-        }
-    }
+    // Note: Removed calc_context_from_any fallback - it returned stale data from
+    // previous sessions when starting a new session. Better to show no context
+    // than misleading data from a different session.
 
     if args.json {
         // Machine-readable output for statusline consumption
