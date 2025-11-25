@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Timelike};
 
 // Statusline palette - harmonious colors for dark theme
 const COLOR_PURPLE: (u8, u8, u8) = (200, 160, 255); // Opus model
@@ -621,11 +621,21 @@ pub fn print_text_output(
             let mut segments: Vec<String> = Vec::new();
             if let Some(pct) = summary.seven_day.utilization {
                 let label = if long_labels { "weekly:" } else { "7d:" };
-                segments.push(format!(
+                let mut text = format!(
                     "{}{}",
                     label.bright_black().dimmed(),
                     colorize_percent(pct, args)
-                ));
+                );
+                if let Some(reset) = summary.seven_day.resets_at {
+                    let local_reset = reset.with_timezone(&Local);
+                    text.push_str(
+                        &format!(" ({})", local_reset.format("%a"))
+                            .bright_black()
+                            .dimmed()
+                            .to_string(),
+                    );
+                }
+                segments.push(text);
             }
             if let Some(pct) = summary.seven_day_opus.utilization {
                 segments.push(format!(
@@ -715,8 +725,19 @@ pub fn print_text_output(
         end.with_timezone(&Local)
     };
 
-    let fmt = if use_12h { "%-I:%M%p" } else { "%H:%M" };
-    let reset_disp = window_end_local.format(fmt).to_string();
+    let reset_disp = if window_end_local.minute() == 0 {
+        if use_12h {
+            window_end_local.format("%-I%p").to_string()
+        } else {
+            window_end_local.format("%H").to_string()
+        }
+    } else {
+        if use_12h {
+            window_end_local.format("%-I:%M%p").to_string()
+        } else {
+            window_end_local.format("%H:%M").to_string()
+        }
+    };
 
     let reset_label = match term_width {
         TerminalWidth::Narrow => "r:",
