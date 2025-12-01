@@ -628,8 +628,27 @@ pub fn print_text_output(
                 );
                 if let Some(reset) = summary.seven_day.resets_at {
                     let local_reset = reset.with_timezone(&Local);
+                    let now = Local::now();
+                    let hours_until = (reset - now.with_timezone(&chrono::Utc)).num_hours();
+                    let reset_fmt = if hours_until < 24 {
+                        // Under 24 hours: show time
+                        if use_12h {
+                            if local_reset.minute() == 0 {
+                                local_reset.format("%-I%p").to_string().to_lowercase()
+                            } else {
+                                local_reset.format("%-I:%M%p").to_string().to_lowercase()
+                            }
+                        } else if local_reset.minute() == 0 {
+                            local_reset.format("%H:00").to_string()
+                        } else {
+                            local_reset.format("%H:%M").to_string()
+                        }
+                    } else {
+                        // Over 24 hours: show day name
+                        local_reset.format("%a").to_string()
+                    };
                     text.push_str(
-                        &format!(" ({})", local_reset.format("%a"))
+                        &format!(" ({})", reset_fmt)
                             .bright_black()
                             .dimmed()
                             .to_string(),
@@ -727,16 +746,14 @@ pub fn print_text_output(
 
     let reset_disp = if window_end_local.minute() == 0 {
         if use_12h {
-            window_end_local.format("%-I%p").to_string()
+            window_end_local.format("%-I%p").to_string().to_lowercase()
         } else {
             window_end_local.format("%H").to_string()
         }
+    } else if use_12h {
+        window_end_local.format("%-I:%M%p").to_string().to_lowercase()
     } else {
-        if use_12h {
-            window_end_local.format("%-I:%M%p").to_string()
-        } else {
-            window_end_local.format("%H:%M").to_string()
-        }
+        window_end_local.format("%H:%M").to_string()
     };
 
     let reset_label = match term_width {
