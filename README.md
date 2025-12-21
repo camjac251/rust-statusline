@@ -14,7 +14,7 @@ Lightweight statusline utility for Claude Code sessions. Reads a single JSON lin
 
 ## Build
 
-Requires Rust 1.85+ (edition 2024).
+Requires Rust 1.87+ (edition 2024).
 
 - Build:
   - `cargo build --release`

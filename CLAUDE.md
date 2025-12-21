@@ -116,7 +116,7 @@ Configuration via environment variables (also see CLI `--help`):
   - Tests across Ubuntu, macOS, Windows with stable and beta Rust
   - Tests with all feature combinations: `--all-features`, `--no-default-features`, `--features git`, `--features colors`
   - Binary size check: Release build must be <4MB on Linux
-  - MSRV check: Must build with Rust 1.85.0
+  - MSRV check: Must build with Rust 1.87.0
 
 - **Integration Tests** (`tests/`):
   - `json_output.rs` - JSON schema validation and field presence
@@ -151,7 +151,7 @@ Configuration via environment variables (also see CLI `--help`):
 ## IMPORTANT
 
 - **Binary Size**: Release builds with all features should be <7MB on Linux (CI enforces this)
-- **MSRV**: Minimum Supported Rust Version is 1.85.0 (edition 2024)
+- **MSRV**: Minimum Supported Rust Version is 1.87.0 (edition 2024)
 - **Pricing Data**: Embedded at compile-time (last: 2025-10-18); releases bundle `pricing.json` for easy updates without recompilation
 - **Pricing Resolution Order**: 1) `pricing.json` in cwd, 2) `CLAUDE_PRICING_PATH` env var, 3) embedded fallback, 4) env var overrides (all four must be set)
 - **Cache Behavior**:
