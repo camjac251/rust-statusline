@@ -15,9 +15,9 @@ use claude_statusline::models::HookJson;
 use claude_statusline::usage::{
     calc_context_from_entries, calc_context_from_transcript, scan_usage,
 };
-use claude_statusline::usage_api::{get_usage_summary, UsageSummary};
+use claude_statusline::usage_api::{UsageSummary, get_usage_summary};
 use claude_statusline::utils::{claude_paths, read_stdin};
-use claude_statusline::window::{calculate_window_metrics, BurnScope, WindowScope};
+use claude_statusline::window::{BurnScope, WindowScope, calculate_window_metrics};
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -185,7 +185,9 @@ fn main() -> Result<()> {
     // Honor window anchor preference: set env consumed by window.rs
     // SAFETY: We're in single-threaded startup code before any concurrent access
     match args.window_anchor {
-        WindowAnchorArg::Provider => unsafe { std::env::set_var("CLAUDE_WINDOW_ANCHOR", "provider") },
+        WindowAnchorArg::Provider => unsafe {
+            std::env::set_var("CLAUDE_WINDOW_ANCHOR", "provider")
+        },
         WindowAnchorArg::Log => unsafe { std::env::set_var("CLAUDE_WINDOW_ANCHOR", "log") },
     }
     let window_scope = match args.window_scope {

@@ -72,11 +72,7 @@ fn parse_am_pm_reset(ts_utc: DateTime<Utc>, text: &str) -> Option<DateTime<Utc>>
         return None;
     }
     let hour24: u32 = if ampm == "am" {
-        if base_hour == 12 {
-            0
-        } else {
-            base_hour
-        }
+        if base_hour == 12 { 0 } else { base_hour }
     } else if base_hour == 12 {
         12
     } else {
@@ -206,11 +202,7 @@ pub fn calc_context_from_transcript(
         let overhead = system_overhead_tokens();
         let adjusted = total_in.saturating_add(overhead);
         let pct = if budget == 0 {
-            if adjusted == 0 {
-                0
-            } else {
-                100
-            }
+            if adjusted == 0 { 0 } else { 100 }
         } else {
             ((adjusted as f64 / budget as f64) * 100.0).round() as u32
         };
@@ -247,11 +239,7 @@ pub fn calc_context_from_entries(
     let adjusted = total_in.saturating_add(overhead);
     let limit = context_limit_for_model_display(model_id, model_display_name);
     let pct = if limit == 0 {
-        if adjusted == 0 {
-            0
-        } else {
-            100
-        }
+        if adjusted == 0 { 0 } else { 100 }
     } else {
         ((adjusted as f64 / limit as f64) * 100.0).round() as u32
     };
@@ -1127,11 +1115,7 @@ pub fn scan_usage(
 // Heuristic: treat values >= 1_000_000_000 as epoch seconds; otherwise as seconds-from-now.
 fn normalize_reset_anchor(n: i64) -> i64 {
     let now = Utc::now().timestamp();
-    if n >= 1_000_000_000 {
-        n
-    } else {
-        now + n
-    }
+    if n >= 1_000_000_000 { n } else { now + n }
 }
 
 // Calculate message complexity weight based on token usage

@@ -4,7 +4,7 @@
 
 use crate::models::Entry;
 use crate::usage::{calculate_session_complexity, detect_rapid_exchange};
-use crate::utils::{sanitized_project_name, WINDOW_DURATION_HOURS, WINDOW_DURATION_SECONDS};
+use crate::utils::{WINDOW_DURATION_HOURS, WINDOW_DURATION_SECONDS, sanitized_project_name};
 use chrono::{DateTime, Duration, Local, Timelike, Utc};
 
 // Session reset hours in local time: 1am, 7am, 1pm, 7pm

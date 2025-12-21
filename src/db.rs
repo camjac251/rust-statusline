@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{Local, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};

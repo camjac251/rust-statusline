@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use claude_statusline::models::Entry;
-use claude_statusline::window::{calculate_window_metrics, BurnScope, WindowScope};
+use claude_statusline::window::{BurnScope, WindowScope, calculate_window_metrics};
 
 fn create_test_entry(
     ts: DateTime<Utc>,

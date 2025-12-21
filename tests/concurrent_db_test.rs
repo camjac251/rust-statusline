@@ -40,7 +40,9 @@ fn test_concurrent_db_access() {
             // Add stagger to reduce initial contention
             thread::sleep(std::time::Duration::from_millis(i as u64 * 10));
             thread::spawn(move || {
-                unsafe { std::env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
+                unsafe {
+                    std::env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap())
+                };
 
                 // Each thread performs 5 get_global_usage calls with retry logic
                 for iteration in 0..5 {
