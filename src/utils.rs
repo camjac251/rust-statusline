@@ -272,12 +272,13 @@ mod tests {
             1_000_000
         );
 
-        env::set_var("CLAUDE_CONTEXT_LIMIT", "123456");
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_CONTEXT_LIMIT", "123456") };
         assert_eq!(
             context_limit_for_model_display("claude-3.5-sonnet", "Claude 3.5 Sonnet"),
             123456
         );
-        env::remove_var("CLAUDE_CONTEXT_LIMIT");
+        unsafe { env::remove_var("CLAUDE_CONTEXT_LIMIT") };
     }
 
     #[test]
@@ -294,27 +295,28 @@ mod tests {
         );
 
         // Test env override for Sonnet 4.5 (capped at 32000)
-        env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "16000");
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "16000") };
         assert_eq!(
             reserved_output_tokens_for_model("claude-sonnet-4-5"),
             16_000
         );
 
         // Test env override exceeding cap
-        env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000");
+        unsafe { env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000") };
         assert_eq!(
             reserved_output_tokens_for_model("claude-sonnet-4-5"),
             32_000
         );
 
         // Test env override for 3-5 model (capped at 8192)
-        env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4000");
+        unsafe { env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4000") };
         assert_eq!(reserved_output_tokens_for_model("claude-3-5-sonnet"), 4_000);
 
-        env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "16000");
+        unsafe { env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "16000") };
         assert_eq!(reserved_output_tokens_for_model("claude-3-5-sonnet"), 8_192);
 
-        env::remove_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS");
+        unsafe { env::remove_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS") };
     }
 
     #[test]
@@ -339,12 +341,13 @@ mod tests {
         );
 
         // Test with env override
-        env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "16000");
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "16000") };
         assert_eq!(
             usable_context_limit("claude-sonnet-4-5", "Claude Sonnet 4.5"),
             184_000
         );
 
-        env::remove_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS");
+        unsafe { env::remove_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS") };
     }
 }

@@ -252,55 +252,58 @@ fn parse_transcript_today_cost(transcript_path: &Path, today: &str) -> Result<(f
             continue;
         }
 
-        if let Some(cost_val) = v.get("costUSD").or_else(|| v.get("cost_usd")) {
-            if let Some(cost) = cost_val
+        if let Some(cost_val) = v.get("costUSD").or_else(|| v.get("cost_usd"))
+            && let Some(cost) = cost_val
                 .as_f64()
                 .or_else(|| cost_val.as_str().and_then(|s| s.parse::<f64>().ok()))
-            {
-                today_cost += cost;
-                entry_count += 1;
-            }
+        {
+            today_cost += cost;
+            entry_count += 1;
         }
 
-        if let Some(message) = v.get("message") {
-            if let Some(usage) = message.get("usage") {
-                let input = usage
-                    .get("input_tokens")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0);
-                let output = usage
-                    .get("output_tokens")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0);
-                let cache_create = usage
-                    .get("cache_creation_input_tokens")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0);
-                let cache_read = usage
-                    .get("cache_read_input_tokens")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0);
+        if let Some(message) = v.get("message")
+            && let Some(usage) = message.get("usage")
+        {
+            let input = usage
+                .get("input_tokens")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
+            let output = usage
+                .get("output_tokens")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
+            let cache_create = usage
+                .get("cache_creation_input_tokens")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
+            let cache_read = usage
+                .get("cache_read_input_tokens")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
 
-                if input > 0 || output > 0 || cache_create > 0 || cache_read > 0 {
-                    let model_id = v
-                        .get("model")
+            if (input > 0 || output > 0 || cache_create > 0 || cache_read > 0)
+                && let Some(base_p) = crate::pricing::pricing_for_model({
+                    v.get("model")
                         .or_else(|| message.get("model"))
                         .and_then(|m| m.as_str())
-                        .unwrap_or("claude-sonnet-4");
+                        .unwrap_or("claude-sonnet-4")
+                })
+            {
+                let model_id = v
+                    .get("model")
+                    .or_else(|| message.get("model"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("claude-sonnet-4");
+                let total_in = input + cache_create + cache_read;
+                let p = crate::pricing::apply_tiered_pricing(base_p, model_id, total_in);
 
-                    if let Some(base_p) = crate::pricing::pricing_for_model(model_id) {
-                        let total_in = input + cache_create + cache_read;
-                        let p = crate::pricing::apply_tiered_pricing(base_p, model_id, total_in);
+                let cost = (input as f64) * p.in_per_tok
+                    + (output as f64) * p.out_per_tok
+                    + (cache_create as f64) * p.cache_create_per_tok
+                    + (cache_read as f64) * p.cache_read_per_tok;
 
-                        let cost = (input as f64) * p.in_per_tok
-                            + (output as f64) * p.out_per_tok
-                            + (cache_create as f64) * p.cache_create_per_tok
-                            + (cache_read as f64) * p.cache_read_per_tok;
-
-                        today_cost += cost;
-                        entry_count += 1;
-                    }
-                }
+                today_cost += cost;
+                entry_count += 1;
             }
         }
     }
@@ -324,10 +327,10 @@ pub fn get_global_usage(
     transcript_path: &Path,
     session_today_cost: Option<f64>,
 ) -> Result<GlobalUsage> {
-    if let Ok(val) = env::var("CLAUDE_DB_CACHE_DISABLE") {
-        if val == "1" {
-            return Err(anyhow::anyhow!("DB cache disabled via env var"));
-        }
+    if let Ok(val) = env::var("CLAUDE_DB_CACHE_DISABLE")
+        && val == "1"
+    {
+        return Err(anyhow::anyhow!("DB cache disabled via env var"));
     }
 
     let conn = open_db()?;
@@ -516,7 +519,8 @@ mod tests {
     fn test_db_init() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap());
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
 
         let conn = open_db().unwrap();
         let version: String = conn
@@ -528,7 +532,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(version, "1");
-        env::remove_var("CLAUDE_STATUSLINE_DB_PATH");
+        unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
     }
 
     #[test]
@@ -536,7 +540,8 @@ mod tests {
     fn test_upsert_session() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap());
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
 
         let conn = open_db().unwrap();
         let transcript_path = PathBuf::from("/tmp/test.jsonl");
@@ -561,7 +566,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(cost, 1.23);
-        env::remove_var("CLAUDE_STATUSLINE_DB_PATH");
+        unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
     }
 
     #[test]
@@ -569,7 +574,8 @@ mod tests {
     fn test_api_cache() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_api_cache.db");
-        env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap());
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
 
         // Ensure clean DB
         let _ = std::fs::remove_file(&db_path);
@@ -602,7 +608,7 @@ mod tests {
         let expired = get_api_cache("expired_key").unwrap();
         assert_eq!(expired, None);
 
-        env::remove_var("CLAUDE_STATUSLINE_DB_PATH");
+        unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
     }
 
     #[test]
@@ -610,7 +616,8 @@ mod tests {
     fn test_stale_cleanup() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap());
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
 
         let conn = open_db().unwrap();
         let transcript_path = PathBuf::from("/tmp/test.jsonl");
@@ -647,6 +654,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(count, 1);
-        env::remove_var("CLAUDE_STATUSLINE_DB_PATH");
+        unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
     }
 }

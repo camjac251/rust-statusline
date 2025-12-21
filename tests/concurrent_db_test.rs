@@ -10,7 +10,7 @@ use tempfile::TempDir;
 fn test_concurrent_db_access() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test_concurrent.db");
-    std::env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap());
+    unsafe { std::env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
 
     // Create 10 test transcript files
     let transcript_files: Vec<PathBuf> = (0..10)
@@ -40,7 +40,7 @@ fn test_concurrent_db_access() {
             // Add stagger to reduce initial contention
             thread::sleep(std::time::Duration::from_millis(i as u64 * 10));
             thread::spawn(move || {
-                std::env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap());
+                unsafe { std::env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
 
                 // Each thread performs 5 get_global_usage calls with retry logic
                 for iteration in 0..5 {
@@ -84,7 +84,7 @@ fn test_concurrent_db_access() {
     }
 
     // Verify database is not corrupted and has correct session count
-    std::env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap());
+    unsafe { std::env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
     let final_result = get_global_usage(
         "final-session",
         "/tmp/final-project",
@@ -97,7 +97,7 @@ fn test_concurrent_db_access() {
     assert_eq!(final_result.sessions_count, 11);
 
     // Clean up
-    std::env::remove_var("CLAUDE_STATUSLINE_DB_PATH");
+    unsafe { std::env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
 }
 
 /// Test that provided session_today_cost bypasses parsing (optimization)
@@ -108,7 +108,7 @@ fn test_provided_cost_optimization() {
     let db_path = temp_dir.path().join("test_opt.db");
     let transcript_path = temp_dir.path().join("transcript.jsonl");
 
-    std::env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap());
+    unsafe { std::env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
 
     // Write transcript with known cost
     std::fs::write(
@@ -158,7 +158,7 @@ fn test_provided_cost_optimization() {
     assert_eq!(result3.session_cost, 3.7);
 
     // Clean up
-    std::env::remove_var("CLAUDE_STATUSLINE_DB_PATH");
+    unsafe { std::env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
 }
 
 /// Test that stale entries from previous days are cleaned up
@@ -169,7 +169,7 @@ fn test_date_rollover_cleanup() {
     let db_path = temp_dir.path().join("test_rollover.db");
     let transcript_path = temp_dir.path().join("transcript.jsonl");
 
-    std::env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap());
+    unsafe { std::env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
 
     // This test verifies that entries with yesterday's date are cleaned up
     // Since we can't easily mock the date, we'll verify the DB has only today's entries
@@ -192,5 +192,5 @@ fn test_date_rollover_cleanup() {
     assert_eq!(result.global_today, 1.0);
 
     // Clean up
-    std::env::remove_var("CLAUDE_STATUSLINE_DB_PATH");
+    unsafe { std::env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
 }

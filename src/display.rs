@@ -174,10 +174,10 @@ fn is_truecolor_enabled(args: &Args) -> bool {
     if args.truecolor {
         return true; // Explicit flag always overrides
     }
-    if let Ok(v) = env::var("CLAUDE_TRUECOLOR") {
-        if v.trim() == "1" {
-            return true;
-        }
+    if let Ok(v) = env::var("CLAUDE_TRUECOLOR")
+        && v.trim() == "1"
+    {
+        return true;
     }
     // Auto-detect common truecolor environment variables
     if env::var("COLORTERM").is_ok_and(|v| v.contains("truecolor") || v.contains("24bit")) {
@@ -199,17 +199,17 @@ enum TerminalWidth {
 
 fn get_terminal_width() -> TerminalWidth {
     // Check for override via env var (useful for testing)
-    if let Ok(override_width) = env::var("CLAUDE_TERMINAL_WIDTH") {
-        if let Ok(width) = override_width.parse::<u16>() {
-            let effective_width = width.saturating_sub(TERMINAL_MARGIN);
-            return if effective_width < WIDTH_NARROW {
-                TerminalWidth::Narrow
-            } else if effective_width < WIDTH_MEDIUM {
-                TerminalWidth::Medium
-            } else {
-                TerminalWidth::Wide
-            };
-        }
+    if let Ok(override_width) = env::var("CLAUDE_TERMINAL_WIDTH")
+        && let Ok(width) = override_width.parse::<u16>()
+    {
+        let effective_width = width.saturating_sub(TERMINAL_MARGIN);
+        return if effective_width < WIDTH_NARROW {
+            TerminalWidth::Narrow
+        } else if effective_width < WIDTH_MEDIUM {
+            TerminalWidth::Medium
+        } else {
+            TerminalWidth::Wide
+        };
     }
 
     // Detect actual terminal width and subtract margin for CLI padding

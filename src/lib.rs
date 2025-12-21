@@ -1,3 +1,6 @@
+// Edition 2024 migration: allow collapsible_if for now, can refactor incrementally
+#![allow(clippy::collapsible_if)]
+
 //! # Claude Statusline
 //!
 //! A lightweight statusline utility for Claude Code sessions that provides real-time

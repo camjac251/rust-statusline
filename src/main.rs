@@ -1,3 +1,6 @@
+// Edition 2024 migration: allow collapsible_if for now, can refactor incrementally
+#![allow(clippy::collapsible_if)]
+
 use anyhow::{Context, Result};
 use chrono::Utc;
 #[cfg(feature = "colors")]
@@ -180,9 +183,10 @@ fn main() -> Result<()> {
     // Calculate window metrics
     let now_utc = Utc::now();
     // Honor window anchor preference: set env consumed by window.rs
+    // SAFETY: We're in single-threaded startup code before any concurrent access
     match args.window_anchor {
-        WindowAnchorArg::Provider => std::env::set_var("CLAUDE_WINDOW_ANCHOR", "provider"),
-        WindowAnchorArg::Log => std::env::set_var("CLAUDE_WINDOW_ANCHOR", "log"),
+        WindowAnchorArg::Provider => unsafe { std::env::set_var("CLAUDE_WINDOW_ANCHOR", "provider") },
+        WindowAnchorArg::Log => unsafe { std::env::set_var("CLAUDE_WINDOW_ANCHOR", "log") },
     }
     let window_scope = match args.window_scope {
         WindowScopeArg::Global => WindowScope::Global,

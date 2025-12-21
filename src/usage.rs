@@ -892,10 +892,10 @@ pub fn scan_usage(
                     format!("F:{}|{}", sid_hint.clone().unwrap_or_default(), composite)
                 };
                 // Remember id -> session mappings when available
-                if let (Some(ref m), Some(ref s)) = (&mid, &sid) {
+                if let (Some(m), Some(s)) = (&mid, &sid) {
                     sid_by_mid.insert(m.clone(), s.clone());
                 }
-                if let (Some(ref r), Some(ref s)) = (&rid, &sid) {
+                if let (Some(r), Some(s)) = (&rid, &sid) {
                     sid_by_rid.insert(r.clone(), s.clone());
                 }
                 if cost == 0.0 {

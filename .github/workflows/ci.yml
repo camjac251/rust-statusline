@@ -81,7 +81,7 @@ jobs:
         run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
       
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: lcov.info
           fail_ci_if_error: false
@@ -108,7 +108,7 @@ jobs:
         run: |
           SIZE=$(stat -c%s target/release/claude_statusline)
           echo "Binary size: $SIZE bytes"
-          if [ $SIZE -gt 7000000 ]; then
+          if [ "$SIZE" -gt 7000000 ]; then
             echo "Warning: Binary size exceeds 7MB"
             exit 1
           fi
@@ -118,6 +118,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.74.0  # MSRV from README
+      - uses: dtolnay/rust-toolchain@1.85.0  # MSRV
       - name: Check MSRV
         run: cargo build --all-features
