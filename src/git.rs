@@ -27,7 +27,7 @@ pub fn read_git_info(start_dir: &Path) -> Option<GitInfo> {
         let short = name.shorten();
         info.branch = Some(short.to_string());
     }
-    if let Ok(Some(id)) = head.try_peel_to_id_in_place() {
+    if let Ok(Some(id)) = head.try_peel_to_id() {
         let hex = id.to_hex().to_string();
         info.short_commit = Some(hex.chars().take(7).collect());
     }
@@ -51,7 +51,7 @@ pub fn read_git_info(start_dir: &Path) -> Option<GitInfo> {
     }
     info.worktree_count = Some(count);
     // Determine if current working dir is a linked worktree by checking if .git is a file
-    if let Some(wd) = repo.work_dir() {
+    if let Some(wd) = repo.workdir() {
         let dotgit = wd.join(".git");
         if dotgit.is_file() {
             info.is_linked_worktree = Some(true);
@@ -76,8 +76,8 @@ pub fn read_git_info(start_dir: &Path) -> Option<GitInfo> {
                 .unwrap_or(merge_s.as_str());
             let upstream_ref = format!("refs/remotes/{}/{}", remote_s, merge_short);
             if let Ok(mut up_ref) = repo.find_reference(upstream_ref.as_str()) {
-                if let Ok(up_id) = up_ref.peel_to_id_in_place() {
-                    if let Ok(Some(head_id)) = repo.head().ok()?.try_peel_to_id_in_place() {
+                if let Ok(up_id) = up_ref.peel_to_id() {
+                    if let Ok(Some(head_id)) = repo.head().ok()?.try_peel_to_id() {
                         let mut head_set = std::collections::HashSet::<String>::new();
                         if let Ok(iter) = head_id.ancestors().all() {
                             for item in iter.flatten() {

@@ -273,17 +273,17 @@ pub fn get_usage_summary(claude_paths: &[PathBuf], model_id: Option<&str>) -> Op
 
 fn fetch_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
     let token = find_oauth_token(claude_paths)?;
-    let agent = ureq::AgentBuilder::new()
-        .timeout_read(Duration::from_secs(5))
-        .timeout_write(Duration::from_secs(5))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(5)))
+        .build()
+        .into();
 
-    let response = agent
+    let mut response = agent
         .get(USAGE_ENDPOINT)
-        .set("Authorization", &format!("Bearer {}", token))
-        .set("User-Agent", USER_AGENT.as_str())
-        .set("Accept", "application/json")
-        .set("anthropic-beta", ANTHROPIC_BETA)
+        .header("Authorization", &format!("Bearer {}", token))
+        .header("User-Agent", USER_AGENT.as_str())
+        .header("Accept", "application/json")
+        .header("anthropic-beta", ANTHROPIC_BETA)
         .call()
         .ok()?;
 
@@ -291,7 +291,7 @@ fn fetch_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
         return None;
     }
 
-    let dto: UsageResponseDto = response.into_json().ok()?;
+    let dto: UsageResponseDto = response.body_mut().read_json().ok()?;
     Some(UsageSummary {
         window: dto.five_hour.map(UsageLimit::from).unwrap_or_default(),
         seven_day: dto.seven_day.map(UsageLimit::from).unwrap_or_default(),
