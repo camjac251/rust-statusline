@@ -497,6 +497,8 @@ pub fn print_text_output(
     _lines_delta: Option<(i64, i64)>,
     _rate_limit: Option<&RateLimitInfo>,
     usage_limits: Option<&UsageSummary>,
+    // Override context limit from hook.context_window.context_window_size
+    context_limit_override: Option<u64>,
 ) {
     // Detect terminal width for responsive formatting
     let term_width = get_terminal_width();
@@ -805,9 +807,9 @@ pub fn print_text_output(
         } else {
             format!("{}%", pct).green().to_string()
         };
-        let ctx_limit_usable = context_limit_for_model_display(model_id, model_display_name)
-            .saturating_sub(reserved_output_tokens_for_model(model_id));
-        let ctx_limit_full = context_limit_for_model_display(model_id, model_display_name);
+        let ctx_limit_full = context_limit_override
+            .unwrap_or_else(|| context_limit_for_model_display(model_id, model_display_name));
+        let ctx_limit_usable = ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
         let output_reserve = reserved_output_tokens_for_model(model_id);
         let overhead = system_overhead_tokens();
         let raw_tokens = tokens.saturating_sub(overhead);
@@ -874,8 +876,8 @@ pub fn print_text_output(
             // Only show if auto-compact is actually enabled
             if pct >= 40 && crate::utils::auto_compact_enabled() {
                 // Calculate compact trigger point: usable - cushion (13K default)
-                let usable = context_limit_for_model_display(model_id, model_display_name)
-                    .saturating_sub(reserved_output_tokens_for_model(model_id));
+                // Use ctx_limit_full (already computed with override) for consistency
+                let usable = ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
                 let cushion = crate::utils::auto_compact_headroom_tokens();
                 let compact_trigger = usable.saturating_sub(cushion) as f64;
                 let headroom_to_compact = (compact_trigger - tokens as f64).max(0.0);

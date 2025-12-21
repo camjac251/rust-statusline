@@ -247,6 +247,13 @@ fn main() -> Result<()> {
     // previous sessions when starting a new session. Better to show no context
     // than misleading data from a different session.
 
+    // Extract context_window_size from hook if available (for custom proxy models)
+    // This is used in both JSON and text output paths
+    let context_limit_override = hook
+        .context_window
+        .as_ref()
+        .and_then(|cw| cw.context_window_size);
+
     if args.json {
         // Machine-readable output for statusline consumption
         // Construct an active block descriptor for JSON start/end fields
@@ -262,12 +269,6 @@ fn main() -> Result<()> {
             tokens: claude_statusline::models::TokenCounts::default(),
             cost: metrics.total_cost,
         };
-
-        // Extract context_window_size from hook if available (for custom proxy models)
-        let context_limit_override = hook
-            .context_window
-            .as_ref()
-            .and_then(|cw| cw.context_window_size);
 
         print_json_output(
             &hook,
@@ -357,6 +358,7 @@ fn main() -> Result<()> {
             lines_delta,
             rate_limit_info.as_ref(),
             usage_summary.as_ref(),
+            context_limit_override,
         );
 
         // Debug output if requested
