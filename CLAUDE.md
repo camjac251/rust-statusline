@@ -34,6 +34,27 @@ echo '{"session_id":"...","transcript_path":"..."}' \
   | ./target/release/claude_statusline --hints
 ```
 
+## Deploying to Local Installations
+
+After making code changes, build and deploy to local Claude Code installations:
+
+```bash
+# Build for Linux and deploy
+cargo build --release
+cp target/release/claude_statusline ~/.claude/claude_statusline.new
+mv ~/.claude/claude_statusline.new ~/.claude/claude_statusline
+
+# Build for Windows (WSL) and deploy
+cargo build --release --target x86_64-pc-windows-gnu
+cp target/x86_64-pc-windows-gnu/release/claude_statusline.exe ~/.claude/
+
+# Copy pricing.json to both
+cp pricing.json ~/.claude/
+cp pricing.json ~/.claude/
+```
+
+**Note:** The Linux binary may be in use by Claude Code's statusline, so copy to a `.new` file first then rename.
+
 ## Architecture
 
 This statusline utility processes Claude Code session data through a pipeline of specialized modules:

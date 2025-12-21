@@ -169,7 +169,8 @@ fn main() -> Result<()> {
     );
 
     // Get OAuth usage data (replaces legacy plan tier system)
-    let usage_summary: Option<UsageSummary> = get_usage_summary(&paths);
+    // Skip if proxy detected or non-Claude model
+    let usage_summary: Option<UsageSummary> = get_usage_summary(&paths, Some(&hook.model.id));
     let mut usage_percent_display = None;
     let projected_percent_display = None;
     let mut remaining_minutes_display = metrics.remaining_minutes;

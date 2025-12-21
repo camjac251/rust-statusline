@@ -751,7 +751,10 @@ pub fn print_text_output(
             window_end_local.format("%H").to_string()
         }
     } else if use_12h {
-        window_end_local.format("%-I:%M%p").to_string().to_lowercase()
+        window_end_local
+            .format("%-I:%M%p")
+            .to_string()
+            .to_lowercase()
     } else {
         window_end_local.format("%H:%M").to_string()
     };

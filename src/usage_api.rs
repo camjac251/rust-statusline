@@ -13,6 +13,7 @@ use crate::db;
 
 const DEFAULT_USER_AGENT: &str = "claude-code";
 const USAGE_ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
+const ANTHROPIC_API_HOST: &str = "api.anthropic.com";
 const CACHE_TTL_SECONDS: i64 = 60;
 const ANTHROPIC_BETA: &str = "oauth-2025-04-20";
 const API_CACHE_KEY: &str = "oauth_usage_summary";
@@ -154,6 +155,31 @@ fn fetch_enabled() -> bool {
     }
 }
 
+/// Check if we should attempt to fetch usage from the Anthropic OAuth API.
+/// Returns false if:
+/// - ANTHROPIC_BASE_URL is set to a non-Anthropic endpoint (proxy detected)
+/// - The model ID doesn't look like a Claude model
+fn should_fetch_usage(model_id: Option<&str>) -> bool {
+    // Check for proxy via ANTHROPIC_BASE_URL
+    if let Ok(base_url) = env::var("ANTHROPIC_BASE_URL") {
+        let base_url = base_url.trim().to_lowercase();
+        if !base_url.is_empty() && !base_url.contains(ANTHROPIC_API_HOST) {
+            return false;
+        }
+    }
+
+    // If model_id provided, validate it looks like a Claude model
+    if let Some(id) = model_id {
+        let m = id.to_lowercase();
+        // Claude models: claude-*, anthropic.claude-* (Bedrock), claude-*@* (Vertex)
+        if !m.contains("claude") && !m.starts_with("anthropic.") {
+            return false;
+        }
+    }
+
+    true
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageLimit {
     pub utilization: Option<f64>,
@@ -214,8 +240,13 @@ struct UsageResponseDto {
     extra_usage: Option<ExtraUsageDto>,
 }
 
-pub fn get_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
+pub fn get_usage_summary(claude_paths: &[PathBuf], model_id: Option<&str>) -> Option<UsageSummary> {
     if !fetch_enabled() {
+        return None;
+    }
+
+    // Skip if proxy detected or non-Claude model
+    if !should_fetch_usage(model_id) {
         return None;
     }
 
