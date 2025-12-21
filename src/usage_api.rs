@@ -155,11 +155,14 @@ fn fetch_enabled() -> bool {
     }
 }
 
-/// Check if we should attempt to fetch usage from the Anthropic OAuth API.
+/// Check if we're using direct Anthropic API with a Claude model.
 /// Returns false if:
 /// - ANTHROPIC_BASE_URL is set to a non-Anthropic endpoint (proxy detected)
 /// - The model ID doesn't look like a Claude model
-fn should_fetch_usage(model_id: Option<&str>) -> bool {
+///
+/// Used to determine if OAuth API calls make sense and if window/reset
+/// display is relevant (5h window is Claude-specific).
+pub fn is_direct_claude_api(model_id: Option<&str>) -> bool {
     // Check for proxy via ANTHROPIC_BASE_URL
     if let Ok(base_url) = env::var("ANTHROPIC_BASE_URL") {
         let base_url = base_url.trim().to_lowercase();
@@ -246,7 +249,7 @@ pub fn get_usage_summary(claude_paths: &[PathBuf], model_id: Option<&str>) -> Op
     }
 
     // Skip if proxy detected or non-Claude model
-    if !should_fetch_usage(model_id) {
+    if !is_direct_claude_api(model_id) {
         return None;
     }
 

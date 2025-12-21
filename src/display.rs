@@ -1,5 +1,7 @@
 use chrono::{DateTime, Local, Timelike};
 
+use crate::usage_api::is_direct_claude_api;
+
 // Statusline palette - harmonious colors for dark theme
 const COLOR_PURPLE: (u8, u8, u8) = (200, 160, 255); // Opus model
 const COLOR_AMBER: (u8, u8, u8) = (255, 200, 100); // Sonnet model (bright)
@@ -549,36 +551,42 @@ pub fn print_text_output(
     );
     print!("{} ", "·".bright_black().dimmed());
 
+    // Check if we're using direct Claude API (for window/reset display)
+    let is_claude = is_direct_claude_api(Some(model_id));
+
     // window (formerly block) - ultra-compact for narrow
-    let window_label = match term_width {
-        TerminalWidth::Narrow => "w:",
-        TerminalWidth::Medium => "win:",
-        TerminalWidth::Wide if long_labels => "current window:",
-        TerminalWidth::Wide => "window:",
-    };
-    // Scale window cost: $0-5
-    let window_cost_color = if use_true {
-        let (r, g, b) = color_scale_rgb(total_cost, 5.0);
-        format_currency(total_cost)
-            .truecolor(r, g, b)
-            .bold()
-            .to_string()
-    } else if total_cost >= 50.0 {
-        format_currency(total_cost).bold().red().to_string()
-    } else if total_cost >= 20.0 {
-        format_currency(total_cost).bold().yellow().to_string()
-    } else if total_cost >= 10.0 {
-        format_currency(total_cost).yellow().to_string()
-    } else {
-        format_currency(total_cost).bright_white().to_string()
-    };
-    print!(
-        "{}{}{} ",
-        window_label.bright_black().dimmed(),
-        "$".bright_white(),
-        window_cost_color
-    );
-    print!("{} ", "·".bright_black().dimmed());
+    // Only show for Claude models (5h window is Claude-specific)
+    if is_claude {
+        let window_label = match term_width {
+            TerminalWidth::Narrow => "w:",
+            TerminalWidth::Medium => "win:",
+            TerminalWidth::Wide if long_labels => "current window:",
+            TerminalWidth::Wide => "window:",
+        };
+        // Scale window cost: $0-5
+        let window_cost_color = if use_true {
+            let (r, g, b) = color_scale_rgb(total_cost, 5.0);
+            format_currency(total_cost)
+                .truecolor(r, g, b)
+                .bold()
+                .to_string()
+        } else if total_cost >= 50.0 {
+            format_currency(total_cost).bold().red().to_string()
+        } else if total_cost >= 20.0 {
+            format_currency(total_cost).bold().yellow().to_string()
+        } else if total_cost >= 10.0 {
+            format_currency(total_cost).yellow().to_string()
+        } else {
+            format_currency(total_cost).bright_white().to_string()
+        };
+        print!(
+            "{}{}{} ",
+            window_label.bright_black().dimmed(),
+            "$".bright_white(),
+            window_cost_color
+        );
+        print!("{} ", "·".bright_black().dimmed());
+    } // end if is_claude (window display)
 
     let use_12h = match args.time_fmt {
         TimeFormatArg::H12 => true,
@@ -597,182 +605,188 @@ pub fn print_text_output(
     };
 
     // usage (only if a plan/window max is configured)
-    if let Some(usage_value) = usage_percent {
-        let usage_colored = colorize_percent(usage_value, args);
+    // Only show for Claude models (rate limits are Claude-specific)
+    if is_claude {
+        if let Some(usage_value) = usage_percent {
+            let usage_colored = colorize_percent(usage_value, args);
 
-        // Compact labels for narrow terminals
-        let usage_label = match term_width {
-            TerminalWidth::Narrow => "u:",
-            _ => "usage:",
-        };
+            // Compact labels for narrow terminals
+            let usage_label = match term_width {
+                TerminalWidth::Narrow => "u:",
+                _ => "usage:",
+            };
 
-        if let Some(projected_value) = projected_percent {
-            let proj_colored = colorize_percent(projected_value, args);
-            print!(
-                "{}{}{}{} ",
-                usage_label.bright_black().dimmed(),
-                usage_colored,
-                "→".bright_black().dimmed(),
-                proj_colored
-            );
-        } else {
-            print!("{}{} ", usage_label.bright_black().dimmed(), usage_colored);
-        }
-
-        if let Some(summary) = usage_limits {
-            let mut segments: Vec<String> = Vec::new();
-            if let Some(pct) = summary.seven_day.utilization {
-                let label = if long_labels { "weekly:" } else { "7d:" };
-                let mut text = format!(
-                    "{}{}",
-                    label.bright_black().dimmed(),
-                    colorize_percent(pct, args)
+            if let Some(projected_value) = projected_percent {
+                let proj_colored = colorize_percent(projected_value, args);
+                print!(
+                    "{}{}{}{} ",
+                    usage_label.bright_black().dimmed(),
+                    usage_colored,
+                    "→".bright_black().dimmed(),
+                    proj_colored
                 );
-                if let Some(reset) = summary.seven_day.resets_at {
-                    let local_reset = reset.with_timezone(&Local);
-                    let now = Local::now();
-                    let hours_until = (reset - now.with_timezone(&chrono::Utc)).num_hours();
-                    let reset_fmt = if hours_until < 24 {
-                        // Under 24 hours: show time
-                        if use_12h {
-                            if local_reset.minute() == 0 {
-                                local_reset.format("%-I%p").to_string().to_lowercase()
-                            } else {
-                                local_reset.format("%-I:%M%p").to_string().to_lowercase()
-                            }
-                        } else if local_reset.minute() == 0 {
-                            local_reset.format("%H:00").to_string()
-                        } else {
-                            local_reset.format("%H:%M").to_string()
-                        }
-                    } else {
-                        // Over 24 hours: show day name
-                        local_reset.format("%a").to_string()
-                    };
-                    text.push_str(
-                        &format!(" ({})", reset_fmt)
-                            .bright_black()
-                            .dimmed()
-                            .to_string(),
+            } else {
+                print!("{}{} ", usage_label.bright_black().dimmed(), usage_colored);
+            }
+
+            if let Some(summary) = usage_limits {
+                let mut segments: Vec<String> = Vec::new();
+                if let Some(pct) = summary.seven_day.utilization {
+                    let label = if long_labels { "weekly:" } else { "7d:" };
+                    let mut text = format!(
+                        "{}{}",
+                        label.bright_black().dimmed(),
+                        colorize_percent(pct, args)
                     );
+                    if let Some(reset) = summary.seven_day.resets_at {
+                        let local_reset = reset.with_timezone(&Local);
+                        let now = Local::now();
+                        let hours_until = (reset - now.with_timezone(&chrono::Utc)).num_hours();
+                        let reset_fmt = if hours_until < 24 {
+                            // Under 24 hours: show time
+                            if use_12h {
+                                if local_reset.minute() == 0 {
+                                    local_reset.format("%-I%p").to_string().to_lowercase()
+                                } else {
+                                    local_reset.format("%-I:%M%p").to_string().to_lowercase()
+                                }
+                            } else if local_reset.minute() == 0 {
+                                local_reset.format("%H:00").to_string()
+                            } else {
+                                local_reset.format("%H:%M").to_string()
+                            }
+                        } else {
+                            // Over 24 hours: show day name
+                            local_reset.format("%a").to_string()
+                        };
+                        text.push_str(
+                            &format!(" ({})", reset_fmt)
+                                .bright_black()
+                                .dimmed()
+                                .to_string(),
+                        );
+                    }
+                    segments.push(text);
                 }
-                segments.push(text);
+                if let Some(pct) = summary.seven_day_opus.utilization {
+                    segments.push(format!(
+                        "{}{}",
+                        "opus:".bright_black().dimmed(),
+                        colorize_percent(pct, args)
+                    ));
+                }
+                if let Some(pct) = summary.seven_day_sonnet.utilization {
+                    segments.push(format!(
+                        "{}{}",
+                        "sonnet:".bright_black().dimmed(),
+                        colorize_percent(pct, args)
+                    ));
+                }
+                if !segments.is_empty() {
+                    print!("{} ", "·".bright_black().dimmed());
+                    let separator = format!(" {} ", "·".bright_black().dimmed());
+                    let joined = segments.join(&separator);
+                    print!("{} ", joined);
+                }
             }
-            if let Some(pct) = summary.seven_day_opus.utilization {
-                segments.push(format!(
-                    "{}{}",
-                    "opus:".bright_black().dimmed(),
-                    colorize_percent(pct, args)
-                ));
-            }
-            if let Some(pct) = summary.seven_day_sonnet.utilization {
-                segments.push(format!(
-                    "{}{}",
-                    "sonnet:".bright_black().dimmed(),
-                    colorize_percent(pct, args)
-                ));
-            }
-            if !segments.is_empty() {
-                print!("{} ", "·".bright_black().dimmed());
-                let separator = format!(" {} ", "·".bright_black().dimmed());
-                let joined = segments.join(&separator);
-                print!("{} ", joined);
+
+            print!("{} ", "·".bright_black().dimmed());
+
+            if args.hints {
+                // Approaching limit hint
+                // Show a friendly warning and a nudge to try /model when near cap
+                let is_opus = model_id.to_lowercase().contains("opus");
+                if usage_value >= 95.0 {
+                    let label = if is_opus {
+                        "Opus usage limit"
+                    } else {
+                        "usage limit"
+                    };
+                    print!(
+                        "{}{} {} ",
+                        "warn:".bright_black().dimmed(),
+                        format!("{} nearly reached", label).red().bold(),
+                        "/model best".bright_white().bold()
+                    );
+                    print!("{} ", "·".bright_black().dimmed());
+                } else if usage_value >= 80.0 {
+                    let label = if is_opus {
+                        "Opus usage limit"
+                    } else {
+                        "usage limit"
+                    };
+                    print!(
+                        "{}{} {} ",
+                        "warn:".bright_black().dimmed(),
+                        format!("Approaching {}", label).yellow().bold(),
+                        "/model best".white()
+                    );
+                    print!("{} ", "·".bright_black().dimmed());
+                }
             }
         }
-
-        print!("{} ", "·".bright_black().dimmed());
-
-        if args.hints {
-            // Approaching limit hint
-            // Show a friendly warning and a nudge to try /model when near cap
-            let is_opus = model_id.to_lowercase().contains("opus");
-            if usage_value >= 95.0 {
-                let label = if is_opus {
-                    "Opus usage limit"
-                } else {
-                    "usage limit"
-                };
-                print!(
-                    "{}{} {} ",
-                    "warn:".bright_black().dimmed(),
-                    format!("{} nearly reached", label).red().bold(),
-                    "/model best".bright_white().bold()
-                );
-                print!("{} ", "·".bright_black().dimmed());
-            } else if usage_value >= 80.0 {
-                let label = if is_opus {
-                    "Opus usage limit"
-                } else {
-                    "usage limit"
-                };
-                print!(
-                    "{}{} {} ",
-                    "warn:".bright_black().dimmed(),
-                    format!("Approaching {}", label).yellow().bold(),
-                    "/model best".white()
-                );
-                print!("{} ", "·".bright_black().dimmed());
-            }
-        }
-    }
+    } // end if is_claude (usage display)
 
     // countdown and reset time - combined
-    let rem_h = (remaining_minutes as i64) / 60;
-    let rem_m = (remaining_minutes as i64) % 60;
-    let countdown = if rem_h > 0 {
-        format!("{}h{}m", rem_h, rem_m)
-    } else {
-        format!("{}m", rem_m)
-    };
-
-    // Emphasize as we get closer to the reset time
-    let countdown_colored = if remaining_minutes < 30.0 {
-        countdown.red().bold().to_string()
-    } else if remaining_minutes < 60.0 {
-        countdown.yellow().bold().to_string()
-    } else if remaining_minutes < 180.0 {
-        countdown.yellow().to_string()
-    } else {
-        countdown.white().to_string()
-    };
-
-    // Reset clock at window end (active end if available; else computed using shared window_bounds)
-    let window_end_local = if let Some(b) = active_block {
-        b.end.with_timezone(&Local)
-    } else {
-        // Use shared window_bounds function for consistent window calculation
-        let now_utc = chrono::Utc::now();
-        let (_start, end) = window_bounds(now_utc, latest_reset);
-        end.with_timezone(&Local)
-    };
-
-    let reset_disp = if window_end_local.minute() == 0 {
-        if use_12h {
-            window_end_local.format("%-I%p").to_string().to_lowercase()
+    // Only show for Claude models (5h window reset is Claude-specific)
+    if is_claude {
+        let rem_h = (remaining_minutes as i64) / 60;
+        let rem_m = (remaining_minutes as i64) % 60;
+        let countdown = if rem_h > 0 {
+            format!("{}h{}m", rem_h, rem_m)
         } else {
-            window_end_local.format("%H").to_string()
-        }
-    } else if use_12h {
-        window_end_local
-            .format("%-I:%M%p")
-            .to_string()
-            .to_lowercase()
-    } else {
-        window_end_local.format("%H:%M").to_string()
-    };
+            format!("{}m", rem_m)
+        };
 
-    let reset_label = match term_width {
-        TerminalWidth::Narrow => "r:",
-        _ => "reset:",
-    };
+        // Emphasize as we get closer to the reset time
+        let countdown_colored = if remaining_minutes < 30.0 {
+            countdown.red().bold().to_string()
+        } else if remaining_minutes < 60.0 {
+            countdown.yellow().bold().to_string()
+        } else if remaining_minutes < 180.0 {
+            countdown.yellow().to_string()
+        } else {
+            countdown.white().to_string()
+        };
 
-    print!(
-        "{}{} {} ",
-        reset_label.bright_black().dimmed(),
-        countdown_colored,
-        format!("({})", reset_disp).bright_black().dimmed()
-    );
-    print!("{} ", "·".bright_black().dimmed());
+        // Reset clock at window end (active end if available; else computed using shared window_bounds)
+        let window_end_local = if let Some(b) = active_block {
+            b.end.with_timezone(&Local)
+        } else {
+            // Use shared window_bounds function for consistent window calculation
+            let now_utc = chrono::Utc::now();
+            let (_start, end) = window_bounds(now_utc, latest_reset);
+            end.with_timezone(&Local)
+        };
+
+        let reset_disp = if window_end_local.minute() == 0 {
+            if use_12h {
+                window_end_local.format("%-I%p").to_string().to_lowercase()
+            } else {
+                window_end_local.format("%H").to_string()
+            }
+        } else if use_12h {
+            window_end_local
+                .format("%-I:%M%p")
+                .to_string()
+                .to_lowercase()
+        } else {
+            window_end_local.format("%H:%M").to_string()
+        };
+
+        let reset_label = match term_width {
+            TerminalWidth::Narrow => "r:",
+            _ => "reset:",
+        };
+
+        print!(
+            "{}{} {} ",
+            reset_label.bright_black().dimmed(),
+            countdown_colored,
+            format!("({})", reset_disp).bright_black().dimmed()
+        );
+        print!("{} ", "·".bright_black().dimmed());
+    } // end if is_claude (reset display)
 
     // tokens breakdown (optional) - Moved before context as context is often the last main item
     if args.show_breakdown {
@@ -809,7 +823,8 @@ pub fn print_text_output(
         };
         let ctx_limit_full = context_limit_override
             .unwrap_or_else(|| context_limit_for_model_display(model_id, model_display_name));
-        let ctx_limit_usable = ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
+        let ctx_limit_usable =
+            ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
         let output_reserve = reserved_output_tokens_for_model(model_id);
         let overhead = system_overhead_tokens();
         let raw_tokens = tokens.saturating_sub(overhead);
@@ -877,7 +892,8 @@ pub fn print_text_output(
             if pct >= 40 && crate::utils::auto_compact_enabled() {
                 // Calculate compact trigger point: usable - cushion (13K default)
                 // Use ctx_limit_full (already computed with override) for consistency
-                let usable = ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
+                let usable =
+                    ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
                 let cushion = crate::utils::auto_compact_headroom_tokens();
                 let compact_trigger = usable.saturating_sub(cushion) as f64;
                 let headroom_to_compact = (compact_trigger - tokens as f64).max(0.0);
