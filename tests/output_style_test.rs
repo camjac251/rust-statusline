@@ -22,6 +22,7 @@ fn test_output_style_in_json() {
             name: "verbose".to_string(),
         }),
         cost: None,
+        context_window: None,
     };
 
     let json: Value = build_json_output(
@@ -61,6 +62,7 @@ fn test_output_style_in_json() {
         None, // oauth_rate_tier
         None, // usage_limits
         None, // sessions_info
+        None, // context_limit_override
     );
 
     // Verify output_style is present in JSON
@@ -83,6 +85,7 @@ fn test_output_style_in_json() {
         version: Some("1.0.0".to_string()),
         output_style: None,
         cost: None,
+        context_window: None,
     };
 
     let json_no_style: Value = build_json_output(
@@ -122,6 +125,7 @@ fn test_output_style_in_json() {
         None, // oauth_rate_tier
         None, // usage_limits
         None, // sessions_info
+        None, // context_limit_override
     );
 
     // Verify output_style is null when not present
@@ -150,6 +154,7 @@ fn test_multiple_output_styles() {
                 name: style_name.to_string(),
             }),
             cost: None,
+            context_window: None,
         };
 
         let json: Value = build_json_output(
@@ -188,6 +193,7 @@ fn test_multiple_output_styles() {
             None, // oauth_rate_tier
             None, // usage_limits
             None, // sessions_info
+            None, // context_limit_override
         );
 
         assert_eq!(

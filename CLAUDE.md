@@ -100,7 +100,7 @@ Configuration via environment variables (also see CLI `--help`):
 - **`CLAUDE_CONFIG_DIR`** - Comma-separated list of Claude data roots (default: `~/.config/claude,~/.claude`)
 - **`CLAUDE_PROVIDER`** - Controls provider display; "firstParty" coerces to "anthropic"
 - **`CLAUDE_TIME_FORMAT`** - `"12"` forces 12h; otherwise auto-detects (e.g., en_US → 12h)
-- **`CLAUDE_CONTEXT_LIMIT`** - Explicit context window tokens if not recognized from model id
+- **`CLAUDE_CONTEXT_LIMIT`** - Explicit context window tokens (fallback when hook doesn't provide `context_window.context_window_size`)
 - **`CLAUDE_STATUSLINE_DB_PATH`** - Override default SQLite DB location (default: `~/.claude/statusline.db`)
 - **`CLAUDE_DB_CACHE_DISABLE`** - Set to `1` to disable SQLite caching (falls back to scan_usage)
 - **`CLAUDE_STATUS_HINTS`** - Set to `1` to show optional hints (approaching-limit warnings, "resets@" emphasis, auto-compact countdown)
@@ -133,8 +133,9 @@ Configuration via environment variables (also see CLI `--help`):
 ## Integrations
 
 - **Claude Code Hook Integration**:
-  - Tool receives JSON on stdin from Claude Code via `user-prompt-submit-hook`
-  - See `models/hook.rs` for full schema with fields: `session_id`, `transcript_path`, `model`, `workspace`, `provider`, `version`
+  - Tool receives JSON on stdin from Claude Code's statusLine command
+  - See `models/hook.rs` for full schema with fields: `session_id`, `transcript_path`, `model`, `workspace`, `provider`, `version`, `cost`, `context_window`
+  - **Context window support** (Claude Code 2.0.69+): Hook includes `context_window` with `current_usage` and `context_window_size` for accurate context tracking with custom proxy models (Gemini, GPT-5, etc.)
 
 - **Transcript Format**:
   - JSONL files in `~/.config/claude/projects/<project>/transcripts/<session>.jsonl`
@@ -145,7 +146,7 @@ Configuration via environment variables (also see CLI `--help`):
   - See README.md for full example
   - Key fields: `model`, `cwd`, `project_dir`, `version`, `provider`, `plan`, `reset_at`, `session`, `today`, `window`, `context`, `git`
   - `window` includes: `cost_usd`, `start`, `end`, `remaining_minutes`, `usage_percent`, `projected_percent`, `tokens_per_minute`, `cost_per_hour`
-  - `context` includes: `tokens`, `percent`, `limit`, `source`, `headroom_tokens`, `eta_minutes`
+  - `context` includes: `tokens`, `percent`, `limit`, `source` (`"hook"`, `"transcript"`, or `"entries"`), `headroom_tokens`, `eta_minutes`
 
 ## IMPORTANT
 

@@ -83,14 +83,49 @@ fn main() -> Result<()> {
             }
         }
     }
-    let mut context = calc_context_from_transcript(
-        Path::new(&hook.transcript_path),
-        &hook.model.id,
-        &hook.model.display_name,
-    );
+    // Context window: prefer hook data (from Claude Code 2.0.69+), fallback to transcript parsing
+    let mut context: Option<(u64, u32)> = None;
     let mut context_source: Option<&'static str> = None;
-    if context.is_some() {
-        context_source = Some("transcript");
+
+    // Priority 1: Use context_window from hook if available (most accurate)
+    if let Some(ref ctx_win) = hook.context_window {
+        if let Some(ref usage) = ctx_win.current_usage {
+            // Calculate context from current_usage (matches official docs calculation)
+            let input = usage.input_tokens.unwrap_or(0);
+            let cache_create = usage.cache_creation_input_tokens.unwrap_or(0);
+            let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
+            let output = usage.output_tokens.unwrap_or(0);
+            let total_tokens = input + cache_create + cache_read + output;
+
+            if total_tokens > 0 {
+                // Use hook's context_window_size if provided, else fall back to model detection
+                let limit = ctx_win.context_window_size.unwrap_or_else(|| {
+                    claude_statusline::utils::context_limit_for_model_display(
+                        &hook.model.id,
+                        &hook.model.display_name,
+                    )
+                });
+                let pct = if limit > 0 {
+                    ((total_tokens as f64 / limit as f64) * 100.0).round() as u32
+                } else {
+                    0
+                };
+                context = Some((total_tokens, pct.min(100)));
+                context_source = Some("hook");
+            }
+        }
+    }
+
+    // Priority 2: Parse transcript for usage (fallback for older Claude Code versions)
+    if context.is_none() {
+        context = calc_context_from_transcript(
+            Path::new(&hook.transcript_path),
+            &hook.model.id,
+            &hook.model.display_name,
+        );
+        if context.is_some() {
+            context_source = Some("transcript");
+        }
     }
 
     // Git info from project_dir or current_dir (feature-gated)
@@ -228,6 +263,12 @@ fn main() -> Result<()> {
             cost: metrics.total_cost,
         };
 
+        // Extract context_window_size from hook if available (for custom proxy models)
+        let context_limit_override = hook
+            .context_window
+            .as_ref()
+            .and_then(|cw| cw.context_window_size);
+
         print_json_output(
             &hook,
             session_cost,
@@ -265,6 +306,7 @@ fn main() -> Result<()> {
             oauth_rate_tier,
             usage_summary.as_ref(),
             sessions_info.as_ref(),
+            context_limit_override,
         )?;
     } else {
         // Compute session-level cost per hour from Claude's provided cost

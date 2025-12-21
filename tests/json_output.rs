@@ -20,6 +20,7 @@ fn json_output_shape_minimal() {
         version: Some("test".to_string()),
         output_style: None,
         cost: None,
+        context_window: None,
     };
 
     let json: Value = build_json_output(
@@ -59,6 +60,7 @@ fn json_output_shape_minimal() {
         None,                    // oauth_rate_tier
         None,                    // usage_limits
         None,                    // sessions_info
+        None,                    // context_limit_override
     );
 
     // High-level keys exist
@@ -119,6 +121,7 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         version: Some("test".to_string()),
         output_style: None,
         cost: None,
+        context_window: None,
     };
 
     let json: Value = build_json_output(
@@ -158,8 +161,116 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         None,
         None,
         None, // sessions_info
+        None, // context_limit_override
     );
 
     // 1M context (full limit, percentage calculated against this)
     assert_eq!(json["context"]["limit"], 1_000_000);
+}
+
+#[test]
+fn json_output_context_limit_override_from_hook() {
+    // Test that context_limit_override takes precedence over model detection
+    let hook = HookJson {
+        session_id: "s1".to_string(),
+        transcript_path: "/tmp/transcript.jsonl".to_string(),
+        cwd: None,
+        model: HookModel {
+            id: "some-proxy-model".to_string(), // Unknown model
+            display_name: "Custom Proxy Model".to_string(),
+        },
+        workspace: HookWorkspace {
+            current_dir: "/tmp/project".to_string(),
+            project_dir: Some("/tmp/project".to_string()),
+        },
+        version: Some("test".to_string()),
+        output_style: None,
+        cost: None,
+        context_window: None,
+    };
+
+    // Without override, unknown model defaults to 200k
+    let json_no_override: serde_json::Value = build_json_output(
+        &hook,
+        0.0,
+        0.0,
+        0,
+        0.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        None,
+        None,
+        None,
+        0.0,
+        None,
+        None,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        Some((50000, 25)),
+        Some("hook"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None, // No override
+    );
+    assert_eq!(json_no_override["context"]["limit"], 200_000);
+
+    // With override (simulating Gemini 1M context from proxy)
+    let json_with_override: serde_json::Value = build_json_output(
+        &hook,
+        0.0,
+        0.0,
+        0,
+        0.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        None,
+        None,
+        None,
+        0.0,
+        None,
+        None,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        Some((50000, 5)),
+        Some("hook"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(1_048_576), // Gemini 1M context override
+    );
+    assert_eq!(json_with_override["context"]["limit"], 1_048_576);
+    assert_eq!(json_with_override["context"]["limit_full"], 1_048_576);
 }

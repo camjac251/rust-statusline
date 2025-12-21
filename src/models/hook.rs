@@ -27,6 +27,28 @@ pub struct HookCost {
     pub total_lines_removed: Option<i64>,
 }
 
+/// Current usage breakdown from the last API call
+#[derive(Deserialize, Debug, Clone)]
+pub struct HookCurrentUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+}
+
+/// Context window information provided by Claude Code
+#[derive(Deserialize, Debug)]
+pub struct HookContextWindow {
+    /// Cumulative input tokens across the session
+    pub total_input_tokens: Option<u64>,
+    /// Cumulative output tokens across the session
+    pub total_output_tokens: Option<u64>,
+    /// Maximum context window size (respects API_MAX_INPUT_TOKENS if set)
+    pub context_window_size: Option<u64>,
+    /// Current context window usage from the last API call
+    pub current_usage: Option<HookCurrentUsage>,
+}
+
 #[derive(Deserialize, Debug)]
 pub struct HookJson {
     pub session_id: String,
@@ -39,4 +61,6 @@ pub struct HookJson {
     pub output_style: Option<OutputStyle>,
     /// Optional aggregate cost fields from Claude Code
     pub cost: Option<HookCost>,
+    /// Context window information (added in Claude Code 2.0.69+)
+    pub context_window: Option<HookContextWindow>,
 }

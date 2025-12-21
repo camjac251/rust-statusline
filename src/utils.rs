@@ -132,25 +132,15 @@ pub(crate) fn static_context_limit_lookup(model_id: &str) -> Option<u64> {
     None
 }
 
-#[allow(dead_code)]
-pub fn context_limit_for_model(model_id: &str) -> u64 {
-    // Allow explicit override when known
-    if let Ok(override_limit) = env::var("CLAUDE_CONTEXT_LIMIT")
-        .and_then(|s| s.parse::<u64>().map_err(|_| std::env::VarError::NotPresent))
-    {
-        return override_limit;
-    }
-    if let Some(v) = static_context_limit_lookup(model_id) {
-        return v;
-    }
-    // Family fallback (uniform)
-    200_000
-}
-
-// Context limit detection:
-// - If display name contains "[1m]" then treat context limit as 1,000,000 tokens
-// - Otherwise use the model-id lookup and default to 200,000
-// - Environment variable CLAUDE_CONTEXT_LIMIT, if set, always wins
+// Context limit detection (fallback when hook.context_window.context_window_size is unavailable):
+// Priority order:
+// 1. CLAUDE_CONTEXT_LIMIT env var (always wins if set)
+// 2. Display name heuristics: "[1m]" tag, "1m" + "context", model id with "-1m" or ending in "1m"
+// 3. Static model ID lookup (known Claude models)
+// 4. Default: 200,000
+//
+// Note: When Claude Code 2.0.69+ provides context_window in the hook JSON, that takes
+// precedence over all of these heuristics. This function is only used as a fallback.
 pub fn context_limit_for_model_display(model_id: &str, display_name: &str) -> u64 {
     if let Ok(override_limit) = env::var("CLAUDE_CONTEXT_LIMIT")
         .and_then(|s| s.parse::<u64>().map_err(|_| std::env::VarError::NotPresent))

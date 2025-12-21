@@ -959,6 +959,8 @@ pub fn build_json_output(
     oauth_rate_tier: Option<String>,
     usage_limits: Option<&UsageSummary>,
     sessions_info: Option<&crate::models::SessionsInfo>,
+    // Override context limit from hook.context_window.context_window_size
+    context_limit_override: Option<u64>,
 ) -> serde_json::Value {
     // Provider from env or deduced from model id
     let provider_env = env::var("CLAUDE_PROVIDER").ok().map(|s| {
@@ -976,7 +978,10 @@ pub fn build_json_output(
     let (ctx_tokens, ctx_pct) = context
         .map(|(t, p)| (Some(t), Some(p)))
         .unwrap_or((None, None));
-    let ctx_limit = context_limit_for_model_display(&hook.model.id, &hook.model.display_name);
+    // Use hook-provided context limit if available, otherwise fall back to model detection
+    let ctx_limit = context_limit_override.unwrap_or_else(|| {
+        context_limit_for_model_display(&hook.model.id, &hook.model.display_name)
+    });
     let overhead_value = system_overhead_tokens();
     let overhead_display = if ctx_tokens.is_some() && overhead_value > 0 {
         Some(overhead_value)
@@ -1127,7 +1132,7 @@ pub fn build_json_output(
             "system_overhead_tokens": overhead_display,
             "percent": ctx_pct,
             "limit": ctx_limit,
-            "limit_full": context_limit_for_model_display(&hook.model.id, &hook.model.display_name),
+            "limit_full": ctx_limit, // Same as limit, uses hook override when available
             "output_reserve": reserved_output_tokens_for_model(&hook.model.id),
             "output_reserve_used": ctx_tokens.map(|t| t.saturating_sub(ctx_limit)),
             "source": context_source,
@@ -1208,6 +1213,7 @@ pub fn print_json_output(
     oauth_rate_tier: Option<String>,
     usage_limits: Option<&UsageSummary>,
     sessions_info: Option<&crate::models::SessionsInfo>,
+    context_limit_override: Option<u64>,
 ) -> anyhow::Result<()> {
     let json = build_json_output(
         hook,
@@ -1246,6 +1252,7 @@ pub fn print_json_output(
         oauth_rate_tier,
         usage_limits,
         sessions_info,
+        context_limit_override,
     );
     println!("{}", serde_json::to_string(&json)?);
     Ok(())
