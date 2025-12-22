@@ -14,80 +14,59 @@ env:
 
 jobs:
   build-and-release:
-    name: Build and Release (default features)
+    name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary: claude_statusline
+            artifact: claude_statusline-linux-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: claude_statusline
+            artifact: claude_statusline-macos-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary: claude_statusline
+            artifact: claude_statusline-macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: claude_statusline.exe
+            artifact: claude_statusline-windows-x86_64.exe
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl-tools (Linux)
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Run tests
         run: cargo test --all-features --release
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
 
-      # Package artifacts (non-Windows)
-      - name: Package artifact (tar.gz)
-        if: runner.os != 'Windows'
+      - name: Rename binary
         shell: bash
-        run: |
-          set -euo pipefail
-          name="claude_statusline-${{ runner.os }}"
-          bin="target/release/claude_statusline"
-          archive="$name.tar.gz"
+        run: cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "${{ matrix.artifact }}"
 
-          # Create staging directory with binary and pricing.json
-          mkdir -p dist
-          cp "$bin" dist/
-          cp pricing.json dist/
-
-          # Create archive from staging directory
-          tar -czf "$archive" -C dist .
-          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
-
-          # Generate checksum
-          sha256sum "$archive" > "$archive.sha256"
-          echo "CHECKSUM=$archive.sha256" >> "$GITHUB_ENV"
-
-      # Package artifacts (Windows)
-      - name: Package artifact (zip)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $name = "claude_statusline-${{ runner.os }}"
-          $bin  = "target\\release\\claude_statusline.exe"
-          $archive = "$name.zip"
-
-          # Create staging directory with binary and pricing.json
-          New-Item -ItemType Directory -Force -Path dist
-          Copy-Item $bin dist/
-          Copy-Item pricing.json dist/
-
-          # Create archive from staging directory
-          Compress-Archive -Path dist/* -DestinationPath $archive
-          echo "ARCHIVE=$archive" >> $env:GITHUB_ENV
-
-          # Generate checksum
-          $checksum = "$archive.sha256"
-          (Get-FileHash -Path $archive -Algorithm SHA256).Hash + "  $archive" | Out-File -FilePath $checksum -Encoding ascii
-          echo "CHECKSUM=$checksum" >> $env:GITHUB_ENV
-
-      - name: Create GitHub Release and upload asset
+      - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            ${{ env.ARCHIVE }}
-            ${{ env.CHECKSUM }}
-          fail_on_unmatched_files: true
+          files: ${{ matrix.artifact }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

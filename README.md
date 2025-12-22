@@ -27,18 +27,16 @@ Advanced (optional): feature flags exist in Cargo.toml (default enables both; CI
 
 After building, configure Claude Code to use the statusline:
 
-1. Copy the binary and pricing data to your `.claude` directory:
+1. Copy the binary to your `.claude` directory:
 
    **Linux/macOS:**
    ```bash
    cp target/release/claude_statusline ~/.claude/
-   cp pricing.json ~/.claude/
    ```
 
    **Windows (PowerShell):**
    ```powershell
    Copy-Item target\release\claude_statusline.exe $env:USERPROFILE\.claude\
-   Copy-Item pricing.json $env:USERPROFILE\.claude\
    ```
 
 2. Update your Claude Code `settings.json`:
@@ -117,9 +115,7 @@ Flags and options (also see `--help`):
   - `"12"` forces 12h; otherwise auto-detects (e.g., en_US -> 12h)
 - `CLAUDE_CONTEXT_LIMIT`:
   - Explicit context window tokens if not recognized from model id
-- `CLAUDE_PRICING_PATH`:
-  - Path to custom pricing.json file (overrides embedded pricing)
-- Pricing overrides (if all are set, they take precedence over all sources):
+- Pricing overrides (if all are set, they take precedence over embedded pricing):
   - `CLAUDE_PRICE_INPUT`, `CLAUDE_PRICE_OUTPUT`, `CLAUDE_PRICE_CACHE_CREATE`, `CLAUDE_PRICE_CACHE_READ`
 - Web search requests are charged at $0.01 per request when `costUSD` is not provided in usage logs
 
@@ -181,9 +177,8 @@ The library surface is exposed via `src/lib.rs` to facilitate integration tests:
   - `cargo build --release --no-default-features`
 - If Git header is not desired at runtime, omit `--show-provider` to keep the header minimal.
 - **Pricing data**:
-  - Embedded at compile-time for zero-configuration operation
-  - Release artifacts bundle `pricing.json` for easy updates without recompilation
-  - Resolution order: 1) `pricing.json` in cwd, 2) `CLAUDE_PRICING_PATH` env, 3) embedded fallback, 4) env var overrides
+  - Embedded at compile-time from `pricing.json` for zero-configuration operation
+  - Override with env vars: `CLAUDE_PRICE_INPUT`, `CLAUDE_PRICE_OUTPUT`, `CLAUDE_PRICE_CACHE_CREATE`, `CLAUDE_PRICE_CACHE_READ`
 - **Global usage tracking and API caching**:
   - `today:` cost aggregates across ALL Claude Code sessions using SQLite cache at `~/.claude/statusline.db`
   - OAuth API responses cached with 60s TTL to reduce redundant API calls across process invocations

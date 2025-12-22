@@ -12,21 +12,20 @@
 //!
 //! ## Pricing Resolution Order
 //!
-//! Prices are loaded in the following priority order:
-//! 1. `pricing.json` in current working directory
-//! 2. `CLAUDE_PRICING_PATH` environment variable (path to custom JSON)
-//! 3. Compile-time embedded pricing.json (always available)
-//! 4. Environment variable overrides (if all four are set):
+//! Prices are resolved in the following priority order:
+//! 1. Environment variable overrides (if all four are set):
 //!    - `CLAUDE_PRICE_INPUT`
 //!    - `CLAUDE_PRICE_OUTPUT`
 //!    - `CLAUDE_PRICE_CACHE_CREATE`
 //!    - `CLAUDE_PRICE_CACHE_READ`
+//! 2. Compile-time embedded pricing.json (from `pricing.json` at build time)
+//! 3. Built-in static pricing fallback
+//! 4. Family heuristics (opus/sonnet/haiku detection)
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
-use std::fs;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Pricing {
@@ -92,34 +91,13 @@ struct AdditionalCosts {
     web_search_per_request: f64,
 }
 
-/// Load pricing from external JSON file, with compile-time embedded fallback
+/// Compile-time embedded pricing configuration
 static PRICING_CONFIG: Lazy<Option<PricingConfig>> = Lazy::new(|| {
-    // Try pricing.json in current directory
-    if let Ok(contents) = fs::read_to_string("pricing.json") {
-        if let Ok(config) = serde_json::from_str::<PricingConfig>(&contents) {
-            return Some(config);
-        }
-    }
-
-    // Try CLAUDE_PRICING_PATH environment variable
-    if let Ok(custom_path) = env::var("CLAUDE_PRICING_PATH") {
-        if let Ok(contents) = fs::read_to_string(&custom_path) {
-            if let Ok(config) = serde_json::from_str::<PricingConfig>(&contents) {
-                return Some(config);
-            }
-        }
-    }
-
-    // Fallback to embedded pricing.json (compiled into binary)
     const EMBEDDED_PRICING: &str = include_str!("../pricing.json");
-    if let Ok(config) = serde_json::from_str::<PricingConfig>(EMBEDDED_PRICING) {
-        return Some(config);
-    }
-
-    None
+    serde_json::from_str::<PricingConfig>(EMBEDDED_PRICING).ok()
 });
 
-/// Get pricing from external config
+/// Get pricing from embedded config
 fn pricing_from_config(model_id: &str) -> Option<Pricing> {
     let config = PRICING_CONFIG.as_ref()?;
     let m = model_id.to_lowercase();
@@ -243,7 +221,7 @@ pub fn pricing_for_model(model_id: &str) -> Option<Pricing> {
         }
     }
 
-    // Priority 2: External pricing.json config
+    // Priority 2: Embedded pricing.json config
     if let Some(p) = pricing_from_config(&m) {
         return Some(p);
     }
