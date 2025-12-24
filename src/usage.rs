@@ -23,9 +23,7 @@ use walkdir::WalkDir;
 
 use crate::models::{Entry, MessageUsage, RateLimitInfo, TranscriptLine};
 use crate::pricing::{apply_tiered_pricing, pricing_for_model};
-use crate::utils::{
-    context_limit_for_model_display, parse_iso_date, system_overhead_tokens,
-};
+use crate::utils::{context_limit_for_model_display, parse_iso_date, system_overhead_tokens};
 
 // Helper: detect reset time from assistant text like "... limit reached ... resets 5am" with DST correction
 static ASSISTANT_LIMIT_RE: Lazy<Regex> =
@@ -302,18 +300,11 @@ fn find_recent_jsonl_files(root: &Path, cutoff: SystemTime) -> Vec<PathBuf> {
                 return true;
             }
             // For files, only include .jsonl files
-            entry
-                .path()
-                .extension()
-                .is_some_and(|ext| ext == "jsonl")
+            entry.path().extension().is_some_and(|ext| ext == "jsonl")
         })
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext == "jsonl")
-        })
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
         .filter(|e| {
             // Final mtime check on files (dirs already filtered)
             if let Ok(meta) = e.metadata() {
