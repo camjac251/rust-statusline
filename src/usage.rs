@@ -8,21 +8,23 @@
 //! - `identify_blocks`: Groups usage entries into 5-hour window blocks with gap detection
 //! - `calc_context_from_*`: Calculates context window usage from various sources
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Timelike, Utc};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+use walkdir::WalkDir;
 
 use crate::models::{Entry, MessageUsage, RateLimitInfo, TranscriptLine};
 use crate::pricing::{apply_tiered_pricing, pricing_for_model};
 use crate::utils::{
-    context_limit_for_model_display, parse_iso_date, sanitized_project_name, system_overhead_tokens,
+    context_limit_for_model_display, parse_iso_date, system_overhead_tokens,
 };
 
 // Helper: detect reset time from assistant text like "... limit reached ... resets 5am" with DST correction
@@ -278,6 +280,53 @@ impl Default for MessageComplexity {
     }
 }
 
+/// Efficiently discover JSONL files using walkdir with directory-level mtime filtering.
+/// Skips entire directory trees when the directory mtime is older than cutoff,
+/// dramatically reducing stat() syscalls from O(all_files) to O(recent_dirs).
+fn find_recent_jsonl_files(root: &Path, cutoff: SystemTime) -> Vec<PathBuf> {
+    WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|entry| {
+            // Always process the root
+            if entry.depth() == 0 {
+                return true;
+            }
+            // For directories, check mtime - if old, skip entire subtree
+            if entry.file_type().is_dir() {
+                if let Ok(meta) = entry.metadata() {
+                    if let Ok(mtime) = meta.modified() {
+                        return mtime >= cutoff;
+                    }
+                }
+                // If we can't get mtime, include the directory to be safe
+                return true;
+            }
+            // For files, only include .jsonl files
+            entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "jsonl")
+        })
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext == "jsonl")
+        })
+        .filter(|e| {
+            // Final mtime check on files (dirs already filtered)
+            if let Ok(meta) = e.metadata() {
+                if let Ok(mtime) = meta.modified() {
+                    return mtime >= cutoff;
+                }
+            }
+            true
+        })
+        .map(|e| e.path().to_path_buf())
+        .collect()
+}
+
 #[allow(clippy::type_complexity)]
 pub fn scan_usage(
     paths: &[PathBuf],
@@ -367,34 +416,20 @@ pub fn scan_usage(
     } else {
         Utc::now() - Duration::hours(48)
     };
+    // Convert to SystemTime for efficient walkdir filtering
+    let cutoff_system = SystemTime::UNIX_EPOCH
+        + std::time::Duration::from_secs(cutoff_time.timestamp().max(0) as u64);
 
     for base in paths {
         let root = base.join("projects");
         if !root.is_dir() {
             continue;
         }
-        // Global reset anchor discovery across all project files under this root
-        for entry in globwalk::GlobWalkerBuilder::from_patterns(&root, &["**/*.jsonl"])
-            .build()
-            .context("glob")?
-        {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let path = entry.path().to_path_buf();
-
-            // File mtime optimization: skip old files
-            if let Ok(metadata) = fs::metadata(&path) {
-                if let Ok(modified) = metadata.modified() {
-                    let mtime: DateTime<Utc> = modified.into();
-                    if mtime < cutoff_time {
-                        continue; // Skip old files
-                    }
-                }
-            }
-
-            let file = match File::open(&path) {
+        // Global reset anchor discovery across all recent project files under this root
+        // Uses walkdir with directory-level mtime filtering for efficiency
+        let recent_files = find_recent_jsonl_files(&root, cutoff_system);
+        for path in &recent_files {
+            let file = match File::open(path) {
                 Ok(f) => f,
                 Err(_) => continue,
             };
@@ -532,38 +567,10 @@ pub fn scan_usage(
                 }
             }
         }
-        // Build a GLOBAL candidate set: include current project’s files (if derivable) AND all jsonl files under the root.
-        // This ensures window usage reflects account-wide activity, not just the current project.
-        use std::collections::HashSet;
-        let mut candidate_set: HashSet<PathBuf> = HashSet::new();
-        if let Some(pd) = project_dir {
-            let sanitized = sanitized_project_name(pd);
-            let proj_dir = root.join(sanitized);
-            let session_path = proj_dir.join(format!("{}.jsonl", session_id));
-            if session_path.is_file() {
-                candidate_set.insert(session_path);
-            }
-            if proj_dir.is_dir() {
-                for e in globwalk::GlobWalkerBuilder::from_patterns(&proj_dir, &["**/*.jsonl"])
-                    .build()
-                    .context("glob")?
-                    .flatten()
-                {
-                    candidate_set.insert(e.path().to_path_buf());
-                }
-            }
-        }
-        for e in globwalk::GlobWalkerBuilder::from_patterns(&root, &["**/*.jsonl"])
-            .build()
-            .context("glob")?
-            .flatten()
-        {
-            candidate_set.insert(e.path().to_path_buf());
-        }
-        let candidate_files: Vec<PathBuf> = candidate_set.into_iter().collect();
-
-        for path in candidate_files {
-            let file = match File::open(&path) {
+        // Reuse the recent_files list from reset anchor discovery (already filtered by mtime)
+        // This avoids a second expensive directory walk
+        for path in &recent_files {
+            let file = match File::open(path) {
                 Ok(f) => f,
                 Err(_) => continue,
             };
