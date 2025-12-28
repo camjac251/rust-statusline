@@ -34,22 +34,19 @@ echo '{"session_id":"...","transcript_path":"..."}' \
   | ./target/release/claude_statusline --hints
 ```
 
-## Deploying to Local Installations
+## Releases
 
-After making code changes, build and deploy to local Claude Code installations:
+This project is managed via `mise` and GitHub Releases:
 
+- Binary releases are published via GitHub Actions when tags are pushed
+- Users install via `mise` which fetches binaries from GitHub Releases
+- See `.mise.toml` for version configuration
+
+For local testing during development:
 ```bash
-# Build for Linux and deploy
 cargo build --release
-cp target/release/claude_statusline ~/.claude/claude_statusline.new
-mv ~/.claude/claude_statusline.new ~/.claude/claude_statusline
-
-# Build for Windows (WSL) and deploy
-cargo build --release --target x86_64-pc-windows-gnu
-cp target/x86_64-pc-windows-gnu/release/claude_statusline.exe ~/.claude/
+./target/release/claude_statusline --help
 ```
-
-**Note:** The Linux binary may be in use by Claude Code's statusline, so copy to a `.new` file first then rename.
 
 ## Architecture
 
