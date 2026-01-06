@@ -12,6 +12,7 @@ use claude_statusline::cli::{Args, BurnScopeArg, WindowAnchorArg, WindowScopeArg
 #[cfg(not(feature = "colors"))]
 use claude_statusline::display::color_shim::ColorizeShim;
 use claude_statusline::display::{print_header, print_json_output, print_text_output};
+use claude_statusline::gastown::get_gastown_info;
 use claude_statusline::models::HookJson;
 use claude_statusline::usage::{
     calc_context_from_entries, calc_context_from_transcript, scan_usage,
@@ -161,6 +162,16 @@ fn main() -> Result<()> {
         get_beads_info(Path::new(beads_dir))
     };
 
+    // Gas Town multi-agent info (auto-detected from workspace markers)
+    let gastown_info = {
+        let gt_dir = hook
+            .workspace
+            .project_dir
+            .as_deref()
+            .unwrap_or(&hook.workspace.current_dir);
+        get_gastown_info(Path::new(gt_dir))
+    };
+
     // Extract lines delta from hook.cost for header display
     let lines_delta = hook.cost.as_ref().and_then(|c| {
         let la = c.total_lines_added.unwrap_or(0);
@@ -180,6 +191,7 @@ fn main() -> Result<()> {
             api_key_source.as_deref(),
             lines_delta,
             beads_info.as_ref(),
+            gastown_info.as_ref(),
         );
     }
 
@@ -320,6 +332,7 @@ fn main() -> Result<()> {
             usage_summary.as_ref(),
             context_limit_override,
             beads_info.as_ref(),
+            gastown_info.as_ref(),
         )?;
     } else {
         // Compute session-level cost per hour from Claude's provided cost

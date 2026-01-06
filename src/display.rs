@@ -1,7 +1,8 @@
 use chrono::{DateTime, Local, Timelike};
 
 use crate::beads::format_bead_display;
-use crate::models::BeadsInfo;
+use crate::gastown::format_gastown_display;
+use crate::models::{BeadsInfo, GasTownInfo};
 use crate::usage_api::is_direct_claude_api;
 use std::env;
 
@@ -345,6 +346,7 @@ pub fn print_header(
     api_key_source: Option<&str>,
     lines_delta: Option<(i64, i64)>,
     beads_info: Option<&BeadsInfo>,
+    gastown_info: Option<&GasTownInfo>,
 ) {
     let dir_fmt = format_path(&hook.workspace.current_dir);
     let mdisp = model_colored_name(&hook.model.id, &hook.model.display_name, args);
@@ -550,6 +552,44 @@ pub fn print_header(
                 "{}{}{}",
                 bracket(true),
                 alerts.join(" "),
+                bracket(false)
+            ));
+        }
+    }
+
+    // Gas Town segment (if in a Gas Town workspace)
+    if let Some(gt) = gastown_info {
+        let term_width = get_terminal_width();
+        let max_len = match term_width {
+            TerminalWidth::Narrow => 30,
+            TerminalWidth::Medium => 45,
+            TerminalWidth::Wide => 60,
+        };
+        let gt_display = format_gastown_display(gt, max_len);
+        if !gt_display.is_empty() {
+            // Color based on context - accent for normal, warning for issues
+            let gt_colored = if use_true {
+                if gt.mail.as_ref().is_some_and(|m| m.unread_count > 0) {
+                    // Has unread mail - use warning color
+                    gt_display
+                        .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
+                        .to_string()
+                } else {
+                    gt_display
+                        .truecolor(COLOR_ACCENT.0, COLOR_ACCENT.1, COLOR_ACCENT.2)
+                        .to_string()
+                }
+            } else if gt.mail.as_ref().is_some_and(|m| m.unread_count > 0) {
+                gt_display.yellow().to_string()
+            } else {
+                gt_display.bright_blue().to_string()
+            };
+
+            header_parts.push(format!(
+                "{}{}{}{}",
+                bracket(true),
+                muted_label("gt:", use_true),
+                gt_colored,
                 bracket(false)
             ));
         }
@@ -1252,6 +1292,8 @@ pub fn build_json_output(
     context_limit_override: Option<u64>,
     // Beads issue tracker info
     beads_info: Option<&BeadsInfo>,
+    // Gas Town multi-agent info
+    gastown_info: Option<&GasTownInfo>,
 ) -> serde_json::Value {
     // Provider from env or deduced from model id
     let provider_env = env::var("CLAUDE_PROVIDER").ok().map(|s| {
@@ -1487,6 +1529,40 @@ pub fn build_json_output(
             "total_open": b.total_open,
             "epic_count": b.epic_count,
             "top_labels": b.top_labels.clone()
+        })),
+        "gastown": gastown_info.map(|gt| serde_json::json!({
+            "town_root": gt.town_root.clone(),
+            "town_name": gt.town_name.clone(),
+            "agent": gt.agent.as_ref().map(|a| serde_json::json!({
+                "type": a.agent_type.as_str(),
+                "emoji": a.agent_type.emoji(),
+                "rig": a.rig.clone(),
+                "name": a.name.clone(),
+                "identity": a.identity.clone()
+            })),
+            "mail": gt.mail.as_ref().map(|m| serde_json::json!({
+                "unread_count": m.unread_count,
+                "preview": m.preview.clone()
+            })),
+            "hooked_issue": gt.hooked_issue.clone(),
+            "rigs": gt.rigs.iter().map(|r| serde_json::json!({
+                "name": r.name.clone(),
+                "status": match r.status {
+                    crate::models::RigStatus::Active => "active",
+                    crate::models::RigStatus::Partial => "partial",
+                    crate::models::RigStatus::Inactive => "inactive",
+                },
+                "led": r.status.led(),
+                "polecat_count": r.polecat_count,
+                "crew_count": r.crew_count,
+                "has_witness": r.has_witness,
+                "has_refinery": r.has_refinery
+            })).collect::<Vec<_>>(),
+            "total_polecats": gt.total_polecats,
+            "refinery_queue": gt.refinery_queue.as_ref().map(|q| serde_json::json!({
+                "current": q.current.clone(),
+                "pending": q.pending
+            }))
         }))
     })
 }
@@ -1530,6 +1606,7 @@ pub fn print_json_output(
     usage_limits: Option<&UsageSummary>,
     context_limit_override: Option<u64>,
     beads_info: Option<&BeadsInfo>,
+    gastown_info: Option<&GasTownInfo>,
 ) -> anyhow::Result<()> {
     let json = build_json_output(
         hook,
@@ -1569,6 +1646,7 @@ pub fn print_json_output(
         usage_limits,
         context_limit_override,
         beads_info,
+        gastown_info,
     );
     println!("{}", serde_json::to_string(&json)?);
     Ok(())

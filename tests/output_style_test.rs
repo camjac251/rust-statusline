@@ -63,6 +63,7 @@ fn test_output_style_in_json() {
         None, // usage_limits
         None, // context_limit_override
         None, // beads_info
+        None, // gastown_info
     );
 
     // Verify output_style is present in JSON
@@ -126,6 +127,7 @@ fn test_output_style_in_json() {
         None, // usage_limits
         None, // context_limit_override
         None, // beads_info
+        None, // gastown_info
     );
 
     // Verify output_style is null when not present
@@ -194,6 +196,7 @@ fn test_multiple_output_styles() {
             None, // usage_limits
             None, // context_limit_override
             None, // beads_info
+            None, // gastown_info
         );
 
         assert_eq!(

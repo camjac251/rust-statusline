@@ -27,6 +27,9 @@ pub mod beads;
 /// In-memory caching for parsed JSONL data
 pub mod cache;
 
+/// Gas Town multi-agent orchestration integration
+pub mod gastown;
+
 /// SQLite-based persistent caching for global usage tracking
 pub mod db;
 
