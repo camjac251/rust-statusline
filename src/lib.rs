@@ -21,6 +21,9 @@
 //! - `git` (default): Enables repository inspection via gix
 //! - `colors` (default): Enables terminal color output via owo-colors
 
+/// Beads issue tracker integration
+pub mod beads;
+
 /// In-memory caching for parsed JSONL data
 pub mod cache;
 

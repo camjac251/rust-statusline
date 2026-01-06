@@ -1,5 +1,7 @@
 use chrono::{DateTime, Local, Timelike};
 
+use crate::beads::format_bead_display;
+use crate::models::BeadsInfo;
 use crate::usage_api::is_direct_claude_api;
 use std::env;
 
@@ -342,12 +344,13 @@ pub fn print_header(
     args: &Args,
     api_key_source: Option<&str>,
     lines_delta: Option<(i64, i64)>,
+    beads_info: Option<&BeadsInfo>,
 ) {
     let dir_fmt = format_path(&hook.workspace.current_dir);
     let mdisp = model_colored_name(&hook.model.id, &hook.model.display_name, args);
     let use_true = is_truecolor_enabled(args);
 
-    // Build header segments: git (minimal) + model + output_style + optional provider hints
+    // Build header segments: git (minimal) + model + beads + output_style + optional provider hints
     let mut header_parts: Vec<String> = Vec::new();
 
     // Helper for bracket styling
@@ -447,6 +450,110 @@ pub fn print_header(
 
     // Model segment
     header_parts.push(format!("{}{}{}", bracket(true), mdisp, bracket(false)));
+
+    // Beads current work segment (if available)
+    if let Some(beads) = beads_info {
+        if let Some(ref work) = beads.current_work {
+            // Max display length depends on terminal width
+            let term_width = get_terminal_width();
+            let max_len = match term_width {
+                TerminalWidth::Narrow => 25,
+                TerminalWidth::Medium => 35,
+                TerminalWidth::Wide => 50,
+            };
+            let work_display = format_bead_display(work, max_len);
+
+            // Color based on priority (lower = more urgent)
+            let work_colored = if use_true {
+                if work.priority == 0 {
+                    // P0 critical - red
+                    work_display
+                        .truecolor(COLOR_ERROR.0, COLOR_ERROR.1, COLOR_ERROR.2)
+                        .bold()
+                        .to_string()
+                } else if work.priority == 1 {
+                    // P1 high - warning yellow
+                    work_display
+                        .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
+                        .to_string()
+                } else {
+                    // P2+ normal - accent blue
+                    work_display
+                        .truecolor(COLOR_ACCENT.0, COLOR_ACCENT.1, COLOR_ACCENT.2)
+                        .to_string()
+                }
+            } else if work.priority == 0 {
+                work_display.red().bold().to_string()
+            } else if work.priority == 1 {
+                work_display.yellow().to_string()
+            } else {
+                work_display.bright_blue().to_string()
+            };
+
+            header_parts.push(format!(
+                "{}{}{}",
+                bracket(true),
+                work_colored,
+                bracket(false)
+            ));
+        } else if beads.total_open > 0 {
+            // No current work but there are open issues - show count
+            let count_text = format!("{} open", beads.total_open);
+            let count_colored = if use_true {
+                count_text
+                    .truecolor(COLOR_MUTED.0, COLOR_MUTED.1, COLOR_MUTED.2)
+                    .to_string()
+            } else {
+                count_text.bright_black().dimmed().to_string()
+            };
+            header_parts.push(format!(
+                "{}{}{}{}",
+                bracket(true),
+                muted_label("bd:", use_true),
+                count_colored,
+                bracket(false)
+            ));
+        }
+
+        // Show alerts for blocked and P0 issues (separate segment)
+        let mut alerts: Vec<String> = Vec::new();
+
+        // P0 critical issues alert
+        if beads.priorities.p0_critical > 0 {
+            let p0_text = format!("🔴{}", beads.priorities.p0_critical);
+            let p0_colored = if use_true {
+                p0_text
+                    .truecolor(COLOR_ERROR.0, COLOR_ERROR.1, COLOR_ERROR.2)
+                    .bold()
+                    .to_string()
+            } else {
+                p0_text.red().bold().to_string()
+            };
+            alerts.push(p0_colored);
+        }
+
+        // Blocked issues alert
+        if beads.counts.blocked > 0 {
+            let blocked_text = format!("⚠{}", beads.counts.blocked);
+            let blocked_colored = if use_true {
+                blocked_text
+                    .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
+                    .to_string()
+            } else {
+                blocked_text.yellow().to_string()
+            };
+            alerts.push(blocked_colored);
+        }
+
+        if !alerts.is_empty() {
+            header_parts.push(format!(
+                "{}{}{}",
+                bracket(true),
+                alerts.join(" "),
+                bracket(false)
+            ));
+        }
+    }
 
     // Output style segment (if present)
     if let Some(ref output_style) = hook.output_style {
@@ -1143,6 +1250,8 @@ pub fn build_json_output(
     usage_limits: Option<&UsageSummary>,
     // Override context limit from hook.context_window.context_window_size
     context_limit_override: Option<u64>,
+    // Beads issue tracker info
+    beads_info: Option<&BeadsInfo>,
 ) -> serde_json::Value {
     // Provider from env or deduced from model id
     let provider_env = env::var("CLAUDE_PROVIDER").ok().map(|s| {
@@ -1342,7 +1451,43 @@ pub fn build_json_output(
             "remote_url": git_remote_url,
             "worktree_count": git_wt_count,
             "is_linked_worktree": git_is_wt
-        }
+        },
+        "beads": beads_info.map(|b| serde_json::json!({
+            "beads_dir": b.beads_dir.clone(),
+            "current_work": b.current_work.as_ref().map(|w| serde_json::json!({
+                "id": w.id.clone(),
+                "title": w.title.clone(),
+                "status": w.status.as_str(),
+                "priority": w.priority,
+                "issue_type": w.issue_type.clone(),
+                "assignee": w.assignee.clone(),
+                "estimated_minutes": w.estimated_minutes
+            })),
+            "counts": {
+                "open": b.counts.open,
+                "in_progress": b.counts.in_progress,
+                "blocked": b.counts.blocked,
+                "hooked": b.counts.hooked,
+                "deferred": b.counts.deferred,
+                "pinned": b.counts.pinned
+            },
+            "priorities": {
+                "p0_critical": b.priorities.p0_critical,
+                "p1_high": b.priorities.p1_high,
+                "p2_medium": b.priorities.p2_medium,
+                "p3_p4_low": b.priorities.p3_p4_low
+            },
+            "types": {
+                "task": b.types.task,
+                "bug": b.types.bug,
+                "feature": b.types.feature,
+                "epic": b.types.epic,
+                "other": b.types.other
+            },
+            "total_open": b.total_open,
+            "epic_count": b.epic_count,
+            "top_labels": b.top_labels.clone()
+        }))
     })
 }
 #[allow(clippy::too_many_arguments)]
@@ -1384,6 +1529,7 @@ pub fn print_json_output(
     oauth_rate_tier: Option<String>,
     usage_limits: Option<&UsageSummary>,
     context_limit_override: Option<u64>,
+    beads_info: Option<&BeadsInfo>,
 ) -> anyhow::Result<()> {
     let json = build_json_output(
         hook,
@@ -1422,6 +1568,7 @@ pub fn print_json_output(
         oauth_rate_tier,
         usage_limits,
         context_limit_override,
+        beads_info,
     );
     println!("{}", serde_json::to_string(&json)?);
     Ok(())

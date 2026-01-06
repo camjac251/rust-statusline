@@ -60,6 +60,7 @@ fn json_output_shape_minimal() {
         None,                    // oauth_rate_tier
         None,                    // usage_limits
         None,                    // context_limit_override
+        None,                    // beads_info
     );
 
     // High-level keys exist
@@ -160,6 +161,7 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         None,
         None,
         None, // context_limit_override
+        None, // beads_info
     );
 
     // 1M context (full limit, percentage calculated against this)
@@ -225,6 +227,7 @@ fn json_output_context_limit_override_from_hook() {
         None,
         None,
         None, // No override
+        None, // beads_info
     );
     assert_eq!(json_no_override["context"]["limit"], 200_000);
 
@@ -266,6 +269,7 @@ fn json_output_context_limit_override_from_hook() {
         None,
         None,
         Some(1_048_576), // Gemini 1M context override
+        None,            // beads_info
     );
     assert_eq!(json_with_override["context"]["limit"], 1_048_576);
     assert_eq!(json_with_override["context"]["limit_full"], 1_048_576);

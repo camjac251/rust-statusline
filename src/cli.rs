@@ -102,6 +102,11 @@ pub struct Args {
     /// Falls back to per-session scan_usage calculation (no global aggregation)
     #[arg(long, env = "CLAUDE_DB_CACHE_DISABLE")]
     pub no_db_cache: bool,
+
+    /// Disable beads issue tracker integration
+    /// Skips looking for .beads directory and querying issue status
+    #[arg(long, env = "CLAUDE_NO_BEADS")]
+    pub no_beads: bool,
 }
 
 impl Args {
