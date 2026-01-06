@@ -341,7 +341,6 @@ pub fn print_header(
     git_info: Option<&GitInfo>,
     args: &Args,
     api_key_source: Option<&str>,
-    sessions_info: Option<&crate::models::SessionsInfo>,
     lines_delta: Option<(i64, i64)>,
 ) {
     let dir_fmt = format_path(&hook.workspace.current_dir);
@@ -466,115 +465,6 @@ pub fn print_header(
             style_colored,
             bracket(false),
         ));
-    }
-
-    // Sessions segment (if detected)
-    if let Some(si) = sessions_info {
-        let mut sess_parts: Vec<String> = Vec::new();
-
-        // Task
-        if let Some(ref task) = si.current_task {
-            sess_parts.push(format!("{}{}", muted_label("task:", use_true), task.cyan()));
-        }
-
-        // Mode (lowercase to match existing style)
-        if let Some(ref mode) = si.mode {
-            let mode_text = match mode.as_str() {
-                "Implementation" => "implement",
-                _ => "discuss",
-            };
-            let mode_colored = if use_true {
-                match mode.as_str() {
-                    "Implementation" => mode_text
-                        .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                        .to_string(),
-                    _ => mode_text.white().to_string(),
-                }
-            } else {
-                match mode.as_str() {
-                    "Implementation" => mode_text.yellow().to_string(),
-                    _ => mode_text.white().to_string(),
-                }
-            };
-            sess_parts.push(format!(
-                "{}{}",
-                muted_label("mode:", use_true),
-                mode_colored
-            ));
-        }
-
-        // Edited files count
-        if si.edited_files > 0 {
-            let files_colored = if use_true {
-                si.edited_files
-                    .to_string()
-                    .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                    .to_string()
-            } else {
-                si.edited_files.to_string().yellow().to_string()
-            };
-            sess_parts.push(format!(
-                "{}{}",
-                muted_label("files:", use_true),
-                files_colored
-            ));
-        }
-
-        // Upstream (ahead/behind)
-        if let Some(ref upstream) = si.upstream {
-            if upstream.ahead > 0 || upstream.behind > 0 {
-                let mut up_parts = Vec::new();
-                if upstream.ahead > 0 {
-                    if use_true {
-                        up_parts.push(
-                            format!("{}{}", SYM_ARROW_UP, upstream.ahead)
-                                .truecolor(COLOR_SUCCESS.0, COLOR_SUCCESS.1, COLOR_SUCCESS.2)
-                                .to_string(),
-                        );
-                    } else {
-                        up_parts.push(
-                            format!("{}{}", SYM_ARROW_UP, upstream.ahead)
-                                .green()
-                                .to_string(),
-                        );
-                    }
-                }
-                if upstream.behind > 0 {
-                    if use_true {
-                        up_parts.push(
-                            format!("{}{}", SYM_ARROW_DOWN, upstream.behind)
-                                .truecolor(COLOR_ERROR.0, COLOR_ERROR.1, COLOR_ERROR.2)
-                                .to_string(),
-                        );
-                    } else {
-                        up_parts.push(
-                            format!("{}{}", SYM_ARROW_DOWN, upstream.behind)
-                                .red()
-                                .to_string(),
-                        );
-                    }
-                }
-                sess_parts.push(up_parts.join(" "));
-            }
-        }
-
-        // Open tasks
-        if si.open_tasks > 0 {
-            sess_parts.push(format!(
-                "{}{}",
-                muted_label("tasks:", use_true),
-                si.open_tasks.to_string().cyan()
-            ));
-        }
-
-        if !sess_parts.is_empty() {
-            header_parts.push(format!(
-                "{}{}{}",
-                bracket(true),
-                sess_parts.join(" "),
-                bracket(false),
-            ));
-        }
     }
 
     // Optional provider hints grouped (only when --show-provider is set)
@@ -1251,7 +1141,6 @@ pub fn build_json_output(
     oauth_org_type: Option<String>,
     oauth_rate_tier: Option<String>,
     usage_limits: Option<&UsageSummary>,
-    sessions_info: Option<&crate::models::SessionsInfo>,
     // Override context limit from hook.context_window.context_window_size
     context_limit_override: Option<u64>,
 ) -> serde_json::Value {
@@ -1453,18 +1342,7 @@ pub fn build_json_output(
             "remote_url": git_remote_url,
             "worktree_count": git_wt_count,
             "is_linked_worktree": git_is_wt
-        },
-        "sessions": sessions_info.map(|si| serde_json::json!({
-            "detected": si.detected,
-            "current_task": si.current_task,
-            "mode": si.mode,
-            "open_tasks": si.open_tasks,
-            "edited_files": si.edited_files,
-            "upstream": si.upstream.as_ref().map(|u| serde_json::json!({
-                "ahead": u.ahead,
-                "behind": u.behind
-            }))
-        }))
+        }
     })
 }
 #[allow(clippy::too_many_arguments)]
@@ -1505,7 +1383,6 @@ pub fn print_json_output(
     oauth_org_type: Option<String>,
     oauth_rate_tier: Option<String>,
     usage_limits: Option<&UsageSummary>,
-    sessions_info: Option<&crate::models::SessionsInfo>,
     context_limit_override: Option<u64>,
 ) -> anyhow::Result<()> {
     let json = build_json_output(
@@ -1544,7 +1421,6 @@ pub fn print_json_output(
         oauth_org_type,
         oauth_rate_tier,
         usage_limits,
-        sessions_info,
         context_limit_override,
     );
     println!("{}", serde_json::to_string(&json)?);

@@ -59,7 +59,6 @@ fn json_output_shape_minimal() {
         None,                    // oauth_org_type
         None,                    // oauth_rate_tier
         None,                    // usage_limits
-        None,                    // sessions_info
         None,                    // context_limit_override
     );
 
@@ -160,7 +159,6 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         None,
         None,
         None,
-        None, // sessions_info
         None, // context_limit_override
     );
 
@@ -226,7 +224,6 @@ fn json_output_context_limit_override_from_hook() {
         None,
         None,
         None,
-        None,
         None, // No override
     );
     assert_eq!(json_no_override["context"]["limit"], 200_000);
@@ -262,7 +259,6 @@ fn json_output_context_limit_override_from_hook() {
         0.0,
         Some((50000, 5)),
         Some("hook"),
-        None,
         None,
         None,
         None,

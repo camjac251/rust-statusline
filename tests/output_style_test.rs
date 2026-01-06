@@ -61,7 +61,6 @@ fn test_output_style_in_json() {
         None, // oauth_org_type
         None, // oauth_rate_tier
         None, // usage_limits
-        None, // sessions_info
         None, // context_limit_override
     );
 
@@ -124,7 +123,6 @@ fn test_output_style_in_json() {
         None, // oauth_org_type
         None, // oauth_rate_tier
         None, // usage_limits
-        None, // sessions_info
         None, // context_limit_override
     );
 
@@ -192,7 +190,6 @@ fn test_multiple_output_styles() {
             None, // oauth_org_type
             None, // oauth_rate_tier
             None, // usage_limits
-            None, // sessions_info
             None, // context_limit_override
         );
 

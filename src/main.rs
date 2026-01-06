@@ -148,13 +148,6 @@ fn main() -> Result<()> {
         }
     };
 
-    // cc-sessions integration (detects sessions state if present)
-    let sessions_info = hook
-        .workspace
-        .project_dir
-        .as_deref()
-        .and_then(|p| claude_statusline::sessions::gather_sessions_info(Some(Path::new(p))));
-
     // Extract lines delta from hook.cost for header display
     let lines_delta = hook.cost.as_ref().and_then(|c| {
         let la = c.total_lines_added.unwrap_or(0);
@@ -172,7 +165,6 @@ fn main() -> Result<()> {
             git_info.as_ref(),
             &args,
             api_key_source.as_deref(),
-            sessions_info.as_ref(),
             lines_delta,
         );
     }
@@ -312,7 +304,6 @@ fn main() -> Result<()> {
             oauth_org_type,
             oauth_rate_tier,
             usage_summary.as_ref(),
-            sessions_info.as_ref(),
             context_limit_override,
         )?;
     } else {
