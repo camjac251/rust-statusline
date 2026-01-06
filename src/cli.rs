@@ -107,6 +107,11 @@ pub struct Args {
     /// Skips looking for .beads directory and querying issue status
     #[arg(long, env = "CLAUDE_NO_BEADS")]
     pub no_beads: bool,
+
+    /// Disable Gas Town multi-agent integration
+    /// Skips looking for mayor/town.json and querying agent context
+    #[arg(long, env = "CLAUDE_NO_GASTOWN")]
+    pub no_gastown: bool,
 }
 
 impl Args {

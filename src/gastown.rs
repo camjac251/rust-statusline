@@ -153,39 +153,18 @@ fn get_hooked_issue() -> Option<String> {
 
 /// Query mail inbox from beads database
 ///
-/// Returns unread count and preview of first unread message
+/// Returns unread count and preview of first unread message.
+/// All gastown mail uses town-level beads ({townRoot}/.beads).
 fn query_mail_inbox(town_root: &Path, identity: &str) -> Option<MailPreview> {
-    // Try town-level beads first, then rig-level
-    let beads_dirs = [
-        town_root.join(".beads"),
-        // For rig-level agents, also check rig beads
-        // (handled below based on identity)
-    ];
-
-    for beads_dir in beads_dirs {
-        if let Some(preview) = query_mail_from_beads(&beads_dir, identity) {
-            return Some(preview);
-        }
-    }
-
-    // Also check rig-specific beads directory
-    if let Some(rig_name) = identity.split('/').next() {
-        if rig_name != "mayor" && rig_name != "deacon" {
-            let rig_beads = town_root
-                .join(rig_name)
-                .join("mayor")
-                .join("rig")
-                .join(".beads");
-            if let Some(preview) = query_mail_from_beads(&rig_beads, identity) {
-                return Some(preview);
-            }
-        }
-    }
-
-    None
+    // All mail uses town-level beads (rig-level beads are for project issues only)
+    let town_beads = town_root.join(".beads");
+    query_mail_from_beads(&town_beads, identity)
 }
 
 /// Query mail messages from a specific beads database
+///
+/// Gastown mail uses issue_type='message' with assignee = recipient identity.
+/// All mail goes through town-level beads ({townRoot}/.beads).
 fn query_mail_from_beads(beads_dir: &Path, identity: &str) -> Option<MailPreview> {
     let db_path = beads_dir.join(BEADS_DB_NAME);
     if !db_path.is_file() {
@@ -194,8 +173,8 @@ fn query_mail_from_beads(beads_dir: &Path, identity: &str) -> Option<MailPreview
 
     let conn = Connection::open(&db_path).ok()?;
 
-    // Query for open/hooked issues assigned to this identity
-    // In beads, mail is stored as issues with assignee = recipient
+    // Query for open/hooked messages assigned to this identity
+    // Gastown stores mail as beads issues with issue_type='message'
     let mut stmt = conn
         .prepare(
             r#"
@@ -204,7 +183,7 @@ fn query_mail_from_beads(beads_dir: &Path, identity: &str) -> Option<MailPreview
             WHERE assignee = ?1
               AND status IN ('open', 'hooked')
               AND (deleted_at IS NULL OR deleted_at = '')
-              AND issue_type = 'mail'
+              AND issue_type = 'message'
             ORDER BY updated_at DESC
             "#,
         )

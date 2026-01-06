@@ -162,8 +162,10 @@ fn main() -> Result<()> {
         get_beads_info(Path::new(beads_dir))
     };
 
-    // Gas Town multi-agent info (auto-detected from workspace markers)
-    let gastown_info = {
+    // Gas Town multi-agent info (unless --no-gastown is set)
+    let gastown_info = if args.no_gastown {
+        None
+    } else {
         let gt_dir = hook
             .workspace
             .project_dir
