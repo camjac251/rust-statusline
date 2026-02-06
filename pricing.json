@@ -6,6 +6,14 @@
     "description": "Pricing configuration for Claude models. All prices are in USD per token. Source: https://platform.claude.com/docs/en/about-claude/pricing"
   },
   "models": {
+    "claude-opus-4-6": {
+      "name": "Claude Opus 4.6",
+      "input": 5e-6,
+      "output": 2.5e-5,
+      "cache_create": 6.25e-6,
+      "cache_create_1h": 1e-5,
+      "cache_read": 5e-7
+    },
     "claude-opus-4-1": {
       "name": "Claude Opus 4.1",
       "input": 1.5e-5,
@@ -220,10 +228,11 @@
     "comment": "Long context pricing for models with 1M context window. Applied when total input tokens (including cache) exceed threshold.",
     "tiers": [
       {
-        "name": "sonnet_long_context",
-        "description": "Sonnet 4.5/4 long context pricing (>200K tokens)",
+        "name": "long_context",
+        "description": "Long context pricing for 1M-capable models (>200K tokens)",
         "threshold": 200000,
         "applies_to": [
+          "claude-opus-4-6",
           "claude-sonnet-4-5",
           "claude-sonnet-4-5-20250929",
           "claude-sonnet-4",

@@ -126,7 +126,7 @@ pub(crate) fn static_context_limit_lookup(model_id: &str) -> Option<u64> {
     if m.contains("3-5-sonnet") {
         return Some(200_000);
     }
-    if m.contains("3-5-haiku") {
+    if m.contains("haiku-4") || m.contains("3-5-haiku") {
         return Some(200_000);
     }
     None
@@ -172,7 +172,8 @@ const MAX_OUTPUT_CAP: u64 = 32_000;
 const DEFAULT_AUTOCOMPACT_HEADROOM: u64 = 13_000;
 
 const MAX_OUTPUT_SONNET_4: u64 = 64_000;
-const MAX_OUTPUT_OPUS_4: u64 = 32_000;
+const MAX_OUTPUT_OPUS_32K: u64 = 32_000; // Opus 4, 4.1
+const MAX_OUTPUT_OPUS_128K: u64 = 128_000; // Opus 4.6+
 const MAX_OUTPUT_HAIKU_4: u64 = 64_000;
 const MAX_OUTPUT_LEGACY: u64 = 8_192;
 
@@ -226,7 +227,13 @@ pub fn max_output_capability(model_id: &str) -> u64 {
     let lower = model_id.to_lowercase();
     if lower.contains("4") {
         if lower.contains("opus") {
-            MAX_OUTPUT_OPUS_4
+            if lower.contains("opus-4-6") {
+                MAX_OUTPUT_OPUS_128K
+            } else if lower.contains("opus-4-5") {
+                MAX_OUTPUT_SONNET_4 // 64K
+            } else {
+                MAX_OUTPUT_OPUS_32K
+            }
         } else if lower.contains("haiku") {
             MAX_OUTPUT_HAIKU_4
         } else {
@@ -245,6 +252,88 @@ pub fn usable_context_limit(model_id: &str, display_name: &str) -> u64 {
         usable = usable.saturating_sub(auto_compact_headroom_tokens());
     }
     usable
+}
+
+/// Convert a raw model ID into a friendly display name when Claude Code
+/// sends the raw ID as the display_name (e.g. `"claude-opus-4-6"` instead
+/// of `"Claude Opus 4.6"`).  Returns the original `display_name` if it
+/// already looks friendly (contains uppercase letters or spaces) or if the
+/// ID doesn't follow a recognisable Claude naming pattern.
+///
+/// Handles both current (`claude-{family}-{ver}`) and legacy
+/// (`claude-{ver}-{family}`) naming schemes, with optional date suffixes
+/// and Bedrock `anthropic.` prefixes.
+pub fn friendly_model_name(model_id: &str, display_name: &str) -> String {
+    // If display_name already looks like a proper friendly name, keep it.
+    if display_name.contains(' ') || display_name.chars().any(|c| c.is_uppercase()) {
+        return display_name.to_string();
+    }
+
+    let id = model_id.to_lowercase();
+
+    // Strip known prefixes
+    let stripped = if let Some(s) = id.strip_prefix("claude-") {
+        s
+    } else if let Some(s) = id.strip_prefix("anthropic.claude-") {
+        s
+    } else {
+        return display_name.to_string();
+    };
+
+    // Strip date suffix -YYYYMMDD (exactly 8 digits preceded by '-')
+    let without_date = if stripped.len() >= 9 {
+        let (head, tail) = stripped.split_at(stripped.len() - 8);
+        if tail.chars().all(|c| c.is_ascii_digit()) && head.ends_with('-') {
+            &head[..head.len() - 1]
+        } else {
+            stripped
+        }
+    } else {
+        stripped
+    };
+
+    // Strip Bedrock version suffix like -v1, -v1:0
+    let without_suffix = without_date
+        .split_once("-v")
+        .and_then(|(prefix, rest)| {
+            if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                Some(prefix)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(without_date);
+
+    const FAMILIES: &[&str] = &["opus", "sonnet", "haiku", "instant"];
+
+    for family in FAMILIES {
+        // Current format: {family}-{version} e.g. "opus-4-6"
+        if let Some(rest) = without_suffix.strip_prefix(&format!("{}-", family)) {
+            let version = rest.replace('-', ".");
+            return format!("{} {}", capitalize(family), version);
+        }
+        // Legacy format: {version}-{family} e.g. "3-5-sonnet"
+        if let Some(rest) = without_suffix.strip_suffix(&format!("-{}", family)) {
+            let version = rest.replace('-', ".");
+            return format!("{} {}", capitalize(family), version);
+        }
+    }
+
+    // No family found but still claude- prefix: "Claude {version}"
+    let version = without_suffix.replace('-', ".");
+    if !version.is_empty() {
+        return format!("Claude {}", version);
+    }
+
+    display_name.to_string()
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
 }
 
 pub fn sanitized_project_name(project_dir: &str) -> String {
@@ -349,5 +438,98 @@ mod tests {
         );
 
         unsafe { env::remove_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS") };
+    }
+
+    #[test]
+    fn test_friendly_model_name_current_format() {
+        // Current naming: claude-{family}-{major}-{minor}
+        assert_eq!(
+            friendly_model_name("claude-opus-4-6", "claude-opus-4-6"),
+            "Opus 4.6"
+        );
+        assert_eq!(
+            friendly_model_name("claude-sonnet-4-5", "claude-sonnet-4-5"),
+            "Sonnet 4.5"
+        );
+        assert_eq!(
+            friendly_model_name("claude-haiku-4-5", "claude-haiku-4-5"),
+            "Haiku 4.5"
+        );
+        assert_eq!(
+            friendly_model_name("claude-opus-4", "claude-opus-4"),
+            "Opus 4"
+        );
+    }
+
+    #[test]
+    fn test_friendly_model_name_with_date() {
+        assert_eq!(
+            friendly_model_name("claude-sonnet-4-5-20250929", "claude-sonnet-4-5-20250929"),
+            "Sonnet 4.5"
+        );
+        assert_eq!(
+            friendly_model_name("claude-opus-4-1-20250805", "claude-opus-4-1-20250805"),
+            "Opus 4.1"
+        );
+    }
+
+    #[test]
+    fn test_friendly_model_name_legacy_format() {
+        // Legacy naming: claude-{major}-{minor}-{family}
+        assert_eq!(
+            friendly_model_name("claude-3-5-sonnet-20241022", "claude-3-5-sonnet-20241022"),
+            "Sonnet 3.5"
+        );
+        assert_eq!(
+            friendly_model_name("claude-3-opus-20240229", "claude-3-opus-20240229"),
+            "Opus 3"
+        );
+        assert_eq!(
+            friendly_model_name("claude-3-haiku-20240307", "claude-3-haiku-20240307"),
+            "Haiku 3"
+        );
+    }
+
+    #[test]
+    fn test_friendly_model_name_bedrock() {
+        assert_eq!(
+            friendly_model_name(
+                "anthropic.claude-opus-4-6-v1",
+                "anthropic.claude-opus-4-6-v1"
+            ),
+            "Opus 4.6"
+        );
+    }
+
+    #[test]
+    fn test_friendly_model_name_no_family() {
+        // No family in ID → "Claude {version}"
+        assert_eq!(
+            friendly_model_name("claude-4-5", "claude-4-5"),
+            "Claude 4.5"
+        );
+    }
+
+    #[test]
+    fn test_friendly_model_name_already_friendly() {
+        // Already has uppercase/spaces → returned as-is
+        assert_eq!(
+            friendly_model_name("claude-opus-4-6", "Claude Opus 4.6"),
+            "Claude Opus 4.6"
+        );
+        assert_eq!(
+            friendly_model_name("claude-sonnet-4-5", "Sonnet 4.5"),
+            "Sonnet 4.5"
+        );
+    }
+
+    #[test]
+    fn test_friendly_model_name_non_claude() {
+        // Non-Claude models → returned as-is
+        assert_eq!(friendly_model_name("gpt-4o", "gpt-4o"), "gpt-4o");
+        assert_eq!(
+            friendly_model_name("gemini-2.5-pro", "gemini-2.5-pro"),
+            "gemini-2.5-pro"
+        );
     }
 }

@@ -18,7 +18,7 @@ use claude_statusline::usage::{
     calc_context_from_entries, calc_context_from_transcript, scan_usage,
 };
 use claude_statusline::usage_api::{UsageSummary, get_usage_summary};
-use claude_statusline::utils::{claude_paths, read_stdin};
+use claude_statusline::utils::{claude_paths, friendly_model_name, read_stdin};
 use claude_statusline::window::{BurnScope, WindowScope, calculate_window_metrics};
 
 fn main() -> Result<()> {
@@ -33,7 +33,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let hook: HookJson = serde_json::from_slice(&stdin).context("parse hook json")?;
+    let mut hook: HookJson = serde_json::from_slice(&stdin).context("parse hook json")?;
+
+    // Normalize display_name: when Claude Code sends the raw model ID as the
+    // display name (e.g. "claude-opus-4-6"), convert it to a friendly form
+    // ("Opus 4.6") so every downstream consumer gets the right label.
+    hook.model.display_name = friendly_model_name(&hook.model.id, &hook.model.display_name);
 
     // Compute metrics (from logs)
     let paths = claude_paths(args.claude_config_dir.as_deref());
