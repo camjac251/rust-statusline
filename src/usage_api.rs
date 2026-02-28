@@ -12,7 +12,6 @@ const CACHE_TTL_SECONDS: i64 = 60;
 const ANTHROPIC_BETA: &str = "oauth-2025-04-20";
 const API_CACHE_KEY: &str = "oauth_usage_summary";
 
-
 fn fetch_enabled() -> bool {
     match std::env::var("CLAUDE_STATUSLINE_FETCH_USAGE") {
         Ok(val) => {
@@ -261,6 +260,7 @@ fn find_oauth_token(claude_paths: &[PathBuf]) -> Option<String> {
 #[cfg(target_os = "macos")]
 fn read_from_macos_keychain() -> Option<String> {
     use sha2::{Digest, Sha256};
+    use std::process::Command;
 
     // Get current username for account field
     let username = env::var("USER").ok()?;
