@@ -93,7 +93,7 @@ jobs:
       - run: cargo test --all-features
 
   msrv:
-    name: MSRV (1.87.0)
+    name: MSRV (1.88.0)
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -101,6 +101,6 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.87.0
+      - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-features

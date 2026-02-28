@@ -86,12 +86,12 @@ Pipeline: stdin JSON hook -> transcript parsing -> pricing -> display (text or J
 - Tests on Ubuntu, macOS, Windows with stable Rust
 - All feature combinations tested
 - Binary size < 7MB on Linux
-- MSRV: Rust 1.87.0
+- MSRV: Rust 1.88.0
 
 ## Constraints
 
 - **Binary size**: Release < 7MB (CI enforced)
-- **MSRV**: 1.87.0, edition 2024
+- **MSRV**: 1.88.0, edition 2024
 - **Pricing**: Compile-time embedded; override with all four `CLAUDE_PRICE_*` env vars
 - **Cache**: In-memory (30s TTL) + SQLite at `~/.claude/statusline.db` (WAL mode, concurrent-safe)
 - **Time format**: Auto-detects locale; override with `CLAUDE_TIME_FORMAT` or `--time`
