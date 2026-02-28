@@ -83,7 +83,7 @@ Pipeline: stdin JSON hook -> transcript parsing -> pricing -> display (text or J
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
-- Tests on Ubuntu, macOS, Windows with stable + beta Rust
+- Tests on Ubuntu, macOS, Windows with stable Rust
 - All feature combinations tested
 - Binary size < 7MB on Linux
 - MSRV: Rust 1.87.0

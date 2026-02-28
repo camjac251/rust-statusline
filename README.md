@@ -43,6 +43,10 @@ Or add to `~/.config/mise/config.toml`:
 curl -fsSL https://github.com/camjac251/rust-statusline/releases/latest/download/claude_statusline-linux-x86_64 \
   -o ~/.claude/claude_statusline && chmod +x ~/.claude/claude_statusline
 
+# Linux ARM64
+curl -fsSL https://github.com/camjac251/rust-statusline/releases/latest/download/claude_statusline-linux-arm64 \
+  -o ~/.claude/claude_statusline && chmod +x ~/.claude/claude_statusline
+
 # macOS Apple Silicon
 curl -fsSL https://github.com/camjac251/rust-statusline/releases/latest/download/claude_statusline-macos-arm64 \
   -o ~/.claude/claude_statusline && chmod +x ~/.claude/claude_statusline
