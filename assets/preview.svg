@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="80" viewBox="0 0 1100 80">
+  <defs>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&amp;display=swap');
+      .bg { fill: #1a1b26; }
+      text { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+      .muted { fill: #94A3B8; }
+      .white { fill: #ffffff; }
+      .blue { fill: #60A5FA; }
+      .purple { fill: #C8A0FF; }
+      .red { fill: #F87171; }
+      .yellow { fill: #EEE153; }
+      .green { fill: #86EFAC; }
+      .lime { fill: #ACEA8B; }
+      .cream { fill: #F5F1DE; }
+      .bold { font-weight: 700; }
+    </style>
+  </defs>
+  <rect class="bg" width="1100" height="80" rx="8"/>
+  <!-- Line 1: header -->
+  <text y="28" x="16">
+    <tspan class="blue">~/rust-statusline</tspan>
+    <tspan class="muted"> [</tspan><tspan class="white">main@e4f1c2b +3-1</tspan><tspan class="muted">]</tspan>
+    <tspan class="muted"> [</tspan><tspan class="purple">Opus 4.6</tspan><tspan class="muted">]</tspan>
+    <tspan class="muted"> [</tspan><tspan class="blue">style:default</tspan><tspan class="muted">]</tspan>
+  </text>
+  <!-- Line 2: metrics -->
+  <text y="56" x="16">
+    <tspan class="blue">❯</tspan>
+    <tspan class="muted"> sess:</tspan><tspan class="white bold">$2.41</tspan>
+    <tspan class="muted"> │ today:</tspan><tspan class="white">$7.83</tspan>
+    <tspan class="muted"> │ win:</tspan><tspan class="white bold">$5.19</tspan>
+    <tspan class="muted"> │ usage:</tspan><tspan class="yellow">38%</tspan>
+    <tspan class="muted"> │ 7d:</tspan><tspan class="lime">12%</tspan><tspan class="muted"> (Thu)</tspan>
+    <tspan class="muted"> │ sonnet:</tspan><tspan class="green">2%</tspan>
+    <tspan class="muted"> │ reset:</tspan><tspan class="cream">2h47m</tspan><tspan class="muted"> (6pm)</tspan>
+    <tspan class="muted"> │ context:</tspan><tspan class="red bold">168.3K/200K 84%</tspan>
+    <tspan class="yellow"> ⚠ 1.2K until reserve</tspan>
+  </text>
+</svg>
