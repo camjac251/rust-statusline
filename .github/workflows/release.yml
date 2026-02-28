@@ -40,7 +40,7 @@ jobs:
             arch: windows-x86_64
             ext: .exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Build with cross
         if: contains(matrix.target, 'linux')
@@ -65,7 +65,7 @@ jobs:
           cp "$SRC" "$DST"
           sha256sum "$DST" > "$DST.sha256" || shasum -a 256 "$DST" > "$DST.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.arch }}
           path: |
@@ -80,11 +80,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
