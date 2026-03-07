@@ -485,6 +485,21 @@ pub fn get_api_cache(cache_key: &str) -> Result<Option<String>> {
     Ok(result)
 }
 
+/// Get cached API response, ignoring expiration (for stale fallback)
+pub fn get_stale_api_cache(cache_key: &str) -> Result<Option<String>> {
+    let conn = open_db()?;
+
+    let result = conn
+        .query_row(
+            "SELECT data FROM api_cache WHERE cache_key = ?",
+            params![cache_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    Ok(result)
+}
+
 /// Store API response in cache with expiration
 ///
 /// Stores the data and automatically cleans up expired entries.
@@ -503,8 +518,11 @@ pub fn set_api_cache(cache_key: &str, data: &str, ttl_seconds: i64) -> Result<()
         params![cache_key, data, now, expires_at],
     )?;
 
-    // Clean up expired entries (opportunistic cleanup)
-    conn.execute("DELETE FROM api_cache WHERE expires_at <= ?", params![now])?;
+    // Clean up expired entries, but keep the main usage cache for stale fallback
+    conn.execute(
+        "DELETE FROM api_cache WHERE expires_at <= ? AND cache_key != 'oauth_usage_summary'",
+        params![now],
+    )?;
 
     Ok(())
 }

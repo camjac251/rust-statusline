@@ -825,13 +825,16 @@ pub fn print_text_output(
     // ═══════════════════════════════════════════════════════════════════════════
 
     // Usage (only if a plan/window max is configured)
+    let is_stale = usage_limits.is_some_and(|s| s.stale);
     if is_claude {
         if let Some(usage_value) = usage_percent {
             let usage_colored = colorize_percent(usage_value, args);
 
-            let usage_label = match term_width {
-                TerminalWidth::Narrow => "u:",
-                _ => "usage:",
+            let usage_label = match (term_width, is_stale) {
+                (TerminalWidth::Narrow, true) => "~u:",
+                (TerminalWidth::Narrow, false) => "u:",
+                (_, true) => "~usage:",
+                (_, false) => "usage:",
             };
 
             // Usage with optional projection arrow
@@ -908,6 +911,26 @@ pub fn print_text_output(
                 if !segments.is_empty() {
                     print!("{}", separator(use_true, compact));
                     print!("{}", segments.join(&separator(use_true, compact)));
+                }
+
+                // Extra usage (overuse credits)
+                if let Some(ref extra) = summary.extra_usage {
+                    if extra.is_enabled {
+                        let label = if long_labels { "extra:" } else { "ex:" };
+                        let spent = extra.used_credits.unwrap_or(0.0);
+                        let limit = extra.monthly_limit.unwrap_or(0.0);
+                        let text = if limit > 0.0 {
+                            format!(
+                                "{}${:.0}/${:.0}",
+                                muted_label(label, use_true),
+                                spent,
+                                limit
+                            )
+                        } else {
+                            format!("{}${:.2}", muted_label(label, use_true), spent)
+                        };
+                        print!("{}{}", separator(use_true, compact), text);
+                    }
                 }
             }
 
@@ -1379,6 +1402,7 @@ pub fn build_json_output(
         "remaining_minutes": (remaining_minutes as i64).max(0),
         "usage_percent": usage_percent.map(|v| (v * 10.0).round()/10.0),
         "usage_percent_left": usage_percent.map(|v| ((100.0 - v).max(0.0) * 10.0).round()/10.0),
+        "usage_stale": usage_limits.is_some_and(|s| s.stale),
         "projected_percent": projected_percent.map(|v| (v * 10.0).round()/10.0),
         "projected_percent_left": projected_percent.map(|v| ((100.0 - v).max(0.0) * 10.0).round()/10.0),
         "tokens_per_minute": (tpm * 10.0).round()/10.0,

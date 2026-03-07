@@ -9,8 +9,10 @@ use std::time::Duration;
 const USAGE_ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 const ANTHROPIC_API_HOST: &str = "api.anthropic.com";
 const CACHE_TTL_SECONDS: i64 = 60;
+const NEGATIVE_CACHE_TTL_SECONDS: i64 = 60;
 const ANTHROPIC_BETA: &str = "oauth-2025-04-20";
 const API_CACHE_KEY: &str = "oauth_usage_summary";
+const NEGATIVE_CACHE_KEY: &str = "oauth_usage_negative";
 
 fn fetch_enabled() -> bool {
     match std::env::var("CLAUDE_STATUSLINE_FETCH_USAGE") {
@@ -78,6 +80,9 @@ pub struct UsageSummary {
     pub seven_day_sonnet: UsageLimit,
     pub seven_day_oauth_apps: UsageLimit,
     pub extra_usage: Option<ExtraUsage>,
+    /// True when serving expired cached data after an API failure
+    #[serde(default)]
+    pub stale: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,15 +136,39 @@ pub fn get_usage_summary(claude_paths: &[PathBuf], model_id: Option<&str>) -> Op
         }
     }
 
-    // Cache miss or invalid - fetch from API
-    let summary = fetch_usage_summary(claude_paths)?;
-
-    // Store in persistent cache
-    if let Ok(json) = serde_json::to_string(&summary) {
-        let _ = crate::db::set_api_cache(API_CACHE_KEY, &json, CACHE_TTL_SECONDS);
+    // If API recently failed (429/error), don't retry -- serve stale data
+    if let Ok(Some(_)) = crate::db::get_api_cache(NEGATIVE_CACHE_KEY) {
+        return stale_fallback();
     }
 
-    Some(summary)
+    // Cache miss or invalid - fetch from API
+    let summary = fetch_usage_summary(claude_paths);
+
+    match summary {
+        Some(s) => {
+            // Store in persistent cache
+            if let Ok(json) = serde_json::to_string(&s) {
+                let _ = crate::db::set_api_cache(API_CACHE_KEY, &json, CACHE_TTL_SECONDS);
+            }
+            Some(s)
+        }
+        None => {
+            // Cache the failure to prevent retry storm on rate limits
+            let _ = crate::db::set_api_cache(NEGATIVE_CACHE_KEY, "1", NEGATIVE_CACHE_TTL_SECONDS);
+            stale_fallback()
+        }
+    }
+}
+
+/// Return the last cached API data (even if expired), marked as stale
+fn stale_fallback() -> Option<UsageSummary> {
+    if let Ok(Some(json)) = crate::db::get_stale_api_cache(API_CACHE_KEY) {
+        if let Ok(mut summary) = serde_json::from_str::<UsageSummary>(&json) {
+            summary.stale = true;
+            return Some(summary);
+        }
+    }
+    None
 }
 
 fn fetch_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
@@ -149,15 +178,23 @@ fn fetch_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
         .build()
         .into();
 
-    let mut response = agent
+    let response = agent
         .get(USAGE_ENDPOINT)
         .header("Authorization", &format!("Bearer {}", token))
         .header("Accept", "application/json")
         .header("anthropic-beta", ANTHROPIC_BETA)
-        .call()
-        .ok()?;
+        .call();
+
+    let mut response = match response {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Usage API error: {}", e);
+            return None;
+        }
+    };
 
     if response.status() != 200 {
+        eprintln!("Usage API HTTP {}", response.status());
         return None;
     }
 
@@ -180,6 +217,7 @@ fn fetch_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
             used_credits: e.used_credits,
             utilization: e.utilization,
         }),
+        stale: false,
     })
 }
 
