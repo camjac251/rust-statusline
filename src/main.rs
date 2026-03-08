@@ -58,6 +58,21 @@ fn main() -> Result<()> {
     )
     .unwrap_or((0.0, 0.0, 0.0, Vec::new(), None, None, None));
 
+    // Prefer the model actually used in the most recent API call for this session
+    // over the hook-provided model, which may reflect a /model change in another session
+    // that wrote to settings.json but doesn't apply to this running session.
+    if let Some(actual_model) = entries
+        .iter()
+        .rev()
+        .filter(|e| e.session_id.as_deref() == Some(&hook.session_id))
+        .find_map(|e| e.model.as_deref())
+    {
+        if actual_model != hook.model.id {
+            hook.model.id = actual_model.to_string();
+            hook.model.display_name = friendly_model_name(&hook.model.id, &hook.model.id);
+        }
+    }
+
     // Global usage tracking: SQLite-based aggregation across all sessions
     // Pass session_today_cost (this session only) for proper aggregation
     let mut sessions_count = 1;

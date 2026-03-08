@@ -10,7 +10,6 @@ pub struct Entry {
     pub web_search_requests: u64,
     pub service_tier: Option<String>,
     pub cost: f64,
-    #[allow(dead_code)]
     pub model: Option<String>,
     pub session_id: Option<String>,
     #[allow(dead_code)]
