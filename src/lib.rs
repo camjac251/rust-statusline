@@ -58,5 +58,8 @@ pub mod usage_api;
 /// Utility functions for paths, formatting, and time
 pub mod utils;
 
+/// Centralized color token system
+pub mod tokens;
+
 /// Window calculation and metrics
 pub mod window;

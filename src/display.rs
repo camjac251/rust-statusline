@@ -3,29 +3,9 @@ use chrono::{DateTime, Local, Timelike};
 use crate::beads::format_bead_display;
 use crate::gastown::format_gastown_display;
 use crate::models::{BeadsInfo, GasTownInfo};
+use crate::tokens;
 use crate::usage_api::is_direct_claude_api;
 use std::env;
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// COLOR PALETTE - Matching Claude Code's aesthetic
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// Model-specific colors (truecolor)
-const COLOR_OPUS: (u8, u8, u8) = (200, 160, 255); // Purple - Opus
-const COLOR_SONNET: (u8, u8, u8) = (255, 200, 100); // Amber - Sonnet
-const COLOR_HAIKU: (u8, u8, u8) = (100, 220, 255); // Cyan - Haiku
-
-// Semantic colors matching Claude Code theme
-const COLOR_SUCCESS: (u8, u8, u8) = (134, 239, 172); // Green - good states
-const COLOR_WARNING: (u8, u8, u8) = (253, 224, 71); // Yellow - caution
-const COLOR_ERROR: (u8, u8, u8) = (248, 113, 113); // Red - alerts
-const COLOR_MUTED: (u8, u8, u8) = (148, 163, 184); // Slate - secondary text
-const COLOR_ACCENT: (u8, u8, u8) = (96, 165, 250); // Blue - links/actions
-
-// Gradient colors for usage visualization
-const COLOR_GRADIENT_LOW: (u8, u8, u8) = (134, 239, 172); // Green
-const COLOR_GRADIENT_MID: (u8, u8, u8) = (253, 224, 71); // Yellow
-const COLOR_GRADIENT_HIGH: (u8, u8, u8) = (248, 113, 113); // Red
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // UNICODE SYMBOLS - Matching Claude Code's icon set
@@ -46,10 +26,8 @@ const WIDTH_MEDIUM: u16 = 200;
 // Account for Claude CLI padding/margins (status line container has padding)
 const TERMINAL_MARGIN: u16 = 15;
 
-#[cfg(feature = "colors")]
-use owo_colors::OwoColorize;
-
-// Provide a no-op color shim when "colors" feature is disabled
+// Provide a no-op color shim when "colors" feature is disabled.
+// main.rs references this for its own trivial color usage.
 #[cfg(not(feature = "colors"))]
 pub mod color_shim {
     use std::fmt::{self, Display, Formatter};
@@ -72,47 +50,13 @@ pub mod color_shim {
         fn bright_white(&self) -> Plain {
             Plain(self.as_str().to_string())
         }
-        fn bright_blue(&self) -> Plain {
-            Plain(self.as_str().to_string())
-        }
-        fn bright_cyan(&self) -> Plain {
-            Plain(self.as_str().to_string())
-        }
-        fn bright_magenta(&self) -> Plain {
-            Plain(self.as_str().to_string())
-        }
-        fn bright_yellow(&self) -> Plain {
-            Plain(self.as_str().to_string())
-        }
-        fn bright_red(&self) -> Plain {
-            Plain(self.as_str().to_string())
-        }
-        fn bright_green(&self) -> Plain {
-            Plain(self.as_str().to_string())
-        }
-        fn red(&self) -> Plain {
-            Plain(self.as_str().to_string())
-        }
-        fn yellow(&self) -> Plain {
-            Plain(self.as_str().to_string())
-        }
-        fn green(&self) -> Plain {
-            Plain(self.as_str().to_string())
-        }
-        fn white(&self) -> Plain {
+        fn cyan(&self) -> Plain {
             Plain(self.as_str().to_string())
         }
         fn bold(&self) -> Plain {
             Plain(self.as_str().to_string())
         }
         fn dimmed(&self) -> Plain {
-            Plain(self.as_str().to_string())
-        }
-        fn truecolor(&self, _r: u8, _g: u8, _b: u8) -> Plain {
-            // No-op truecolor in shim; returns plain string
-            Plain(self.as_str().to_string())
-        }
-        fn cyan(&self) -> Plain {
             Plain(self.as_str().to_string())
         }
     }
@@ -134,9 +78,6 @@ pub mod color_shim {
     }
 }
 
-#[cfg(not(feature = "colors"))]
-use color_shim::ColorizeShim as OwoColorize;
-
 use crate::cli::{Args, LabelsArg, TimeFormatArg};
 use crate::models::{Block, GitInfo, HookJson, RateLimitInfo};
 use crate::usage_api::{UsageLimit, UsageSummary};
@@ -154,74 +95,25 @@ fn format_pct(pct: f64) -> String {
     }
 }
 
-// Interpolate between semantic gradient colors: green → yellow → red
-fn color_scale_rgb(value: f64, max: f64) -> (u8, u8, u8) {
-    let ratio = (value / max).clamp(0.0, 1.0);
-
-    if ratio < 0.5 {
-        // Green to Yellow
-        let t = ratio * 2.0;
-        let r = (COLOR_GRADIENT_LOW.0 as f64
-            + (COLOR_GRADIENT_MID.0 as f64 - COLOR_GRADIENT_LOW.0 as f64) * t)
-            as u8;
-        let g = (COLOR_GRADIENT_LOW.1 as f64
-            + (COLOR_GRADIENT_MID.1 as f64 - COLOR_GRADIENT_LOW.1 as f64) * t)
-            as u8;
-        let b = (COLOR_GRADIENT_LOW.2 as f64
-            + (COLOR_GRADIENT_MID.2 as f64 - COLOR_GRADIENT_LOW.2 as f64) * t)
-            as u8;
-        (r, g, b)
-    } else {
-        // Yellow to Red
-        let t = (ratio - 0.5) * 2.0;
-        let r = (COLOR_GRADIENT_MID.0 as f64
-            + (COLOR_GRADIENT_HIGH.0 as f64 - COLOR_GRADIENT_MID.0 as f64) * t)
-            as u8;
-        let g = (COLOR_GRADIENT_MID.1 as f64
-            + (COLOR_GRADIENT_HIGH.1 as f64 - COLOR_GRADIENT_MID.1 as f64) * t)
-            as u8;
-        let b = (COLOR_GRADIENT_MID.2 as f64
-            + (COLOR_GRADIENT_HIGH.2 as f64 - COLOR_GRADIENT_MID.2 as f64) * t)
-            as u8;
-        (r, g, b)
-    }
-}
-
 // Helper: format with muted color for labels
-fn muted_label(text: &str, use_true: bool) -> String {
-    if use_true {
-        text.truecolor(COLOR_MUTED.0, COLOR_MUTED.1, COLOR_MUTED.2)
-            .to_string()
-    } else {
-        text.bright_black().dimmed().to_string()
-    }
+fn muted_label(text: &str, tc: bool) -> String {
+    tokens::MUTED.dim(text, tc)
 }
 
 // Helper: format separator
-fn separator(use_true: bool, compact: bool) -> String {
+fn separator(tc: bool, compact: bool) -> String {
     let sym = if compact { SYM_DOT } else { SYM_SEPARATOR };
-    if use_true {
-        format!(
-            " {} ",
-            sym.truecolor(COLOR_MUTED.0, COLOR_MUTED.1, COLOR_MUTED.2)
-        )
-    } else {
-        format!(" {} ", sym.bright_black().dimmed())
-    }
+    format!(" {} ", tokens::MUTED.dim(sym, tc))
 }
 
 fn colorize_percent(pct: f64, args: &Args) -> String {
     let formatted = format_pct(pct);
-    if is_truecolor_enabled(args) {
-        // Gradient: 0% -> 100%
-        let (r, g, b) = color_scale_rgb(pct, 100.0);
-        formatted.truecolor(r, g, b).to_string()
-    } else if pct >= 95.0 {
-        formatted.red().bold().to_string()
-    } else if pct >= 80.0 {
-        formatted.yellow().bold().to_string()
+    let tc = is_truecolor_enabled(args);
+    let token = tokens::gradient(pct, 100.0);
+    if pct >= 80.0 {
+        token.bold(&formatted, tc)
     } else {
-        formatted.green().to_string()
+        token.paint(&formatted, tc)
     }
 }
 
@@ -299,44 +191,30 @@ pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String 
     }
     let lower_id = model_id.to_lowercase();
     let lower_disp = display.to_lowercase();
-    let use_true = is_truecolor_enabled(args);
+    let tc = is_truecolor_enabled(args);
 
     // Opus family (and Claude 2 legacy) -> Purple
-    if lower_id.contains("opus") || lower_disp.contains("opus") || lower_id.contains("claude-2") {
-        if use_true {
-            display
-                .truecolor(COLOR_OPUS.0, COLOR_OPUS.1, COLOR_OPUS.2)
-                .to_string()
-        } else {
-            display.bright_magenta().to_string()
-        }
+    let token = if lower_id.contains("opus")
+        || lower_disp.contains("opus")
+        || lower_id.contains("claude-2")
+    {
+        tokens::MODEL_OPUS
     }
     // Sonnet family -> Amber/Yellow
     else if lower_id.contains("sonnet") || lower_disp.contains("sonnet") {
-        if use_true {
-            display
-                .truecolor(COLOR_SONNET.0, COLOR_SONNET.1, COLOR_SONNET.2)
-                .to_string()
-        } else {
-            display.bright_yellow().to_string()
-        }
+        tokens::MODEL_SONNET
     }
     // Haiku family (and Instant legacy) -> Cyan/Blue
     else if lower_id.contains("haiku")
         || lower_disp.contains("haiku")
         || lower_id.contains("claude-instant")
     {
-        if use_true {
-            display
-                .truecolor(COLOR_HAIKU.0, COLOR_HAIKU.1, COLOR_HAIKU.2)
-                .to_string()
-        } else {
-            display.bright_cyan().to_string()
-        }
+        tokens::MODEL_HAIKU
     } else {
         // Unknown/Other -> White
-        display.bright_white().to_string()
-    }
+        tokens::PRIMARY
+    };
+    token.paint(display, tc)
 }
 
 pub fn print_header(
@@ -350,7 +228,7 @@ pub fn print_header(
 ) {
     let dir_fmt = format_path(&hook.workspace.current_dir);
     let mdisp = model_colored_name(&hook.model.id, &hook.model.display_name, args);
-    let use_true = is_truecolor_enabled(args);
+    let tc = is_truecolor_enabled(args);
 
     // Build header segments: git (minimal) + model + beads + output_style + optional provider hints
     let mut header_parts: Vec<String> = Vec::new();
@@ -358,12 +236,7 @@ pub fn print_header(
     // Helper for bracket styling
     let bracket = |open: bool| -> String {
         let ch = if open { "[" } else { "]" };
-        if use_true {
-            ch.truecolor(COLOR_MUTED.0, COLOR_MUTED.1, COLOR_MUTED.2)
-                .to_string()
-        } else {
-            ch.bright_black().to_string()
-        }
+        tokens::MUTED.paint(ch, tc)
     };
 
     // Git info from project_dir or current_dir
@@ -371,55 +244,32 @@ pub fn print_header(
         let mut git_seg = String::new();
         // worktree indicator
         if gi.is_linked_worktree == Some(true) {
-            git_seg.push_str(&muted_label("wt ", use_true));
+            git_seg.push_str(&muted_label("wt ", tc));
         }
         if let (Some(br), Some(sc)) = (gi.branch.as_ref(), gi.short_commit.as_ref()) {
             // branch and short sha
-            git_seg.push_str(&br.bright_white().to_string());
-            git_seg.push_str(&muted_label("@", use_true));
-            git_seg.push_str(&sc.bright_white().to_string());
+            git_seg.push_str(&tokens::PRIMARY.paint(br, tc));
+            git_seg.push_str(&muted_label("@", tc));
+            git_seg.push_str(&tokens::PRIMARY.paint(sc, tc));
         } else if let Some(sc) = gi.short_commit.as_ref() {
-            git_seg.push_str(&muted_label("detached@", use_true));
-            git_seg.push_str(&sc.bright_white().to_string());
+            git_seg.push_str(&muted_label("detached@", tc));
+            git_seg.push_str(&tokens::PRIMARY.paint(sc, tc));
         }
         // dirty marker
         if gi.is_clean == Some(false) {
-            if use_true {
-                git_seg.push_str(
-                    &"*".truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                        .to_string(),
-                );
-            } else {
-                git_seg.push_str(&"*".yellow().to_string());
-            }
+            git_seg.push_str(&tokens::WARNING.paint("*", tc));
         }
         // ahead/behind
         if let (Some(a), Some(b)) = (gi.ahead, gi.behind) {
             if a > 0 {
                 git_seg.push(' ');
-                if use_true {
-                    git_seg.push_str(
-                        &format!("{}{}", SYM_ARROW_UP, a)
-                            .truecolor(COLOR_SUCCESS.0, COLOR_SUCCESS.1, COLOR_SUCCESS.2)
-                            .to_string(),
-                    );
-                } else {
-                    git_seg.push_str(&format!("{}{}", SYM_ARROW_UP, a).green().to_string());
-                }
+                git_seg.push_str(&tokens::SUCCESS.paint(&format!("{}{}", SYM_ARROW_UP, a), tc));
             }
             if b > 0 {
                 if a == 0 {
                     git_seg.push(' ');
                 }
-                if use_true {
-                    git_seg.push_str(
-                        &format!("{}{}", SYM_ARROW_DOWN, b)
-                            .truecolor(COLOR_ERROR.0, COLOR_ERROR.1, COLOR_ERROR.2)
-                            .to_string(),
-                    );
-                } else {
-                    git_seg.push_str(&format!("{}{}", SYM_ARROW_DOWN, b).red().to_string());
-                }
+                git_seg.push_str(&tokens::ERROR.paint(&format!("{}{}", SYM_ARROW_DOWN, b), tc));
             }
         }
         // lines delta (working tree changes)
@@ -428,21 +278,8 @@ pub fn print_header(
                 if !git_seg.is_empty() {
                     git_seg.push(' ');
                 }
-                if use_true {
-                    git_seg.push_str(
-                        &format!("+{}", added)
-                            .truecolor(COLOR_SUCCESS.0, COLOR_SUCCESS.1, COLOR_SUCCESS.2)
-                            .to_string(),
-                    );
-                    git_seg.push_str(
-                        &format!("-{}", removed.abs())
-                            .truecolor(COLOR_ERROR.0, COLOR_ERROR.1, COLOR_ERROR.2)
-                            .to_string(),
-                    );
-                } else {
-                    git_seg.push_str(&format!("+{}", added).green().to_string());
-                    git_seg.push_str(&format!("-{}", removed.abs()).red().to_string());
-                }
+                git_seg.push_str(&tokens::SUCCESS.paint(&format!("+{}", added), tc));
+                git_seg.push_str(&tokens::ERROR.paint(&format!("-{}", removed.abs()), tc));
             }
         }
         if !git_seg.is_empty() {
@@ -466,30 +303,15 @@ pub fn print_header(
             let work_display = format_bead_display(work, max_len);
 
             // Color based on priority (lower = more urgent)
-            let work_colored = if use_true {
-                if work.priority == 0 {
-                    // P0 critical - red
-                    work_display
-                        .truecolor(COLOR_ERROR.0, COLOR_ERROR.1, COLOR_ERROR.2)
-                        .bold()
-                        .to_string()
-                } else if work.priority == 1 {
-                    // P1 high - warning yellow
-                    work_display
-                        .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                        .to_string()
-                } else {
-                    // P2+ normal - accent blue
-                    work_display
-                        .truecolor(COLOR_ACCENT.0, COLOR_ACCENT.1, COLOR_ACCENT.2)
-                        .to_string()
-                }
-            } else if work.priority == 0 {
-                work_display.red().bold().to_string()
+            let work_colored = if work.priority == 0 {
+                // P0 critical - red
+                tokens::ERROR.bold(&work_display, tc)
             } else if work.priority == 1 {
-                work_display.yellow().to_string()
+                // P1 high - warning yellow
+                tokens::WARNING.paint(&work_display, tc)
             } else {
-                work_display.bright_blue().to_string()
+                // P2+ normal - accent blue
+                tokens::ACCENT.paint(&work_display, tc)
             };
 
             header_parts.push(format!(
@@ -501,17 +323,11 @@ pub fn print_header(
         } else if beads.total_open > 0 {
             // No current work but there are open issues - show count
             let count_text = format!("{} open", beads.total_open);
-            let count_colored = if use_true {
-                count_text
-                    .truecolor(COLOR_MUTED.0, COLOR_MUTED.1, COLOR_MUTED.2)
-                    .to_string()
-            } else {
-                count_text.bright_black().dimmed().to_string()
-            };
+            let count_colored = tokens::MUTED.dim(&count_text, tc);
             header_parts.push(format!(
                 "{}{}{}{}",
                 bracket(true),
-                muted_label("bd:", use_true),
+                muted_label("bd:", tc),
                 count_colored,
                 bracket(false)
             ));
@@ -523,28 +339,13 @@ pub fn print_header(
         // P0 critical issues alert
         if beads.priorities.p0_critical > 0 {
             let p0_text = format!("🔴{}", beads.priorities.p0_critical);
-            let p0_colored = if use_true {
-                p0_text
-                    .truecolor(COLOR_ERROR.0, COLOR_ERROR.1, COLOR_ERROR.2)
-                    .bold()
-                    .to_string()
-            } else {
-                p0_text.red().bold().to_string()
-            };
-            alerts.push(p0_colored);
+            alerts.push(tokens::ERROR.bold(&p0_text, tc));
         }
 
         // Blocked issues alert
         if beads.counts.blocked > 0 {
             let blocked_text = format!("⚠{}", beads.counts.blocked);
-            let blocked_colored = if use_true {
-                blocked_text
-                    .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                    .to_string()
-            } else {
-                blocked_text.yellow().to_string()
-            };
-            alerts.push(blocked_colored);
+            alerts.push(tokens::WARNING.paint(&blocked_text, tc));
         }
 
         if !alerts.is_empty() {
@@ -567,28 +368,18 @@ pub fn print_header(
         };
         let gt_display = format_gastown_display(gt, max_len);
         if !gt_display.is_empty() {
-            // Color based on context - accent for normal, warning for issues
-            let gt_colored = if use_true {
-                if gt.mail.as_ref().is_some_and(|m| m.unread_count > 0) {
-                    // Has unread mail - use warning color
-                    gt_display
-                        .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                        .to_string()
-                } else {
-                    gt_display
-                        .truecolor(COLOR_ACCENT.0, COLOR_ACCENT.1, COLOR_ACCENT.2)
-                        .to_string()
-                }
-            } else if gt.mail.as_ref().is_some_and(|m| m.unread_count > 0) {
-                gt_display.yellow().to_string()
+            // Color based on context - warning for unread mail, accent otherwise
+            let gt_token = if gt.mail.as_ref().is_some_and(|m| m.unread_count > 0) {
+                tokens::WARNING
             } else {
-                gt_display.bright_blue().to_string()
+                tokens::ACCENT
             };
+            let gt_colored = gt_token.paint(&gt_display, tc);
 
             header_parts.push(format!(
                 "{}{}{}{}",
                 bracket(true),
-                muted_label("gt:", use_true),
+                muted_label("gt:", tc),
                 gt_colored,
                 bracket(false)
             ));
@@ -599,18 +390,11 @@ pub fn print_header(
     if let Some(ref output_style) = hook.output_style {
         let name_lower = output_style.name.to_lowercase();
         if name_lower != "default" {
-            let style_colored = if use_true {
-                output_style
-                    .name
-                    .truecolor(COLOR_ACCENT.0, COLOR_ACCENT.1, COLOR_ACCENT.2)
-                    .to_string()
-            } else {
-                output_style.name.bright_blue().to_string()
-            };
+            let style_colored = tokens::ACCENT.paint(&output_style.name, tc);
             header_parts.push(format!(
                 "{}{}{}{}",
                 bracket(true),
-                muted_label("style:", use_true),
+                muted_label("style:", tc),
                 style_colored,
                 bracket(false),
             ));
@@ -626,31 +410,17 @@ pub fn print_header(
                 TerminalWidth::Narrow => "eff:",
                 _ => "effort:",
             };
-            let effort_colored = if use_true {
-                match effort_lower.as_str() {
-                    "low" => effort_lower
-                        .truecolor(COLOR_HAIKU.0, COLOR_HAIKU.1, COLOR_HAIKU.2)
-                        .to_string(),
-                    "medium" => effort_lower.bright_white().to_string(),
-                    "high" => effort_lower
-                        .truecolor(COLOR_SONNET.0, COLOR_SONNET.1, COLOR_SONNET.2)
-                        .to_string(),
-                    "max" => effort_lower.truecolor(255, 120, 200).bold().to_string(),
-                    other => other.bright_white().to_string(),
-                }
-            } else {
-                match effort_lower.as_str() {
-                    "low" => effort_lower.cyan().to_string(),
-                    "medium" => effort_lower.white().to_string(),
-                    "high" => effort_lower.yellow().to_string(),
-                    "max" => effort_lower.magenta().bold().to_string(),
-                    other => other.white().to_string(),
-                }
+            let effort_colored = match effort_lower.as_str() {
+                "low" => tokens::EFFORT_LOW.paint(&effort_lower, tc),
+                "medium" => tokens::EFFORT_MEDIUM.paint(&effort_lower, tc),
+                "high" => tokens::EFFORT_HIGH.paint(&effort_lower, tc),
+                "max" => tokens::EFFORT_MAX.bold(&effort_lower, tc),
+                other => tokens::EFFORT_MEDIUM.paint(other, tc),
             };
             header_parts.push(format!(
                 "{}{}{}{}",
                 bracket(true),
-                muted_label(label, use_true),
+                muted_label(label, tc),
                 effort_colored,
                 bracket(false),
             ));
@@ -661,7 +431,11 @@ pub fn print_header(
     if args.show_provider {
         let mut prov_hint_parts: Vec<String> = Vec::new();
         if let Some(src) = api_key_source {
-            prov_hint_parts.push(format!("{}{}", muted_label("key:", use_true), src.white()));
+            prov_hint_parts.push(format!(
+                "{}{}",
+                muted_label("key:", tc),
+                tokens::PRIMARY_DIM.paint(src, tc)
+            ));
         }
         // Provider hint from env or deduced from model id
         let prov_disp = if let Ok(provider_env) = env::var("CLAUDE_PROVIDER") {
@@ -674,8 +448,8 @@ pub fn print_header(
         };
         prov_hint_parts.push(format!(
             "{}{}",
-            muted_label("prov:", use_true),
-            prov_disp.white()
+            muted_label("prov:", tc),
+            tokens::PRIMARY_DIM.paint(&prov_disp, tc)
         ));
         if !prov_hint_parts.is_empty() {
             header_parts.push(format!(
@@ -688,13 +462,7 @@ pub fn print_header(
     }
 
     // Print header line: cwd then segments
-    let dir_colored = if use_true {
-        dir_fmt
-            .truecolor(COLOR_ACCENT.0, COLOR_ACCENT.1, COLOR_ACCENT.2)
-            .to_string()
-    } else {
-        dir_fmt.bright_blue().to_string()
-    };
+    let dir_colored = tokens::ACCENT.paint(&dir_fmt, tc);
     println!("{} {}", dir_colored, header_parts.join(" "));
 }
 
@@ -735,17 +503,11 @@ pub fn print_text_output(
 ) {
     // Detect terminal width for responsive formatting
     let term_width = get_terminal_width();
-    let use_true = is_truecolor_enabled(args);
+    let tc = is_truecolor_enabled(args);
     let compact = term_width == TerminalWidth::Narrow;
 
     // Prompt symbol
-    let prompt = if use_true {
-        SYM_PROMPT
-            .truecolor(COLOR_ACCENT.0, COLOR_ACCENT.1, COLOR_ACCENT.2)
-            .to_string()
-    } else {
-        SYM_PROMPT.bright_cyan().to_string()
-    };
+    let prompt = tokens::ACCENT.paint(SYM_PROMPT, tc);
     print!("{} ", prompt);
 
     // Labels preference
@@ -764,21 +526,11 @@ pub fn print_text_output(
     let session_cost_str = format_currency(session_cost);
     let session_colored = format!(
         "{}{}",
-        if use_true {
-            SYM_DOLLAR
-                .truecolor(COLOR_MUTED.0, COLOR_MUTED.1, COLOR_MUTED.2)
-                .to_string()
-        } else {
-            SYM_DOLLAR.bright_white().bold().to_string()
-        },
-        session_cost_str.bold().bright_white()
+        tokens::MUTED.paint(SYM_DOLLAR, tc),
+        tokens::PRIMARY.bold(&session_cost_str, tc)
     );
-    print!(
-        "{}{}",
-        muted_label(session_label, use_true),
-        session_colored
-    );
-    print!("{}", separator(use_true, compact));
+    print!("{}{}", muted_label(session_label, tc), session_colored);
+    print!("{}", separator(tc, compact));
 
     // Today cost
     let today_label = match term_width {
@@ -786,27 +538,11 @@ pub fn print_text_output(
         _ => "today:",
     };
     let today_cost_str = format_currency(today_cost);
-    let dollar_muted = if use_true {
-        SYM_DOLLAR
-            .truecolor(COLOR_MUTED.0, COLOR_MUTED.1, COLOR_MUTED.2)
-            .to_string()
-    } else {
-        SYM_DOLLAR.white().to_string()
-    };
-    let today_colored = if use_true {
-        let (r, g, b) = color_scale_rgb(today_cost, 10.0);
-        format!("{}{}", dollar_muted, today_cost_str.truecolor(r, g, b))
-    } else if today_cost >= 100.0 {
-        format!("{}{}", dollar_muted, today_cost_str.bold().red())
-    } else if today_cost >= 50.0 {
-        format!("{}{}", dollar_muted, today_cost_str.bold().yellow())
-    } else if today_cost >= 20.0 {
-        format!("{}{}", dollar_muted, today_cost_str.yellow())
-    } else {
-        format!("{}{}", dollar_muted, today_cost_str.white())
-    };
-    print!("{}{}", muted_label(today_label, use_true), today_colored);
-    print!("{}", separator(use_true, compact));
+    let dollar_muted = tokens::MUTED.paint(SYM_DOLLAR, tc);
+    let cost_token = tokens::gradient(today_cost, 10.0);
+    let today_colored = format!("{}{}", dollar_muted, cost_token.paint(&today_cost_str, tc));
+    print!("{}{}", muted_label(today_label, tc), today_colored);
+    print!("{}", separator(tc, compact));
 
     // Check if we're using direct Claude API (for window/reset display)
     let is_claude = is_direct_claude_api(Some(model_id));
@@ -820,31 +556,11 @@ pub fn print_text_output(
             TerminalWidth::Wide => "win:",
         };
         let window_cost_str = format_currency(total_cost);
-        let dollar_win = if use_true {
-            SYM_DOLLAR
-                .truecolor(COLOR_MUTED.0, COLOR_MUTED.1, COLOR_MUTED.2)
-                .to_string()
-        } else {
-            SYM_DOLLAR.bright_white().to_string()
-        };
-        let window_colored = if use_true {
-            let (r, g, b) = color_scale_rgb(total_cost, 5.0);
-            format!(
-                "{}{}",
-                dollar_win,
-                window_cost_str.truecolor(r, g, b).bold()
-            )
-        } else if total_cost >= 50.0 {
-            format!("{}{}", dollar_win, window_cost_str.bold().red())
-        } else if total_cost >= 20.0 {
-            format!("{}{}", dollar_win, window_cost_str.bold().yellow())
-        } else if total_cost >= 10.0 {
-            format!("{}{}", dollar_win, window_cost_str.yellow())
-        } else {
-            format!("{}{}", dollar_win, window_cost_str.bright_white())
-        };
-        print!("{}{}", muted_label(window_label, use_true), window_colored);
-        print!("{}", separator(use_true, compact));
+        let dollar_win = tokens::MUTED.paint(SYM_DOLLAR, tc);
+        let win_token = tokens::gradient(total_cost, 5.0);
+        let window_colored = format!("{}{}", dollar_win, win_token.bold(&window_cost_str, tc));
+        print!("{}{}", muted_label(window_label, tc), window_colored);
+        print!("{}", separator(tc, compact));
     }
 
     let use_12h = match args.time_fmt {
@@ -864,7 +580,7 @@ pub fn print_text_output(
     };
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // USAGE SECTION: usage% → projected% | 7d | model-specific
+    // USAGE SECTION: usage% -> projected% | 7d | model-specific
     // ═══════════════════════════════════════════════════════════════════════════
 
     // Usage (only if a plan/window max is configured)
@@ -883,22 +599,16 @@ pub fn print_text_output(
             // Usage with optional projection arrow
             if let Some(projected_value) = projected_percent {
                 let proj_colored = colorize_percent(projected_value, args);
-                let arrow = if use_true {
-                    SYM_ARROW_RIGHT
-                        .truecolor(COLOR_MUTED.0, COLOR_MUTED.1, COLOR_MUTED.2)
-                        .to_string()
-                } else {
-                    SYM_ARROW_RIGHT.bright_black().dimmed().to_string()
-                };
+                let arrow = tokens::MUTED.dim(SYM_ARROW_RIGHT, tc);
                 print!(
                     "{}{}{}{}",
-                    muted_label(usage_label, use_true),
+                    muted_label(usage_label, tc),
                     usage_colored,
                     arrow,
                     proj_colored
                 );
             } else {
-                print!("{}{}", muted_label(usage_label, use_true), usage_colored);
+                print!("{}{}", muted_label(usage_label, tc), usage_colored);
             }
 
             // 7-day and model-specific usage limits
@@ -906,11 +616,8 @@ pub fn print_text_output(
                 let mut segments: Vec<String> = Vec::new();
                 if let Some(pct) = summary.seven_day.utilization {
                     let label = if long_labels { "weekly:" } else { "7d:" };
-                    let mut text = format!(
-                        "{}{}",
-                        muted_label(label, use_true),
-                        colorize_percent(pct, args)
-                    );
+                    let mut text =
+                        format!("{}{}", muted_label(label, tc), colorize_percent(pct, args));
                     if let Some(reset) = summary.seven_day.resets_at {
                         let local_reset = reset.with_timezone(&Local);
                         let now = Local::now();
@@ -932,7 +639,7 @@ pub fn print_text_output(
                         };
                         text.push_str(&format!(
                             " {}",
-                            muted_label(&format!("({})", reset_fmt), use_true)
+                            muted_label(&format!("({})", reset_fmt), tc)
                         ));
                     }
                     segments.push(text);
@@ -940,20 +647,20 @@ pub fn print_text_output(
                 if let Some(pct) = summary.seven_day_opus.utilization {
                     segments.push(format!(
                         "{}{}",
-                        muted_label("opus:", use_true),
+                        muted_label("opus:", tc),
                         colorize_percent(pct, args)
                     ));
                 }
                 if let Some(pct) = summary.seven_day_sonnet.utilization {
                     segments.push(format!(
                         "{}{}",
-                        muted_label("sonnet:", use_true),
+                        muted_label("sonnet:", tc),
                         colorize_percent(pct, args)
                     ));
                 }
                 if !segments.is_empty() {
-                    print!("{}", separator(use_true, compact));
-                    print!("{}", segments.join(&separator(use_true, compact)));
+                    print!("{}", separator(tc, compact));
+                    print!("{}", segments.join(&separator(tc, compact)));
                 }
 
                 // Extra usage (overuse credits)
@@ -963,59 +670,34 @@ pub fn print_text_output(
                         let spent = extra.used_credits.unwrap_or(0.0);
                         let limit = extra.monthly_limit.unwrap_or(0.0);
                         let text = if limit > 0.0 {
-                            format!(
-                                "{}${:.0}/${:.0}",
-                                muted_label(label, use_true),
-                                spent,
-                                limit
-                            )
+                            format!("{}${:.0}/${:.0}", muted_label(label, tc), spent, limit)
                         } else {
-                            format!("{}${:.2}", muted_label(label, use_true), spent)
+                            format!("{}${:.2}", muted_label(label, tc), spent)
                         };
-                        print!("{}{}", separator(use_true, compact), text);
+                        print!("{}{}", separator(tc, compact), text);
                     }
                 }
             }
 
-            print!("{}", separator(use_true, compact));
+            print!("{}", separator(tc, compact));
 
             // Approaching limit hints
             if args.hints {
                 let is_opus = model_id.to_lowercase().contains("opus");
                 if usage_value >= 95.0 {
                     let label = if is_opus { "Opus limit" } else { "limit" };
-                    let warn_text = if use_true {
-                        let sym = SYM_WARNING
-                            .truecolor(COLOR_ERROR.0, COLOR_ERROR.1, COLOR_ERROR.2)
-                            .to_string();
-                        format!("{} {} nearly reached", sym, label)
-                            .truecolor(COLOR_ERROR.0, COLOR_ERROR.1, COLOR_ERROR.2)
-                            .bold()
-                            .to_string()
-                    } else {
-                        format!("{} {} nearly reached", SYM_WARNING, label)
-                            .red()
-                            .bold()
-                            .to_string()
-                    };
+                    let sym = tokens::ERROR.paint(SYM_WARNING, tc);
+                    let warn_text =
+                        tokens::ERROR.bold(&format!("{} {} nearly reached", sym, label), tc);
                     print!("{}", warn_text);
-                    print!("{}", separator(use_true, compact));
+                    print!("{}", separator(tc, compact));
                 } else if usage_value >= 80.0 {
                     let label = if is_opus { "Opus limit" } else { "limit" };
-                    let warn_text = if use_true {
-                        let sym = SYM_WARNING
-                            .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                            .to_string();
-                        format!("{} approaching {}", sym, label)
-                            .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                            .to_string()
-                    } else {
-                        format!("{} approaching {}", SYM_WARNING, label)
-                            .yellow()
-                            .to_string()
-                    };
+                    let sym = tokens::WARNING.paint(SYM_WARNING, tc);
+                    let warn_text =
+                        tokens::WARNING.paint(&format!("{} approaching {}", sym, label), tc);
                     print!("{}", warn_text);
-                    print!("{}", separator(use_true, compact));
+                    print!("{}", separator(tc, compact));
                 }
             }
         }
@@ -1035,32 +717,14 @@ pub fn print_text_output(
         };
 
         // Color countdown based on urgency
-        let countdown_colored = if use_true {
-            if remaining_minutes < 30.0 {
-                countdown
-                    .truecolor(COLOR_ERROR.0, COLOR_ERROR.1, COLOR_ERROR.2)
-                    .bold()
-                    .to_string()
-            } else if remaining_minutes < 60.0 {
-                countdown
-                    .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                    .bold()
-                    .to_string()
-            } else if remaining_minutes < 180.0 {
-                countdown
-                    .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                    .to_string()
-            } else {
-                countdown.white().to_string()
-            }
-        } else if remaining_minutes < 30.0 {
-            countdown.red().bold().to_string()
+        let countdown_colored = if remaining_minutes < 30.0 {
+            tokens::ERROR.bold(&countdown, tc)
         } else if remaining_minutes < 60.0 {
-            countdown.yellow().bold().to_string()
+            tokens::WARNING.bold(&countdown, tc)
         } else if remaining_minutes < 180.0 {
-            countdown.yellow().to_string()
+            tokens::WARNING.paint(&countdown, tc)
         } else {
-            countdown.white().to_string()
+            tokens::PRIMARY_DIM.paint(&countdown, tc)
         };
 
         // Reset clock at window end
@@ -1094,11 +758,11 @@ pub fn print_text_output(
 
         print!(
             "{}{} {}",
-            muted_label(reset_label, use_true),
+            muted_label(reset_label, tc),
             countdown_colored,
-            muted_label(&format!("({})", reset_disp), use_true)
+            muted_label(&format!("({})", reset_disp), tc)
         );
-        print!("{}", separator(use_true, compact));
+        print!("{}", separator(tc, compact));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1113,14 +777,14 @@ pub fn print_text_output(
         let ws = web_search_requests;
         print!(
             "{}{} {}{} {}{}",
-            muted_label("tok:", use_true),
-            format!("{}/{}", ti, to).white(),
-            muted_label("cache:", use_true),
-            format!("{}/{}", tcc, tcr).white(),
-            muted_label("ws:", use_true),
-            ws.to_string().white()
+            muted_label("tok:", tc),
+            tokens::PRIMARY_DIM.paint(&format!("{}/{}", ti, to), tc),
+            muted_label("cache:", tc),
+            tokens::PRIMARY_DIM.paint(&format!("{}/{}", tcc, tcr), tc),
+            muted_label("ws:", tc),
+            tokens::PRIMARY_DIM.paint(&ws.to_string(), tc)
         );
-        print!("{}", separator(use_true, compact));
+        print!("{}", separator(tc, compact));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1131,31 +795,16 @@ pub fn print_text_output(
         TerminalWidth::Narrow => "ctx:",
         _ => "context:",
     };
-    print!("{}", muted_label(ctx_label, use_true));
+    print!("{}", muted_label(ctx_label, tc));
 
-    if let Some((tokens, pct)) = context {
+    if let Some((ctx_tokens, pct)) = context {
         // Color percentage based on usage
-        let pct_colored = if use_true {
-            if pct as f64 >= 80.0 {
-                format!("{}%", pct)
-                    .truecolor(COLOR_ERROR.0, COLOR_ERROR.1, COLOR_ERROR.2)
-                    .bold()
-                    .to_string()
-            } else if pct as f64 >= 50.0 {
-                format!("{}%", pct)
-                    .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                    .to_string()
-            } else {
-                format!("{}%", pct)
-                    .truecolor(COLOR_SUCCESS.0, COLOR_SUCCESS.1, COLOR_SUCCESS.2)
-                    .to_string()
-            }
-        } else if pct as f64 >= 80.0 {
-            format!("{}%", pct).red().bold().to_string()
+        let pct_colored = if pct as f64 >= 80.0 {
+            tokens::ERROR.bold(&format!("{}%", pct), tc)
         } else if pct as f64 >= 50.0 {
-            format!("{}%", pct).yellow().to_string()
+            tokens::WARNING.paint(&format!("{}%", pct), tc)
         } else {
-            format!("{}%", pct).green().to_string()
+            tokens::SUCCESS.paint(&format!("{}%", pct), tc)
         };
 
         let ctx_limit_full = context_limit_override
@@ -1164,11 +813,11 @@ pub fn print_text_output(
             ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
         let output_reserve = reserved_output_tokens_for_model(model_id);
         let overhead = system_overhead_tokens();
-        let raw_tokens = tokens.saturating_sub(overhead);
+        let raw_tokens = ctx_tokens.saturating_sub(overhead);
 
         // Check if we're eating into the output reserve
-        let over_usable = if tokens > ctx_limit_usable {
-            let reserve_used = tokens - ctx_limit_usable;
+        let over_usable = if ctx_tokens > ctx_limit_usable {
+            let reserve_used = ctx_tokens - ctx_limit_usable;
             let reserve_remaining = output_reserve.saturating_sub(reserve_used);
             Some((reserve_used, reserve_remaining))
         } else {
@@ -1179,78 +828,54 @@ pub fn print_text_output(
         if overhead > 0 {
             print!(
                 "{} {}{}{}",
-                format_tokens(raw_tokens).white(),
-                muted_label("+", use_true),
-                muted_label(&format!("{} sys = ", format_tokens(overhead)), use_true),
-                format!(
-                    "{}/{} ({})",
-                    format_tokens(tokens),
-                    format_tokens(ctx_limit_full),
-                    pct_colored
+                tokens::PRIMARY_DIM.paint(&format_tokens(raw_tokens), tc),
+                muted_label("+", tc),
+                muted_label(&format!("{} sys = ", format_tokens(overhead)), tc),
+                tokens::PRIMARY_DIM.paint(
+                    &format!(
+                        "{}/{} ({})",
+                        format_tokens(ctx_tokens),
+                        format_tokens(ctx_limit_full),
+                        pct_colored
+                    ),
+                    tc,
                 )
-                .white()
             );
         } else {
             print!(
                 "{}/{} {}",
-                format_tokens(tokens).white(),
-                muted_label(&format_tokens(ctx_limit_full), use_true),
+                tokens::PRIMARY_DIM.paint(&format_tokens(ctx_tokens), tc),
+                muted_label(&format_tokens(ctx_limit_full), tc),
                 pct_colored
             );
         }
 
         // Warnings about output reserve
         if let Some((used, remaining)) = over_usable {
-            let warn = if use_true {
-                let sym = SYM_WARNING
-                    .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                    .to_string();
-                format!(
+            let sym = tokens::WARNING.paint(SYM_WARNING, tc);
+            let warn = tokens::WARNING.bold(
+                &format!(
                     " {} using {} of {} reserve ({} left)",
                     sym,
                     format_tokens(used),
                     format_tokens(output_reserve),
                     format_tokens(remaining)
-                )
-                .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                .bold()
-                .to_string()
-            } else {
-                format!(
-                    " {} using {} of {} reserve ({} left)",
-                    SYM_WARNING,
-                    format_tokens(used),
-                    format_tokens(output_reserve),
-                    format_tokens(remaining)
-                )
-                .yellow()
-                .bold()
-                .to_string()
-            };
+                ),
+                tc,
+            );
             print!("{}", warn);
         } else if args.hints {
-            let headroom_to_usable = ctx_limit_usable.saturating_sub(tokens);
+            let headroom_to_usable = ctx_limit_usable.saturating_sub(ctx_tokens);
             if headroom_to_usable > 0 && headroom_to_usable <= 10_000 {
-                let warn = if use_true {
-                    let sym = SYM_WARNING
-                        .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                        .to_string();
-                    format!(
+                let sym = tokens::WARNING.paint(SYM_WARNING, tc);
+                let warn = tokens::WARNING.paint(
+                    &format!(
                         " {} {} until reserve",
                         sym,
                         format_tokens(headroom_to_usable)
-                    )
-                    .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                    .to_string()
-                } else {
-                    format!(
-                        " {} {} until reserve",
-                        SYM_WARNING,
-                        format_tokens(headroom_to_usable)
-                    )
-                    .yellow()
-                    .to_string()
-                };
+                    ),
+                    tc,
+                );
                 print!("{}", warn);
             }
         }
@@ -1260,7 +885,7 @@ pub fn print_text_output(
             let usable = ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
             let cushion = crate::utils::auto_compact_headroom_tokens();
             let compact_trigger = usable.saturating_sub(cushion) as f64;
-            let headroom_to_compact = (compact_trigger - tokens as f64).max(0.0);
+            let headroom_to_compact = (compact_trigger - ctx_tokens as f64).max(0.0);
 
             if tpm_indicator > 0.0 && headroom_to_compact > 0.0 {
                 let eta_min = headroom_to_compact / tpm_indicator;
@@ -1272,45 +897,30 @@ pub fn print_text_output(
                 } else {
                     format!("~{}m", eta_min_i)
                 };
-                let compact_text = if use_true {
-                    format!(
+                let compact_text = tokens::WARNING.paint(
+                    &format!(
                         "{}@{}K {}",
-                        muted_label("compact:", use_true),
+                        muted_label("compact:", tc),
                         compact_trigger as u64 / 1000,
                         eta_disp
-                    )
-                    .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                    .to_string()
-                } else {
-                    format!(
-                        "{}@{}K {}",
-                        "compact:".bright_black().dimmed(),
-                        compact_trigger as u64 / 1000,
-                        eta_disp
-                    )
-                    .yellow()
-                    .to_string()
-                };
-                print!("{}{}", separator(use_true, compact), compact_text);
+                    ),
+                    tc,
+                );
+                print!("{}{}", separator(tc, compact), compact_text);
             } else {
-                let compact_text = if use_true {
-                    format!(
+                let compact_text = tokens::WARNING.paint(
+                    &format!(
                         "{}@{}K",
-                        muted_label("compact:", use_true),
+                        muted_label("compact:", tc),
                         compact_trigger as u64 / 1000
-                    )
-                    .truecolor(COLOR_WARNING.0, COLOR_WARNING.1, COLOR_WARNING.2)
-                    .to_string()
-                } else {
-                    format!("compact:@{}K", compact_trigger as u64 / 1000)
-                        .yellow()
-                        .to_string()
-                };
-                print!("{}{}", separator(use_true, compact), compact_text);
+                    ),
+                    tc,
+                );
+                print!("{}{}", separator(tc, compact), compact_text);
             }
         }
     } else {
-        print!("{}", muted_label("N/A", use_true));
+        print!("{}", muted_label("N/A", tc));
     }
 
     println!();
