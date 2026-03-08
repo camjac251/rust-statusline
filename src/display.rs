@@ -595,23 +595,66 @@ pub fn print_header(
         }
     }
 
-    // Output style segment (if present)
+    // Output style segment (if present, skip "default")
     if let Some(ref output_style) = hook.output_style {
-        let style_colored = if use_true {
-            output_style
-                .name
-                .truecolor(COLOR_ACCENT.0, COLOR_ACCENT.1, COLOR_ACCENT.2)
-                .to_string()
-        } else {
-            output_style.name.bright_blue().to_string()
-        };
-        header_parts.push(format!(
-            "{}{}{}{}",
-            bracket(true),
-            muted_label("style:", use_true),
-            style_colored,
-            bracket(false),
-        ));
+        let name_lower = output_style.name.to_lowercase();
+        if name_lower != "default" {
+            let style_colored = if use_true {
+                output_style
+                    .name
+                    .truecolor(COLOR_ACCENT.0, COLOR_ACCENT.1, COLOR_ACCENT.2)
+                    .to_string()
+            } else {
+                output_style.name.bright_blue().to_string()
+            };
+            header_parts.push(format!(
+                "{}{}{}{}",
+                bracket(true),
+                muted_label("style:", use_true),
+                style_colored,
+                bracket(false),
+            ));
+        }
+    }
+
+    // Effort level segment (from env var, skip default "medium")
+    if let Ok(effort) = env::var("CLAUDE_CODE_EFFORT_LEVEL") {
+        let effort_lower = effort.to_lowercase();
+        if effort_lower != "unset" && !effort_lower.is_empty() {
+            let term_width = get_terminal_width();
+            let label = match term_width {
+                TerminalWidth::Narrow => "eff:",
+                _ => "effort:",
+            };
+            let effort_colored = if use_true {
+                match effort_lower.as_str() {
+                    "low" => effort_lower
+                        .truecolor(COLOR_HAIKU.0, COLOR_HAIKU.1, COLOR_HAIKU.2)
+                        .to_string(),
+                    "medium" => effort_lower.bright_white().to_string(),
+                    "high" => effort_lower
+                        .truecolor(COLOR_SONNET.0, COLOR_SONNET.1, COLOR_SONNET.2)
+                        .to_string(),
+                    "max" => effort_lower.truecolor(255, 120, 200).bold().to_string(),
+                    other => other.bright_white().to_string(),
+                }
+            } else {
+                match effort_lower.as_str() {
+                    "low" => effort_lower.cyan().to_string(),
+                    "medium" => effort_lower.white().to_string(),
+                    "high" => effort_lower.yellow().to_string(),
+                    "max" => effort_lower.magenta().bold().to_string(),
+                    other => other.white().to_string(),
+                }
+            };
+            header_parts.push(format!(
+                "{}{}{}{}",
+                bracket(true),
+                muted_label(label, use_true),
+                effort_colored,
+                bracket(false),
+            ));
+        }
     }
 
     // Optional provider hints grouped (only when --show-provider is set)
@@ -1457,6 +1500,10 @@ pub fn build_json_output(
         "project_dir": hook.workspace.project_dir.clone(),
         "version": hook.version.clone(),
         "output_style": hook.output_style.as_ref().map(|s| serde_json::json!({"name": s.name.clone()})),
+        "effort": env::var("CLAUDE_CODE_EFFORT_LEVEL").ok().and_then(|e| {
+            let lower = e.to_lowercase();
+            if lower == "unset" { None } else { Some(lower) }
+        }),
         "provider": {"apiKeySource": api_key_source, "env": provider_final},
         "oauth_profile": {
             "organization_type": oauth_org_type,
