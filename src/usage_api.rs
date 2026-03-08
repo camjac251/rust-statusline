@@ -74,6 +74,7 @@ pub struct ExtraUsage {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UsageSummary {
     pub window: UsageLimit,
     pub seven_day: UsageLimit,
@@ -83,7 +84,6 @@ pub struct UsageSummary {
     pub seven_day_cowork: UsageLimit,
     pub extra_usage: Option<ExtraUsage>,
     /// True when serving expired cached data after an API failure
-    #[serde(default)]
     pub stale: bool,
 }
 
