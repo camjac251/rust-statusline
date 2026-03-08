@@ -500,6 +500,33 @@ pub fn get_stale_api_cache(cache_key: &str) -> Result<Option<String>> {
     Ok(result)
 }
 
+/// Try to set a cache entry only if it doesn't already exist (non-expired).
+///
+/// Returns `true` if the entry was inserted (caller "won" the race),
+/// `false` if a valid entry already existed. Used as a distributed fetch lock
+/// to prevent multiple concurrent processes from calling the API simultaneously.
+pub fn try_set_api_cache(cache_key: &str, data: &str, ttl_seconds: i64) -> Result<bool> {
+    let conn = open_db()?;
+    let now = Utc::now().timestamp();
+    let expires_at = now + ttl_seconds;
+
+    // Delete expired entry for this key first so INSERT can succeed
+    conn.execute(
+        "DELETE FROM api_cache WHERE cache_key = ? AND expires_at <= ?",
+        params![cache_key, now],
+    )?;
+
+    // INSERT ... ON CONFLICT DO NOTHING -- only the first writer wins
+    let rows = conn.execute(
+        "INSERT INTO api_cache (cache_key, data, fetched_at, expires_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(cache_key) DO NOTHING",
+        params![cache_key, data, now, expires_at],
+    )?;
+
+    Ok(rows > 0)
+}
+
 /// Store API response in cache with expiration
 ///
 /// Stores the data and automatically cleans up expired entries.

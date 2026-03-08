@@ -10,6 +10,7 @@ const USAGE_ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 const ANTHROPIC_API_HOST: &str = "api.anthropic.com";
 const CACHE_TTL_SECONDS: i64 = 60;
 const NEGATIVE_CACHE_TTL_SECONDS: i64 = 60;
+const FETCH_LOCK_TTL_SECONDS: i64 = 10;
 const ANTHROPIC_BETA: &str = "oauth-2025-04-20";
 const API_CACHE_KEY: &str = "oauth_usage_summary";
 const NEGATIVE_CACHE_KEY: &str = "oauth_usage_negative";
@@ -141,19 +142,28 @@ pub fn get_usage_summary(claude_paths: &[PathBuf], model_id: Option<&str>) -> Op
         return stale_fallback();
     }
 
+    // Acquire fetch lock to prevent concurrent API calls across sessions.
+    // Only the first process wins; others get stale data instead of racing.
+    let got_lock = crate::db::try_set_api_cache(NEGATIVE_CACHE_KEY, "f", FETCH_LOCK_TTL_SECONDS)
+        .unwrap_or(false);
+    if !got_lock {
+        return stale_fallback();
+    }
+
     // Cache miss or invalid - fetch from API
     let summary = fetch_usage_summary(claude_paths);
 
     match summary {
         Some(s) => {
-            // Store in persistent cache
+            // Store in persistent cache; clear the fetch lock
             if let Ok(json) = serde_json::to_string(&s) {
                 let _ = crate::db::set_api_cache(API_CACHE_KEY, &json, CACHE_TTL_SECONDS);
             }
+            let _ = crate::db::set_api_cache(NEGATIVE_CACHE_KEY, "", 0);
             Some(s)
         }
         None => {
-            // Cache the failure to prevent retry storm on rate limits
+            // Upgrade fetch lock to full negative cache to prevent retry storm
             let _ = crate::db::set_api_cache(NEGATIVE_CACHE_KEY, "1", NEGATIVE_CACHE_TTL_SECONDS);
             stale_fallback()
         }
