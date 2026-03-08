@@ -8,8 +8,8 @@ use std::time::Duration;
 
 const USAGE_ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 const ANTHROPIC_API_HOST: &str = "api.anthropic.com";
-const CACHE_TTL_SECONDS: i64 = 60;
-const NEGATIVE_CACHE_TTL_SECONDS: i64 = 60;
+const CACHE_TTL_SECONDS: i64 = 300;
+const NEGATIVE_CACHE_TTL_SECONDS: i64 = 120;
 const FETCH_LOCK_TTL_SECONDS: i64 = 10;
 const ANTHROPIC_BETA: &str = "oauth-2025-04-20";
 const API_CACHE_KEY: &str = "oauth_usage_summary";
