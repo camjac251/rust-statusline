@@ -80,6 +80,7 @@ pub struct UsageSummary {
     pub seven_day_opus: UsageLimit,
     pub seven_day_sonnet: UsageLimit,
     pub seven_day_oauth_apps: UsageLimit,
+    pub seven_day_cowork: UsageLimit,
     pub extra_usage: Option<ExtraUsage>,
     /// True when serving expired cached data after an API failure
     #[serde(default)]
@@ -116,6 +117,8 @@ struct UsageResponseDto {
     seven_day_sonnet: Option<UsageLimitDto>,
     #[serde(default)]
     seven_day_oauth_apps: Option<UsageLimitDto>,
+    #[serde(default)]
+    seven_day_cowork: Option<UsageLimitDto>,
     #[serde(default)]
     extra_usage: Option<ExtraUsageDto>,
 }
@@ -221,10 +224,15 @@ fn fetch_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
             .seven_day_oauth_apps
             .map(UsageLimit::from)
             .unwrap_or_default(),
+        seven_day_cowork: dto
+            .seven_day_cowork
+            .map(UsageLimit::from)
+            .unwrap_or_default(),
         extra_usage: dto.extra_usage.map(|e| ExtraUsage {
             is_enabled: e.is_enabled,
-            monthly_limit: e.monthly_limit,
-            used_credits: e.used_credits,
+            // API returns cents, convert to dollars
+            monthly_limit: e.monthly_limit.map(|v| v / 100.0),
+            used_credits: e.used_credits.map(|v| v / 100.0),
             utilization: e.utilization,
         }),
         stale: false,

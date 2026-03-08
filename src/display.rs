@@ -1441,6 +1441,7 @@ pub fn build_json_output(
             "seven_day_opus": usage_limit_json(&summary.seven_day_opus),
             "seven_day_sonnet": usage_limit_json(&summary.seven_day_sonnet),
             "seven_day_oauth_apps": usage_limit_json(&summary.seven_day_oauth_apps),
+            "seven_day_cowork": usage_limit_json(&summary.seven_day_cowork),
             "extra_usage": summary.extra_usage.as_ref().map(|e| serde_json::json!({
                 "is_enabled": e.is_enabled,
                 "monthly_limit": e.monthly_limit,
