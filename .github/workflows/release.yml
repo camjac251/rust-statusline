@@ -1,22 +1,76 @@
 name: Release
 
 on:
-  workflow_dispatch:
   push:
-    tags:
-      - "v*"
-
-concurrency:
-  group: release
-  cancel-in-progress: false
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: claude_statusline
 
 jobs:
+  release-plz-pr:
+    name: Release PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: release-plz-pr
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      releases_created: ${{ steps.release-plz.outputs.releases_created }}
+      tag: ${{ steps.extract.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: release-plz/action@v0.5
+        id: release-plz
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract tag
+        id: extract
+        if: steps.release-plz.outputs.releases_created == 'true'
+        env:
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          TAG=$(echo "$RELEASES" | jq -r '.[0].tag')
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build - ${{ matrix.arch }}
+    needs: release
+    if: needs.release.outputs.releases_created == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -41,6 +95,8 @@ jobs:
             ext: .exe
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release.outputs.tag }}
 
       - name: Build with cross
         if: contains(matrix.target, 'linux')
@@ -72,84 +128,25 @@ jobs:
             ${{ env.BINARY_NAME }}-${{ matrix.arch }}${{ matrix.ext }}
             ${{ env.BINARY_NAME }}-${{ matrix.arch }}${{ matrix.ext }}.sha256
 
-  release:
-    name: Create Release
-    needs: build
+  upload:
+    name: Upload Binaries
+    needs: [release, build]
+    if: needs.release.outputs.releases_created == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Generate changelog
-        id: changelog
-        run: |
-          LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          if [ -z "$LAST_TAG" ]; then
-            CHANGES="Initial release"
-          else
-            CHANGES=$(git log "$LAST_TAG"..HEAD --pretty=format:"- %s" --no-merges | head -20)
-            [ -z "$CHANGES" ] && CHANGES="- Maintenance release"
-          fi
-          {
-            echo "CHANGES<<EOF"
-            echo "$CHANGES"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Combine checksums
         run: cat artifacts/*.sha256 > artifacts/checksums.txt
 
-      - name: Determine tag
-        id: tag
-        run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "TAG=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "TAG=v$(date +'%Y.%m.%d').${{ github.run_number }}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.TAG }}
-          name: ${{ steps.tag.outputs.TAG }}
-          body: |
-            Live cost, usage, burn rate, context, and Git status for Claude Code.
-
-            ## What's Changed
-            ${{ steps.changelog.outputs.CHANGES }}
-
-            ## Install
-
-            ```bash
-            # mise (recommended)
-            mise use -g "github:camjac251/rust-statusline@latest"
-
-            # or download directly
-            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.TAG }}/claude_statusline-linux-x86_64 \
-              -o ~/.claude/claude_statusline && chmod +x ~/.claude/claude_statusline
-            ```
-
-            ## Downloads
-
-            | Platform | Binary | Checksum |
-            |----------|--------|----------|
-            | Linux x64 | [claude_statusline-linux-x86_64](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.TAG }}/claude_statusline-linux-x86_64) | [sha256](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.TAG }}/claude_statusline-linux-x86_64.sha256) |
-            | Linux ARM64 | [claude_statusline-linux-arm64](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.TAG }}/claude_statusline-linux-arm64) | [sha256](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.TAG }}/claude_statusline-linux-arm64.sha256) |
-            | macOS ARM64 | [claude_statusline-macos-arm64](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.TAG }}/claude_statusline-macos-arm64) | [sha256](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.TAG }}/claude_statusline-macos-arm64.sha256) |
-            | macOS x64 | [claude_statusline-macos-x86_64](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.TAG }}/claude_statusline-macos-x86_64) | [sha256](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.TAG }}/claude_statusline-macos-x86_64.sha256) |
-            | Windows x64 | [claude_statusline-windows-x86_64.exe](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.TAG }}/claude_statusline-windows-x86_64.exe) | [sha256](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.TAG }}/claude_statusline-windows-x86_64.exe.sha256) |
-
-            **[Documentation](https://github.com/${{ github.repository }}#readme)**
-          files: artifacts/*
-          draft: false
-          prerelease: false
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: gh release upload "$TAG" artifacts/* --repo "$GITHUB_REPOSITORY" --clobber

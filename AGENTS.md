@@ -78,6 +78,18 @@ Pipeline: stdin JSON hook -> transcript parsing -> pricing -> display (text or J
 3. `cargo test --all-features`
 4. Conventional commits: `type(scope): description`
    - Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`
+   - Important: `feat:` and `fix:` commits trigger release PRs via release-plz
+
+## Releasing
+
+Automated via [release-plz](https://release-plz.dev/). **Do not manually bump versions or create tags.**
+
+1. Push to `main` with conventional commits
+2. release-plz creates/updates a Release PR (version bump + changelog)
+3. Merge the Release PR when ready to ship
+4. release-plz creates the git tag + GitHub release; CI builds and uploads binaries
+
+Config: `release-plz.toml` (git-only, no crates.io publish, no CHANGELOG.md)
 
 ## CI requirements
 
