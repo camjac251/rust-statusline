@@ -3,6 +3,11 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and upload binaries for (e.g. v1.0.10)"
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -70,7 +75,10 @@ jobs:
   build:
     name: Build - ${{ matrix.arch }}
     needs: release
-    if: needs.release.outputs.releases_created == 'true'
+    if: >-
+      always() &&
+      ((github.event_name == 'push' && needs.release.outputs.releases_created == 'true') ||
+      github.event_name == 'workflow_dispatch')
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -96,7 +104,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ needs.release.outputs.tag }}
+          ref: ${{ needs.release.outputs.tag || inputs.tag }}
 
       - name: Build with cross
         if: contains(matrix.target, 'linux')
@@ -131,7 +139,11 @@ jobs:
   upload:
     name: Upload Binaries
     needs: [release, build]
-    if: needs.release.outputs.releases_created == 'true'
+    if: >-
+      always() &&
+      needs.build.result == 'success' &&
+      ((github.event_name == 'push' && needs.release.outputs.releases_created == 'true') ||
+      github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -148,5 +160,5 @@ jobs:
       - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.release.outputs.tag }}
+          TAG: ${{ needs.release.outputs.tag || inputs.tag }}
         run: gh release upload "$TAG" artifacts/* --repo "$GITHUB_REPOSITORY" --clobber
