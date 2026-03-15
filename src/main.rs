@@ -115,25 +115,30 @@ fn main() -> Result<()> {
     // Priority 1: Use context_window from hook if available (most accurate)
     if let Some(ref ctx_win) = hook.context_window {
         if let Some(ref usage) = ctx_win.current_usage {
-            // Calculate context from current_usage (matches official docs calculation)
+            // Context tokens: input-side only (matches CLI calculation)
+            // Output tokens don't count against the input context window
             let input = usage.input_tokens.unwrap_or(0);
             let cache_create = usage.cache_creation_input_tokens.unwrap_or(0);
             let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
-            let output = usage.output_tokens.unwrap_or(0);
-            let total_tokens = input + cache_create + cache_read + output;
+            let total_tokens = input + cache_create + cache_read;
 
             if total_tokens > 0 {
-                // Use hook's context_window_size if provided, else fall back to model detection
-                let limit = ctx_win.context_window_size.unwrap_or_else(|| {
-                    claude_statusline::utils::context_limit_for_model_display(
-                        &hook.model.id,
-                        &hook.model.display_name,
-                    )
-                });
-                let pct = if limit > 0 {
-                    ((total_tokens as f64 / limit as f64) * 100.0).round() as u32
+                // Prefer CLI's pre-calculated percentage (authoritative),
+                // fall back to our own calculation
+                let pct = if let Some(cli_pct) = ctx_win.used_percentage {
+                    cli_pct
                 } else {
-                    0
+                    let limit = ctx_win.context_window_size.unwrap_or_else(|| {
+                        claude_statusline::utils::context_limit_for_model_display(
+                            &hook.model.id,
+                            &hook.model.display_name,
+                        )
+                    });
+                    if limit > 0 {
+                        ((total_tokens as f64 / limit as f64) * 100.0).round() as u32
+                    } else {
+                        0
+                    }
                 };
                 context = Some((total_tokens, pct.min(100)));
                 context_source = Some("hook");
@@ -194,6 +199,13 @@ fn main() -> Result<()> {
         get_gastown_info(Path::new(gt_dir))
     };
 
+    // Extract context_window_size from hook if available (for custom proxy models)
+    // This is used in header, JSON, and text output paths
+    let context_limit_override = hook
+        .context_window
+        .as_ref()
+        .and_then(|cw| cw.context_window_size);
+
     // Extract lines delta from hook.cost for header display
     let lines_delta = hook.cost.as_ref().and_then(|c| {
         let la = c.total_lines_added.unwrap_or(0);
@@ -214,6 +226,7 @@ fn main() -> Result<()> {
             lines_delta,
             beads_info.as_ref(),
             gastown_info.as_ref(),
+            context_limit_override,
         );
     }
 
@@ -292,13 +305,6 @@ fn main() -> Result<()> {
     // Note: Removed calc_context_from_any fallback - it returned stale data from
     // previous sessions when starting a new session. Better to show no context
     // than misleading data from a different session.
-
-    // Extract context_window_size from hook if available (for custom proxy models)
-    // This is used in both JSON and text output paths
-    let context_limit_override = hook
-        .context_window
-        .as_ref()
-        .and_then(|cw| cw.context_window_size);
 
     if args.json {
         // Machine-readable output for statusline consumption

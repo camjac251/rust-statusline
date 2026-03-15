@@ -47,6 +47,10 @@ pub struct HookContextWindow {
     pub context_window_size: Option<u64>,
     /// Current context window usage from the last API call
     pub current_usage: Option<HookCurrentUsage>,
+    /// Pre-calculated used percentage (input-only, from CLI)
+    pub used_percentage: Option<u32>,
+    /// Pre-calculated remaining percentage (from CLI)
+    pub remaining_percentage: Option<u32>,
 }
 
 #[derive(Deserialize, Debug)]

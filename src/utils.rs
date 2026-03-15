@@ -148,12 +148,14 @@ pub fn context_limit_for_model_display(model_id: &str, display_name: &str) -> u6
         return override_limit;
     }
     // Robust 1M detection:
+    // - model id containing "[1m]" (e.g., "claude-opus-4-6[1m]")
     // - explicit display tag "[1m]"
     // - any mention of "1m" + "context" (e.g., "with 1M context")
-    // - model id containing "1m" (e.g., "sonnet-1m")
+    // - model id containing "-1m" (e.g., "sonnet-1m")
     let dn_l = display_name.to_lowercase();
     let mid_l = model_id.to_lowercase();
-    if dn_l.contains("[1m]")
+    if mid_l.contains("[1m]")
+        || dn_l.contains("[1m]")
         || (dn_l.contains("1m") && dn_l.contains("context"))
         || mid_l.contains("-1m")
         || mid_l.ends_with("1m")

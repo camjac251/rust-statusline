@@ -217,6 +217,7 @@ pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String 
     token.paint(display, tc)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn print_header(
     hook: &HookJson,
     git_info: Option<&GitInfo>,
@@ -225,10 +226,34 @@ pub fn print_header(
     lines_delta: Option<(i64, i64)>,
     beads_info: Option<&BeadsInfo>,
     gastown_info: Option<&GasTownInfo>,
+    context_limit_override: Option<u64>,
 ) {
     let dir_fmt = format_path(&hook.workspace.current_dir);
-    let mdisp = model_colored_name(&hook.model.id, &hook.model.display_name, args);
     let tc = is_truecolor_enabled(args);
+
+    // Determine effective context limit and build model display
+    let effective_limit = context_limit_override.unwrap_or_else(|| {
+        context_limit_for_model_display(&hook.model.id, &hook.model.display_name)
+    });
+    let display_lower = hook.model.display_name.to_lowercase();
+    let already_shows_context = display_lower.contains("1m") || display_lower.contains("200k");
+
+    let mdisp = if effective_limit >= 1_000_000 && !already_shows_context {
+        // 1M context active but display name doesn't mention it -- append indicator
+        let base = model_colored_name(&hook.model.id, &hook.model.display_name, args);
+        format!("{} {}", base, tokens::MUTED.dim("1M", tc))
+    } else if effective_limit < 1_000_000 && display_lower.contains("1m") {
+        // Display name says 1M but effective limit is lower -- strip the misleading text
+        let cleaned = hook
+            .model
+            .display_name
+            .replace(" (with 1M context)", "")
+            .replace(" [1m]", "")
+            .replace("[1m]", "");
+        model_colored_name(&hook.model.id, cleaned.trim(), args)
+    } else {
+        model_colored_name(&hook.model.id, &hook.model.display_name, args)
+    };
 
     // Build header segments: git (minimal) + model + beads + output_style + optional provider hints
     let mut header_parts: Vec<String> = Vec::new();
