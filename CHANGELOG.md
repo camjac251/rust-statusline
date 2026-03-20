@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## [1.0.11](https://github.com/camjac251/rust-statusline/compare/v1.0.10...v1.0.11) - 2026-03-20
+
+### Fixed
+
+- *(release)* add explicit publish=false to release-plz config
+- *(release)* use publish_no_verify instead of invalid cargo_package field
+- *(release)* disable cargo package verify in release-plz
+- *(ci)* add publish = false to prevent crates.io publish attempts
+
+### Other
+
+- *(release)* add changelog, attestation, and homebrew tap automation
+- add workflow_dispatch trigger for manual binary builds
+
 ### Bug Fixes
 
 - Add publish = false to prevent crates.io publish attempts
