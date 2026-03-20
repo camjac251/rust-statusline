@@ -1,0 +1,119 @@
+# Changelog
+
+## Unreleased
+
+### Bug Fixes
+
+- Add publish = false to prevent crates.io publish attempts
+## [1.0.10] - 2026-03-15
+
+### Bug Fixes
+
+- Update rust crate gix to 0.80
+- Update rust crate rusqlite to 0.39
+- Correct context window detection for [1m] models and align percentage with CLI
+- Disable semver checks for binary-only crate
+## [1.0.9] - 2026-03-09
+
+### Bug Fixes
+
+- Prefer transcript model over hook model to prevent cross-session bleed
+## [1.0.8] - 2026-03-08
+
+### Bug Fixes
+
+- Increase usage API cache TTL to reduce 429 rate limits
+## [1.0.7] - 2026-03-08
+
+### Bug Fixes
+
+- Add serde(default) to UsageSummary for cache compatibility
+## [1.0.6] - 2026-03-08
+
+### Features
+
+- Add effort level display and hide default output style
+
+### Refactoring
+
+- Centralize colors into token system
+## [1.0.4] - 2026-03-08
+
+### Bug Fixes
+
+- Convert extra_usage cents to dollars, add seven_day_cowork field
+## [1.0.3] - 2026-03-08
+
+### Bug Fixes
+
+- Add fetch lock to prevent concurrent API calls at cache boundary
+## [1.0.2] - 2026-03-07
+
+### Bug Fixes
+
+- Prevent OAuth usage API rate-limit death spiral
+## [1.0.0] - 2026-02-28
+
+### Bug Fixes
+
+- Correct Haiku 3.5 rates, prefer SDK session cost, simplify tiered pricing
+- Smooth usage projections
+- Remove hardcoded path and embed pricing.json for cross-platform support
+- Normalize all reset times to nearest hour
+- Prevent stale usage after midnight rollover
+- Prevent stale session data on new session start
+- Add Opus 4.5 with correct $5/$25 pricing
+- Show time for 7d reset when under 24 hours
+- Use hook context_window_size in text output for proxy models
+- Correct mail query and add --no-gastown flag
+- Add missing Command import for macOS keychain
+
+### Features
+
+- Add --hints flag, --plan-profile, and settings.json overrides
+- Add session cost-per-hour, lines delta, and remaining usage percent
+- Add pricing.json config, in-memory usage cache, and file mtime optimization
+- Auto-detect plan tier from usage and improve block boundary detection
+- Add session-scoped token breakdown and active block to JSON output
+- Add window anchor mode, rate limit display, and offline-only operation
+- Parse context warnings, add complexity weights, and use fixed reset hours
+- Add system overhead tracking and usable context limit calculation
+- Surface oauth usage limits
+- Integrate cc-sessions detection and display
+- Account for output token reserves in context limits
+- Show context limit in usage display
+- Show output reserve usage when over usable limit
+- Move lines delta to git header, fix hints logic
+- Show compact trigger ETA and brighten model colors
+- Warn when approaching output token reserve
+- Add CLAUDE_AUTOCOMPACT_PCT_OVERRIDE and MAX_OUTPUT_CAPABILITY support
+- Add tiered pricing system and normalize reset times
+- Implement SQLite-based global usage and API caching
+- Cache claude user agent and use sqlite metadata
+- Add macOS Keychain support for OAuth credentials
+- Add responsive terminal width detection
+- Overhaul color scheme, simplify layout, add truecolor detection
+- Show reset day-of-week and omit :00 from round hours
+- Skip OAuth API call for proxies and non-Claude models
+- Add hook-based context_window support for proxy models
+- Hide window/reset for non-Claude proxy models
+- Add beads issue tracker integration
+- Add Gas Town multi-agent orchestration support
+- Normalize raw model IDs into friendly display names
+
+### Performance
+
+- Replace globwalk with walkdir for 17x speedup
+
+### Refactoring
+
+- Reorganize monolithic main.rs into module structure
+- Remove trailing .0 from whole number token formats
+- Remove legacy plan tier system, use OAuth usage data
+- Calculate percentage against full context limit
+- Clean up symbols and separators
+- Remove explanatory comments
+- Remove all implementation reference comments
+- Remove trailing decimals when zero for percentages
+- Remove cc-sessions integration
+- Remove user-agent impersonation and version detection

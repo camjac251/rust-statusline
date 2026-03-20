@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build and upload binaries for (e.g. v1.0.10)"
+        description: "Tag to build and upload binaries for (e.g. v1.0.11)"
         required: true
 
 env:
@@ -16,6 +16,7 @@ env:
 jobs:
   release-plz-pr:
     name: Release PR
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
@@ -40,6 +41,7 @@ jobs:
 
   release:
     name: Release
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -119,7 +121,7 @@ jobs:
         if: "!contains(matrix.target, 'linux')"
         run: |
           rustup target add ${{ matrix.target }}
-          cargo build --release --target ${{ matrix.target }}
+          cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Package binary
         shell: bash
@@ -127,14 +129,11 @@ jobs:
           SRC="target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ matrix.ext }}"
           DST="${{ env.BINARY_NAME }}-${{ matrix.arch }}${{ matrix.ext }}"
           cp "$SRC" "$DST"
-          sha256sum "$DST" > "$DST.sha256" || shasum -a 256 "$DST" > "$DST.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.arch }}
-          path: |
-            ${{ env.BINARY_NAME }}-${{ matrix.arch }}${{ matrix.ext }}
-            ${{ env.BINARY_NAME }}-${{ matrix.arch }}${{ matrix.ext }}.sha256
+          path: ${{ env.BINARY_NAME }}-${{ matrix.arch }}${{ matrix.ext }}
 
   upload:
     name: Upload Binaries
@@ -148,17 +147,64 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Combine checksums
-        run: cat artifacts/*.sha256 > artifacts/checksums.txt
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'artifacts/*'
 
       - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.release.outputs.tag || inputs.tag }}
         run: gh release upload "$TAG" artifacts/* --repo "$GITHUB_REPOSITORY" --clobber
+
+  update-homebrew:
+    name: Update Homebrew Tap
+    needs: [release, build, upload]
+    if: needs.upload.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate token for homebrew-tap
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: camjac251
+          repositories: homebrew-tap
+
+      - name: Update formula
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ needs.release.outputs.tag || inputs.tag }}
+        run: |
+          VERSION="${TAG#v}"
+          SHA1=$(sha256sum artifacts/claude_statusline-macos-arm64 | cut -d' ' -f1)
+          SHA2=$(sha256sum artifacts/claude_statusline-macos-x86_64 | cut -d' ' -f1)
+          SHA3=$(sha256sum artifacts/claude_statusline-linux-arm64 | cut -d' ' -f1)
+          SHA4=$(sha256sum artifacts/claude_statusline-linux-x86_64 | cut -d' ' -f1)
+
+          gh repo clone camjac251/homebrew-tap /tmp/homebrew-tap
+          /tmp/homebrew-tap/scripts/update-formula.sh \
+            /tmp/homebrew-tap/Formula/claude-statusline.rb \
+            "$VERSION" "$SHA1" "$SHA2" "$SHA3" "$SHA4"
+
+          cd /tmp/homebrew-tap
+          git config user.name "brew-bottler[bot]"
+          git config user.email "brew-bottler[bot]@users.noreply.github.com"
+          git add Formula/claude-statusline.rb
+          git diff --cached --quiet || { git commit -m "claude-statusline $VERSION" && git push; }
