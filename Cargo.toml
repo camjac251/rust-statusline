@@ -2,7 +2,6 @@
 name = "claude_statusline"
 version = "1.0.11"
 edition = "2024"
-publish = false
 
 [dependencies]
 anyhow = "1.0"
