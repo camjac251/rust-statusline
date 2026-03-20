@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## [1.0.13](https://github.com/camjac251/rust-statusline/compare/v1.0.12...v1.0.13) - 2026-03-20
+
+### Fixed
+
+- *(ci)* use actions/checkout for homebrew-tap push auth
+
+### Other
+
+- Merge pull request #10 from camjac251/renovate/actions-attest-build-provenance-4.x
+
 ## [1.0.12](https://github.com/camjac251/rust-statusline/compare/v1.0.11...v1.0.12) - 2026-03-20
 
 ### Fixed
