@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [1.0.12](https://github.com/camjac251/rust-statusline/compare/v1.0.11...v1.0.12) - 2026-03-20
+
+### Fixed
+
+- *(release)* remove publish=false from Cargo.toml
+
 ## [1.0.11](https://github.com/camjac251/rust-statusline/compare/v1.0.10...v1.0.11) - 2026-03-20
 
 ### Fixed
