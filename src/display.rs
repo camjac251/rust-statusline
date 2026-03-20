@@ -17,7 +17,6 @@ const SYM_DOT: &str = "·"; // Dot separator (compact)
 const SYM_ARROW_RIGHT: &str = "→"; // Projection arrow
 const SYM_ARROW_UP: &str = "↑"; // Ahead indicator
 const SYM_ARROW_DOWN: &str = "↓"; // Behind indicator
-const SYM_WARNING: &str = "⚠"; // Warning indicator
 const SYM_DOLLAR: &str = "$"; // Cost indicator
 
 // Terminal width thresholds for responsive formatting
@@ -621,19 +620,77 @@ pub fn print_text_output(
                 (_, false) => "usage:",
             };
 
-            // Usage with optional projection arrow
+            // Build reset countdown for inline display next to usage
+            let reset_inline = if is_claude {
+                let rem_h = (remaining_minutes as i64) / 60;
+                let rem_m = (remaining_minutes as i64) % 60;
+                let countdown = if rem_h > 0 {
+                    format!("{}h{}m", rem_h, rem_m)
+                } else {
+                    format!("{}m", rem_m)
+                };
+
+                let countdown_colored = if remaining_minutes < 30.0 {
+                    tokens::ERROR.bold(&countdown, tc)
+                } else if remaining_minutes < 60.0 {
+                    tokens::WARNING.bold(&countdown, tc)
+                } else if remaining_minutes < 180.0 {
+                    tokens::WARNING.paint(&countdown, tc)
+                } else {
+                    tokens::PRIMARY_DIM.paint(&countdown, tc)
+                };
+
+                let window_end_local = if let Some(b) = active_block {
+                    b.end.with_timezone(&Local)
+                } else {
+                    let now_utc = chrono::Utc::now();
+                    let (_start, end) = window_bounds(now_utc, latest_reset);
+                    end.with_timezone(&Local)
+                };
+
+                let reset_disp = if window_end_local.minute() == 0 {
+                    if use_12h {
+                        window_end_local.format("%-I%p").to_string().to_lowercase()
+                    } else {
+                        window_end_local.format("%H").to_string()
+                    }
+                } else if use_12h {
+                    window_end_local
+                        .format("%-I:%M%p")
+                        .to_string()
+                        .to_lowercase()
+                } else {
+                    window_end_local.format("%H:%M").to_string()
+                };
+
+                format!(
+                    " {} {}",
+                    countdown_colored,
+                    muted_label(&format!("({})", reset_disp), tc)
+                )
+            } else {
+                String::new()
+            };
+
+            // Usage with optional projection arrow + inline reset
             if let Some(projected_value) = projected_percent {
                 let proj_colored = colorize_percent(projected_value, args);
                 let arrow = tokens::MUTED.dim(SYM_ARROW_RIGHT, tc);
                 print!(
-                    "{}{}{}{}",
+                    "{}{}{}{}{}",
                     muted_label(usage_label, tc),
                     usage_colored,
                     arrow,
-                    proj_colored
+                    proj_colored,
+                    reset_inline
                 );
             } else {
-                print!("{}{}", muted_label(usage_label, tc), usage_colored);
+                print!(
+                    "{}{}{}",
+                    muted_label(usage_label, tc),
+                    usage_colored,
+                    reset_inline
+                );
             }
 
             // 7-day and model-specific usage limits
@@ -694,10 +751,27 @@ pub fn print_text_output(
                         let label = if long_labels { "extra:" } else { "ex:" };
                         let spent = extra.used_credits.unwrap_or(0.0);
                         let limit = extra.monthly_limit.unwrap_or(0.0);
-                        let text = if limit > 0.0 {
-                            format!("{}${:.0}/${:.0}", muted_label(label, tc), spent, limit)
+                        let dollar = tokens::MUTED.paint(SYM_DOLLAR, tc);
+                        let spent_token = if limit > 0.0 {
+                            tokens::gradient(spent / limit * 100.0, 100.0)
                         } else {
-                            format!("{}${:.2}", muted_label(label, tc), spent)
+                            tokens::PRIMARY_DIM
+                        };
+                        let text = if limit > 0.0 {
+                            format!(
+                                "{}{}{}/{}",
+                                muted_label(label, tc),
+                                dollar,
+                                spent_token.paint(&format!("{:.0}", spent), tc),
+                                muted_label(&format!("{:.0}", limit), tc)
+                            )
+                        } else {
+                            format!(
+                                "{}{}{}",
+                                muted_label(label, tc),
+                                dollar,
+                                spent_token.paint(&format!("{:.2}", spent), tc)
+                            )
                         };
                         print!("{}{}", separator(tc, compact), text);
                     }
@@ -705,89 +779,7 @@ pub fn print_text_output(
             }
 
             print!("{}", separator(tc, compact));
-
-            // Approaching limit hints
-            if args.hints {
-                let is_opus = model_id.to_lowercase().contains("opus");
-                if usage_value >= 95.0 {
-                    let label = if is_opus { "Opus limit" } else { "limit" };
-                    let sym = tokens::ERROR.paint(SYM_WARNING, tc);
-                    let warn_text =
-                        tokens::ERROR.bold(&format!("{} {} nearly reached", sym, label), tc);
-                    print!("{}", warn_text);
-                    print!("{}", separator(tc, compact));
-                } else if usage_value >= 80.0 {
-                    let label = if is_opus { "Opus limit" } else { "limit" };
-                    let sym = tokens::WARNING.paint(SYM_WARNING, tc);
-                    let warn_text =
-                        tokens::WARNING.paint(&format!("{} approaching {}", sym, label), tc);
-                    print!("{}", warn_text);
-                    print!("{}", separator(tc, compact));
-                }
-            }
         }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // RESET SECTION: countdown (reset time)
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    if is_claude {
-        let rem_h = (remaining_minutes as i64) / 60;
-        let rem_m = (remaining_minutes as i64) % 60;
-        let countdown = if rem_h > 0 {
-            format!("{}h{}m", rem_h, rem_m)
-        } else {
-            format!("{}m", rem_m)
-        };
-
-        // Color countdown based on urgency
-        let countdown_colored = if remaining_minutes < 30.0 {
-            tokens::ERROR.bold(&countdown, tc)
-        } else if remaining_minutes < 60.0 {
-            tokens::WARNING.bold(&countdown, tc)
-        } else if remaining_minutes < 180.0 {
-            tokens::WARNING.paint(&countdown, tc)
-        } else {
-            tokens::PRIMARY_DIM.paint(&countdown, tc)
-        };
-
-        // Reset clock at window end
-        let window_end_local = if let Some(b) = active_block {
-            b.end.with_timezone(&Local)
-        } else {
-            let now_utc = chrono::Utc::now();
-            let (_start, end) = window_bounds(now_utc, latest_reset);
-            end.with_timezone(&Local)
-        };
-
-        let reset_disp = if window_end_local.minute() == 0 {
-            if use_12h {
-                window_end_local.format("%-I%p").to_string().to_lowercase()
-            } else {
-                window_end_local.format("%H").to_string()
-            }
-        } else if use_12h {
-            window_end_local
-                .format("%-I:%M%p")
-                .to_string()
-                .to_lowercase()
-        } else {
-            window_end_local.format("%H:%M").to_string()
-        };
-
-        let reset_label = match term_width {
-            TerminalWidth::Narrow => "r:",
-            _ => "reset:",
-        };
-
-        print!(
-            "{}{} {}",
-            muted_label(reset_label, tc),
-            countdown_colored,
-            muted_label(&format!("({})", reset_disp), tc)
-        );
-        print!("{}", separator(tc, compact));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -823,13 +815,11 @@ pub fn print_text_output(
     print!("{}", muted_label(ctx_label, tc));
 
     if let Some((ctx_tokens, pct)) = context {
-        // Color percentage based on usage
-        let pct_colored = if pct as f64 >= 80.0 {
-            tokens::ERROR.bold(&format!("{}%", pct), tc)
-        } else if pct as f64 >= 50.0 {
-            tokens::WARNING.paint(&format!("{}%", pct), tc)
+        let pct_token = tokens::gradient(pct as f64, 100.0);
+        let pct_colored = if pct >= 80 {
+            pct_token.bold(&format!("{}%", pct), tc)
         } else {
-            tokens::SUCCESS.paint(&format!("{}%", pct), tc)
+            pct_token.paint(&format!("{}%", pct), tc)
         };
 
         let ctx_limit_full = context_limit_override
@@ -875,34 +865,14 @@ pub fn print_text_output(
             );
         }
 
-        // Warnings about output reserve
-        if let Some((used, remaining)) = over_usable {
-            let sym = tokens::WARNING.paint(SYM_WARNING, tc);
-            let warn = tokens::WARNING.bold(
-                &format!(
-                    " {} using {} of {} reserve ({} left)",
-                    sym,
-                    format_tokens(used),
-                    format_tokens(output_reserve),
-                    format_tokens(remaining)
-                ),
-                tc,
+        // Compact reserve usage indicator when eating into output reserve
+        if let Some((used, _remaining)) = over_usable {
+            print!(
+                " {}{}{}",
+                muted_label("rsv:", tc),
+                tokens::ERROR.paint(&format_tokens(used), tc),
+                muted_label(&format!("/{}", format_tokens(output_reserve)), tc),
             );
-            print!("{}", warn);
-        } else if args.hints {
-            let headroom_to_usable = ctx_limit_usable.saturating_sub(ctx_tokens);
-            if headroom_to_usable > 0 && headroom_to_usable <= 10_000 {
-                let sym = tokens::WARNING.paint(SYM_WARNING, tc);
-                let warn = tokens::WARNING.paint(
-                    &format!(
-                        " {} {} until reserve",
-                        sym,
-                        format_tokens(headroom_to_usable)
-                    ),
-                    tc,
-                );
-                print!("{}", warn);
-            }
         }
 
         // Auto-compact hint
