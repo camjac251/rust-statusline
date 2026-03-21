@@ -87,8 +87,9 @@ use crate::utils::{
 use crate::window::window_bounds;
 
 fn format_pct(pct: f64) -> String {
-    if pct.fract() == 0.0 {
-        format!("{:.0}%", pct)
+    let rounded = pct.round();
+    if (pct - rounded).abs() < 0.05 {
+        format!("{:.0}%", rounded)
     } else {
         format!("{:.1}%", pct)
     }
