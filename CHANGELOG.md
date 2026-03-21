@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [1.1.1](https://github.com/camjac251/rust-statusline/compare/v1.1.0...v1.1.1) - 2026-03-21
+
+### Fixed
+
+- *(display)* round percentages to avoid fp noise like 7.0%
+
 ## [1.1.0](https://github.com/camjac251/rust-statusline/compare/v1.0.14...v1.1.0) - 2026-03-21
 
 ### Added
