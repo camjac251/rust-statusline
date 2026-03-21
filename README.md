@@ -21,39 +21,38 @@ A fast, single-binary statusline for [Claude Code](https://code.claude.com/docs)
 
 ## Installation
 
-### Option 1: mise (Recommended)
-
-If you use [mise](https://mise.jdx.dev/) for tool management:
+### Option 1: Homebrew (Recommended)
 
 ```bash
-mise use -g "github:camjac251/rust-statusline@latest"
+brew install camjac251/tap/claude-statusline
 ```
 
-Or add to `~/.config/mise/config.toml`:
+Upgrades work normally after the initial install:
 
-```toml
-[tools]
-"github:camjac251/rust-statusline" = { version = "latest", bin = "claude_statusline" }
+```bash
+brew upgrade claude-statusline
 ```
+
+Bottles are built for macOS (arm64, x86_64) and Linux (arm64, x86_64). Formulas are updated automatically when new releases are published.
 
 ### Option 2: Download Binary
 
 ```bash
 # Linux x64
 curl -fsSL https://github.com/camjac251/rust-statusline/releases/latest/download/claude_statusline-linux-x86_64 \
-  -o ~/.claude/claude_statusline && chmod +x ~/.claude/claude_statusline
+  -o ~/.local/bin/claude_statusline && chmod +x ~/.local/bin/claude_statusline
 
 # Linux ARM64
 curl -fsSL https://github.com/camjac251/rust-statusline/releases/latest/download/claude_statusline-linux-arm64 \
-  -o ~/.claude/claude_statusline && chmod +x ~/.claude/claude_statusline
+  -o ~/.local/bin/claude_statusline && chmod +x ~/.local/bin/claude_statusline
 
 # macOS Apple Silicon
 curl -fsSL https://github.com/camjac251/rust-statusline/releases/latest/download/claude_statusline-macos-arm64 \
-  -o ~/.claude/claude_statusline && chmod +x ~/.claude/claude_statusline
+  -o ~/.local/bin/claude_statusline && chmod +x ~/.local/bin/claude_statusline
 
 # macOS Intel
 curl -fsSL https://github.com/camjac251/rust-statusline/releases/latest/download/claude_statusline-macos-x86_64 \
-  -o ~/.claude/claude_statusline && chmod +x ~/.claude/claude_statusline
+  -o ~/.local/bin/claude_statusline && chmod +x ~/.local/bin/claude_statusline
 ```
 
 ### Option 3: Build from Source
@@ -64,7 +63,7 @@ Requires Rust 1.88+:
 git clone https://github.com/camjac251/rust-statusline
 cd rust-statusline
 cargo build --release
-cp target/release/claude_statusline ~/.claude/
+cp target/release/claude_statusline ~/.local/bin/
 ```
 
 ### Configure Claude Code
@@ -75,7 +74,7 @@ Add to `~/.claude/settings.json`:
 {
   "statusLine": {
     "type": "command",
-    "command": "~/.claude/claude_statusline --hints"
+    "command": "claude_statusline --hints"
   }
 }
 ```
