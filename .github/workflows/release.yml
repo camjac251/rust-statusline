@@ -110,6 +110,10 @@ jobs:
             os: windows-latest
             arch: windows-x86_64
             ext: .exe
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            arch: windows-arm64
+            ext: .exe
     steps:
       - uses: actions/checkout@v6
         with:
