@@ -16,6 +16,7 @@ fn create_test_entry(
         cache_create: 0,
         cache_read: 0,
         web_search_requests: 0,
+        speed: None,
         service_tier: None,
         cost,
         model: Some("test-model".to_string()),

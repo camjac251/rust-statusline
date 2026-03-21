@@ -44,6 +44,8 @@ struct ModelPricing {
     #[serde(default)]
     cache_create_1h: Option<f64>,
     cache_read: f64,
+    #[serde(default)]
+    fast_mode_multiplier: Option<f64>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -130,12 +132,12 @@ fn pricing_from_config(model_id: &str) -> Option<Pricing> {
 pub(crate) fn static_pricing_lookup(model_id: &str) -> Option<Pricing> {
     // Prefer exact/known variants before family heuristics
     let m = model_id.to_lowercase();
-    // Opus 4.5 (and catch generic "claude-4-5" as flagship/Opus)
-    if m.contains("opus-4-5") || m == "claude-4-5" {
-        let in_pt = 15e-6; // $15 / 1M (assumed)
+    // Opus 4.5/4.6 (and catch generic "claude-4-5" as flagship/Opus)
+    if m.contains("opus-4-5") || m.contains("opus-4-6") || m == "claude-4-5" {
+        let in_pt = 5e-6; // $5 / 1M
         return Some(Pricing {
             in_per_tok: in_pt,
-            out_per_tok: 75e-6,
+            out_per_tok: 25e-6,
             cache_create_per_tok: in_pt * 1.25,
             cache_read_per_tok: in_pt * 0.1,
         });
@@ -233,10 +235,10 @@ pub fn pricing_for_model(model_id: &str) -> Option<Pricing> {
 
     // Priority 4: Family heuristics fallback
     if m.contains("opus") {
-        let in_pt = 15e-6; // $15 / 1M
+        let in_pt = 5e-6; // $5 / 1M (current Opus 4.5/4.6 pricing)
         Some(Pricing {
             in_per_tok: in_pt,
-            out_per_tok: 75e-6,
+            out_per_tok: 25e-6,
             cache_create_per_tok: in_pt * 1.25,
             cache_read_per_tok: in_pt * 0.1,
         })
@@ -261,6 +263,27 @@ pub fn pricing_for_model(model_id: &str) -> Option<Pricing> {
     }
 }
 
+/// Get the fast mode multiplier for a model (e.g. 6x for Opus 4.6).
+/// Returns 1.0 if the model has no fast mode pricing.
+pub fn fast_mode_multiplier(model_id: &str) -> f64 {
+    let config = match PRICING_CONFIG.as_ref() {
+        Some(c) => c,
+        None => return 1.0,
+    };
+    let m = model_id.to_lowercase();
+    // Exact match: return its multiplier (or 1.0 if model exists but has no fast mode)
+    if let Some(mp) = config.models.get(&m) {
+        return mp.fast_mode_multiplier.unwrap_or(1.0);
+    }
+    // Partial match: only when no exact match was found
+    for (key, mp) in &config.models {
+        if (m.contains(key) || key.contains(&m)) && mp.fast_mode_multiplier.is_some() {
+            return mp.fast_mode_multiplier.unwrap();
+        }
+    }
+    1.0
+}
+
 /// Apply tiered pricing multipliers if applicable based on token count
 /// Returns modified pricing if a tier applies, otherwise returns the input pricing unchanged
 pub fn apply_tiered_pricing(
@@ -278,11 +301,22 @@ pub fn apply_tiered_pricing(
 
     // Find applicable tier
     for tier in &config.tiered_pricing.tiers {
-        // Check if this tier applies to the model
-        let applies = tier
-            .applies_to
-            .iter()
-            .any(|pattern| model_lower.contains(&pattern.to_lowercase()));
+        // Check if this tier applies using exact or date-suffix matching:
+        // "claude-sonnet-4" matches "claude-sonnet-4" and "claude-sonnet-4-20250514"
+        // but NOT "claude-sonnet-4-5" or "claude-sonnet-4-6" (different model versions)
+        let applies = tier.applies_to.iter().any(|pattern| {
+            let p = pattern.to_lowercase();
+            if model_lower == p {
+                return true;
+            }
+            // Only match date suffixes like -20250514 (8+ digits), not version suffixes like -5, -6
+            if let Some(suffix) = model_lower.strip_prefix(&p) {
+                if let Some(rest) = suffix.strip_prefix('-') {
+                    return rest.len() >= 8 && rest.chars().all(|c| c.is_ascii_digit());
+                }
+            }
+            false
+        });
 
         if applies && total_input_tokens > tier.threshold {
             // Apply multipliers
@@ -326,15 +360,64 @@ mod tests {
 
     #[test]
     fn test_pricing_family_fallback() {
-        // Test opus family fallback
+        // Test opus family fallback (current gen: $5/$25)
         let opus_fallback = pricing_for_model("some-future-opus-model").unwrap();
-        assert_eq!(opus_fallback.in_per_tok, 15e-6);
-        assert_eq!(opus_fallback.out_per_tok, 75e-6);
+        assert_eq!(opus_fallback.in_per_tok, 5e-6);
+        assert_eq!(opus_fallback.out_per_tok, 25e-6);
 
         // Test sonnet family fallback
         let sonnet_fallback = pricing_for_model("some-future-sonnet-model").unwrap();
         assert_eq!(sonnet_fallback.in_per_tok, 3e-6);
         assert_eq!(sonnet_fallback.out_per_tok, 15e-6);
+    }
+
+    #[test]
+    fn test_sonnet_46_pricing() {
+        let p = pricing_for_model("claude-sonnet-4-6").unwrap();
+        assert!((p.in_per_tok - 3e-6).abs() < 1e-10);
+        assert!((p.out_per_tok - 15e-6).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_opus_46_pricing() {
+        let p = pricing_for_model("claude-opus-4-6").unwrap();
+        assert!((p.in_per_tok - 5e-6).abs() < 1e-10);
+        assert!((p.out_per_tok - 25e-6).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_fast_mode_multiplier() {
+        // Opus 4.6 has 6x fast mode
+        assert!((fast_mode_multiplier("claude-opus-4-6") - 6.0).abs() < 1e-10);
+        // Other models have no fast mode (1x)
+        assert!((fast_mode_multiplier("claude-sonnet-4-6") - 1.0).abs() < 1e-10);
+        assert!((fast_mode_multiplier("claude-sonnet-4-5") - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_opus_46_no_long_context_tier() {
+        // After Mar 13 GA, Opus 4.6 has standard pricing across full 1M window
+        let base = pricing_for_model("claude-opus-4-6").unwrap();
+        let tiered = apply_tiered_pricing(base, "claude-opus-4-6", 300_000);
+        assert!((tiered.in_per_tok - base.in_per_tok).abs() < 1e-15);
+        assert!((tiered.out_per_tok - base.out_per_tok).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_sonnet_46_no_long_context_tier() {
+        // After Mar 13 GA, Sonnet 4.6 has standard pricing across full 1M window
+        let base = pricing_for_model("claude-sonnet-4-6").unwrap();
+        let tiered = apply_tiered_pricing(base, "claude-sonnet-4-6", 300_000);
+        assert!((tiered.in_per_tok - base.in_per_tok).abs() < 1e-15);
+        assert!((tiered.out_per_tok - base.out_per_tok).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_fast_mode_no_false_positive_on_opus_4() {
+        // Opus 4 (not 4.6) should NOT get fast mode multiplier
+        assert!((fast_mode_multiplier("claude-opus-4") - 1.0).abs() < 1e-10);
+        assert!((fast_mode_multiplier("claude-opus-4-20250514") - 1.0).abs() < 1e-10);
+        assert!((fast_mode_multiplier("claude-opus-4-1") - 1.0).abs() < 1e-10);
     }
 
     #[test]

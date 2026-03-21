@@ -8,6 +8,7 @@ pub struct Entry {
     pub cache_create: u64,
     pub cache_read: u64,
     pub web_search_requests: u64,
+    pub speed: Option<String>,
     pub service_tier: Option<String>,
     pub cost: f64,
     pub model: Option<String>,

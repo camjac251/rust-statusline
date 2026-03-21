@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "updated": "2025-11-24",
+    "updated": "2026-03-20",
     "currency": "USD",
     "unit": "per_token",
     "description": "Pricing configuration for Claude models. All prices are in USD per token. Source: https://platform.claude.com/docs/en/about-claude/pricing"
@@ -12,7 +12,16 @@
       "output": 2.5e-5,
       "cache_create": 6.25e-6,
       "cache_create_1h": 1e-5,
-      "cache_read": 5e-7
+      "cache_read": 5e-7,
+      "fast_mode_multiplier": 6.0
+    },
+    "claude-sonnet-4-6": {
+      "name": "Claude Sonnet 4.6",
+      "input": 3e-6,
+      "output": 1.5e-5,
+      "cache_create": 3.75e-6,
+      "cache_create_1h": 6e-6,
+      "cache_read": 3e-7
     },
     "claude-opus-4-1": {
       "name": "Claude Opus 4.1",
@@ -232,7 +241,6 @@
         "description": "Long context pricing for 1M-capable models (>200K tokens)",
         "threshold": 200000,
         "applies_to": [
-          "claude-opus-4-6",
           "claude-sonnet-4-5",
           "claude-sonnet-4-5-20250929",
           "claude-sonnet-4",

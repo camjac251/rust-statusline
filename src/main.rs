@@ -15,7 +15,7 @@ use claude_statusline::display::{print_header, print_json_output, print_text_out
 use claude_statusline::gastown::get_gastown_info;
 use claude_statusline::models::HookJson;
 use claude_statusline::usage::{
-    calc_context_from_entries, calc_context_from_transcript, scan_usage,
+    calc_context_from_entries, calc_context_from_transcript, parse_session_state, scan_usage,
 };
 use claude_statusline::usage_api::{UsageSummary, get_usage_summary};
 use claude_statusline::utils::{claude_paths, friendly_model_name, read_stdin};
@@ -58,20 +58,21 @@ fn main() -> Result<()> {
     )
     .unwrap_or((0.0, 0.0, 0.0, Vec::new(), None, None, None));
 
-    // Prefer the model actually used in the most recent API call for this session
-    // over the hook-provided model, which may reflect a /model change in another session
-    // that wrote to settings.json but doesn't apply to this running session.
-    if let Some(actual_model) = entries
-        .iter()
-        .rev()
-        .filter(|e| e.session_id.as_deref() == Some(&hook.session_id))
-        .find_map(|e| e.model.as_deref())
-    {
-        if actual_model != hook.model.id {
-            hook.model.id = actual_model.to_string();
+    // Parse THIS session's transcript directly for authoritative session state.
+    // This reads the specific transcript file (not the global scan) for:
+    // - actual model in use (may differ from hook if /model was used)
+    // - fast mode status (speed field from most recent API call)
+    // - session cost (from SDK result messages)
+    let session_state = parse_session_state(Path::new(&hook.transcript_path));
+
+    if let Some(ref actual_model) = session_state.model {
+        if *actual_model != hook.model.id {
+            hook.model.id = actual_model.clone();
             hook.model.display_name = friendly_model_name(&hook.model.id, &hook.model.id);
         }
     }
+
+    let is_fast_mode = session_state.speed.as_deref() == Some("fast");
 
     // Global usage tracking: SQLite-based aggregation across all sessions
     // Pass session_today_cost (this session only) for proper aggregation
@@ -96,9 +97,15 @@ fn main() -> Result<()> {
         }
     }
 
-    // By default prefer log-derived session cost for Pro/Max/Team usage; allow opting into
-    // hook-provided totals via CLAUDE_SESSION_COST_SOURCE=hook
-    if std::env::var("CLAUDE_SESSION_COST_SOURCE")
+    // Session cost priority:
+    // 1. SDK result from this session's transcript (most authoritative)
+    // 2. Hook-provided cost (if CLAUDE_SESSION_COST_SOURCE=hook)
+    // 3. Global scan derived cost (default from scan_usage)
+    if let Some(transcript_cost) = session_state.session_cost {
+        if transcript_cost > 0.0 {
+            session_cost = transcript_cost;
+        }
+    } else if std::env::var("CLAUDE_SESSION_COST_SOURCE")
         .map(|s| s.eq_ignore_ascii_case("hook"))
         .unwrap_or(false)
     {
@@ -227,6 +234,7 @@ fn main() -> Result<()> {
             beads_info.as_ref(),
             gastown_info.as_ref(),
             context_limit_override,
+            is_fast_mode,
         );
     }
 
@@ -262,32 +270,91 @@ fn main() -> Result<()> {
         burn_scope,
     );
 
-    // Get OAuth usage data (replaces legacy plan tier system)
-    // Skip if proxy detected or non-Claude model
-    let usage_summary: Option<UsageSummary> = get_usage_summary(&paths, Some(&hook.model.id));
+    // Usage + reset data priority:
+    //   1. Hook rate_limits (from subscribers, no network call)
+    //   2. OAuth API (cached, with negative cache on 429s)
+    //   3. Transcript heuristic (scan_usage: "limit reached... resets 5am")
+    let mut usage_summary: Option<UsageSummary> = None;
     let mut usage_percent_display = None;
     let projected_percent_display = None;
     let mut remaining_minutes_display = metrics.remaining_minutes;
-    let mut latest_reset_effective = latest_reset;
+    // Start with None -- only fall back to scan heuristic if nothing authoritative
+    let mut latest_reset_effective: Option<chrono::DateTime<chrono::Utc>> = None;
 
-    if let Some(summary) = usage_summary.as_ref() {
-        if let Some(pct) = summary.window.utilization {
-            usage_percent_display = Some(pct);
+    /// Apply reset time from an authoritative source (hook or API)
+    fn apply_reset(
+        reset_dt: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
+        latest_reset_out: &mut Option<chrono::DateTime<chrono::Utc>>,
+        remaining_minutes_out: &mut f64,
+    ) {
+        let normalized = claude_statusline::usage::normalize_reset_time(reset_dt);
+        *latest_reset_out = Some(
+            normalized - chrono::TimeDelta::hours(claude_statusline::utils::WINDOW_DURATION_HOURS),
+        );
+        let remaining_secs = (normalized - now).num_seconds();
+        *remaining_minutes_out = if remaining_secs > 0 {
+            remaining_secs as f64 / 60.0
+        } else {
+            0.0
+        };
+    }
+
+    // Priority 1: Hook-provided rate_limits (from subscribers, no network call)
+    // Only use if at least five_hour is present (empty rate_limits falls through to OAuth)
+    if let Some(ref rl) = hook.rate_limits {
+        if let Some(ref five) = rl.five_hour {
+            usage_percent_display = five.used_percentage;
+            if let Some(epoch) = five.resets_at {
+                if epoch.is_finite() && epoch > 0.0 {
+                    if let Some(reset) = chrono::DateTime::from_timestamp(epoch as i64, 0) {
+                        apply_reset(
+                            reset,
+                            now_utc,
+                            &mut latest_reset_effective,
+                            &mut remaining_minutes_display,
+                        );
+                    }
+                }
+            }
+
+            // Build UsageSummary from hook data for display consumers
+            let mut summary = UsageSummary::default();
+            summary.window.utilization = five.used_percentage;
+            summary.window.resets_at = five
+                .resets_at
+                .filter(|e| e.is_finite() && *e > 0.0)
+                .and_then(|e| chrono::DateTime::from_timestamp(e as i64, 0));
+            if let Some(ref seven) = rl.seven_day {
+                summary.seven_day.utilization = seven.used_percentage;
+                summary.seven_day.resets_at = seven
+                    .resets_at
+                    .filter(|e| e.is_finite() && *e > 0.0)
+                    .and_then(|e| chrono::DateTime::from_timestamp(e as i64, 0));
+            }
+            usage_summary = Some(summary);
         }
-        if let Some(reset) = summary.window.resets_at {
-            // Normalize OAuth reset time to :00 if it's slightly off
-            let reset_normalized = claude_statusline::usage::normalize_reset_time(reset);
-            latest_reset_effective = Some(
-                reset_normalized
-                    - chrono::TimeDelta::hours(claude_statusline::utils::WINDOW_DURATION_HOURS),
-            );
-            let remaining_secs = (reset_normalized - now_utc).num_seconds();
-            remaining_minutes_display = if remaining_secs > 0 {
-                remaining_secs as f64 / 60.0
-            } else {
-                0.0
-            };
+    }
+
+    // Priority 2: OAuth API (when hook doesn't provide rate_limits)
+    if usage_summary.is_none() {
+        usage_summary = get_usage_summary(&paths, Some(&hook.model.id));
+        if let Some(summary) = usage_summary.as_ref() {
+            usage_percent_display = summary.window.utilization;
+            if let Some(reset) = summary.window.resets_at {
+                apply_reset(
+                    reset,
+                    now_utc,
+                    &mut latest_reset_effective,
+                    &mut remaining_minutes_display,
+                );
+            }
         }
+    }
+
+    // Priority 3: Transcript heuristic (only if nothing authoritative above)
+    if latest_reset_effective.is_none() {
+        latest_reset_effective = latest_reset;
     }
 
     // Fallback context from entries if transcript lacked usage
@@ -361,6 +428,7 @@ fn main() -> Result<()> {
             context_limit_override,
             beads_info.as_ref(),
             gastown_info.as_ref(),
+            is_fast_mode,
         )?;
     } else {
         // Compute session-level cost per hour from Claude's provided cost

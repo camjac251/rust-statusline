@@ -21,6 +21,7 @@ fn heuristic_block_start_is_floored_to_hour_when_no_anchor() {
         cache_create: 0,
         cache_read: 0,
         web_search_requests: 0,
+        speed: None,
         service_tier: None,
         cost: 0.0,
         model: None,

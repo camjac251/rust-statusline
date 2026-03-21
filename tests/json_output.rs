@@ -21,6 +21,12 @@ fn json_output_shape_minimal() {
         output_style: None,
         cost: None,
         context_window: None,
+        exceeds_200k_tokens: None,
+        rate_limits: None,
+        session_name: None,
+        vim: None,
+        agent: None,
+        worktree: None,
     };
 
     let json: Value = build_json_output(
@@ -62,6 +68,7 @@ fn json_output_shape_minimal() {
         None,                    // context_limit_override
         None,                    // beads_info
         None,                    // gastown_info
+        false,                   // is_fast_mode
     );
 
     // High-level keys exist
@@ -123,6 +130,12 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         output_style: None,
         cost: None,
         context_window: None,
+        exceeds_200k_tokens: None,
+        rate_limits: None,
+        session_name: None,
+        vim: None,
+        agent: None,
+        worktree: None,
     };
 
     let json: Value = build_json_output(
@@ -161,9 +174,10 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         None,
         None,
         None,
-        None, // context_limit_override
-        None, // beads_info
-        None, // gastown_info
+        None,  // context_limit_override
+        None,  // beads_info
+        None,  // gastown_info
+        false, // is_fast_mode
     );
 
     // 1M context (full limit, percentage calculated against this)
@@ -189,6 +203,12 @@ fn json_output_context_limit_override_from_hook() {
         output_style: None,
         cost: None,
         context_window: None,
+        exceeds_200k_tokens: None,
+        rate_limits: None,
+        session_name: None,
+        vim: None,
+        agent: None,
+        worktree: None,
     };
 
     // Without override, unknown model defaults to 200k
@@ -228,9 +248,10 @@ fn json_output_context_limit_override_from_hook() {
         None,
         None,
         None,
-        None, // No override
-        None, // beads_info
-        None, // gastown_info
+        None,  // No override
+        None,  // beads_info
+        None,  // gastown_info
+        false, // is_fast_mode
     );
     assert_eq!(json_no_override["context"]["limit"], 200_000);
 
@@ -274,6 +295,7 @@ fn json_output_context_limit_override_from_hook() {
         Some(1_048_576), // Gemini 1M context override
         None,            // beads_info
         None,            // gastown_info
+        false,           // is_fast_mode
     );
     assert_eq!(json_with_override["context"]["limit"], 1_048_576);
     assert_eq!(json_with_override["context"]["limit_full"], 1_048_576);

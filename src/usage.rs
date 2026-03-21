@@ -22,8 +22,99 @@ use std::time::SystemTime;
 use walkdir::WalkDir;
 
 use crate::models::{Entry, MessageUsage, RateLimitInfo, TranscriptLine};
-use crate::pricing::{apply_tiered_pricing, pricing_for_model};
+use crate::pricing::{apply_tiered_pricing, fast_mode_multiplier, pricing_for_model};
 use crate::utils::{context_limit_for_model_display, parse_iso_date, system_overhead_tokens};
+
+/// Session-specific state extracted from the session's own transcript file.
+/// Unlike the global scan, this reads only the target transcript for fast, authoritative data.
+#[derive(Debug, Default)]
+pub struct SessionState {
+    /// "fast" or "normal" -- from the most recent API response in this session
+    pub speed: Option<String>,
+    /// The actual model used in the most recent API call
+    pub model: Option<String>,
+    /// Service tier from the most recent API response
+    pub service_tier: Option<String>,
+    /// Session cost from the most recent SDK result message
+    pub session_cost: Option<f64>,
+}
+
+/// Parse session-specific state directly from a transcript file.
+/// Reads all lines sequentially, keeping the latest values (last writer wins).
+pub fn parse_session_state(transcript_path: &Path) -> SessionState {
+    let mut state = SessionState::default();
+
+    let file = match File::open(transcript_path) {
+        Ok(f) => f,
+        Err(_) => return state,
+    };
+
+    // Read all lines (transcript files are bounded by context window size)
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let v: Value = match serde_json::from_str(t) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        // SDK result messages have authoritative session cost
+        if v.get("type").and_then(|s| s.as_str()) == Some("result") {
+            if let Some(cost) = v.get("total_cost_usd").and_then(|n| n.as_f64()) {
+                if cost > state.session_cost.unwrap_or(0.0) {
+                    state.session_cost = Some(cost);
+                }
+            }
+        }
+
+        // Assistant messages with usage blocks have speed, model, service_tier
+        let msg = if let Some(m) = v.get("message") {
+            m
+        } else {
+            continue;
+        };
+        if msg.get("role").and_then(|s| s.as_str()) != Some("assistant") {
+            continue;
+        }
+        let usage = match msg.get("usage") {
+            Some(u) => u,
+            None => continue,
+        };
+        // Only update from entries that have actual token data
+        if usage
+            .get("input_tokens")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0)
+            == 0
+            && usage
+                .get("output_tokens")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0)
+                == 0
+        {
+            continue;
+        }
+
+        if let Some(spd) = v.get("speed").and_then(|s| s.as_str()) {
+            state.speed = Some(spd.to_string());
+        }
+        if let Some(mdl) = msg.get("model").and_then(|s| s.as_str()) {
+            state.model = Some(mdl.to_string());
+        }
+        if let Some(tier) = usage.get("service_tier").and_then(|s| s.as_str()) {
+            state.service_tier = Some(tier.to_string());
+        }
+    }
+
+    state
+}
 
 // Helper: detect reset time from assistant text like "... limit reached ... resets 5am" with DST correction
 static ASSISTANT_LIMIT_RE: Lazy<Regex> =
@@ -841,6 +932,11 @@ pub fn scan_usage(
                     .get("service_tier")
                     .and_then(|s| s.as_str())
                     .map(|s| s.to_string());
+                let speed = v
+                    .get("speed")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                let is_fast = speed.as_deref() == Some("fast");
                 // Accept either key spelling for session identifier
                 let sid = v
                     .get("sessionId")
@@ -897,6 +993,11 @@ pub fn scan_usage(
                                 + (cache_create as f64) * p.cache_create_per_tok
                                 + (cache_read as f64) * p.cache_read_per_tok
                                 + (web_search_reqs as f64) * 0.01; // per-request charge
+
+                            // Apply fast mode multiplier (e.g. 6x for Opus 4.6)
+                            if is_fast {
+                                cost *= fast_mode_multiplier(mdl);
+                            }
                         }
                     }
                 }
@@ -936,6 +1037,7 @@ pub fn scan_usage(
                     cache_create,
                     cache_read,
                     web_search_requests: web_search_reqs,
+                    speed: speed.clone(),
                     service_tier: service_tier.clone(),
                     cost,
                     model: model.clone(),

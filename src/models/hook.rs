@@ -53,6 +53,44 @@ pub struct HookContextWindow {
     pub remaining_percentage: Option<u32>,
 }
 
+/// Subscription rate limit for a time window (5-hour or 7-day)
+#[derive(Deserialize, Debug, Clone)]
+pub struct HookRateLimit {
+    pub used_percentage: Option<f64>,
+    pub resets_at: Option<f64>,
+}
+
+/// Rate limits provided directly by Claude Code for subscribers
+#[derive(Deserialize, Debug, Clone)]
+pub struct HookRateLimits {
+    pub five_hour: Option<HookRateLimit>,
+    pub seven_day: Option<HookRateLimit>,
+}
+
+/// Vim mode information
+#[derive(Deserialize, Debug, Clone)]
+pub struct HookVim {
+    pub mode: String,
+}
+
+/// Agent information (when running with --agent)
+#[derive(Deserialize, Debug, Clone)]
+pub struct HookAgent {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub agent_type: Option<String>,
+}
+
+/// Worktree information (during --worktree sessions)
+#[derive(Deserialize, Debug, Clone)]
+pub struct HookWorktree {
+    pub name: String,
+    pub path: String,
+    pub branch: Option<String>,
+    pub original_cwd: Option<String>,
+    pub original_branch: Option<String>,
+}
+
 #[derive(Deserialize, Debug)]
 pub struct HookJson {
     pub session_id: String,
@@ -67,4 +105,17 @@ pub struct HookJson {
     pub cost: Option<HookCost>,
     /// Context window information (added in Claude Code 2.0.69+)
     pub context_window: Option<HookContextWindow>,
+    /// Whether tokens exceed 200k (long-context pricing threshold for Sonnet 4/4.5)
+    #[serde(default)]
+    pub exceeds_200k_tokens: Option<bool>,
+    /// Subscription rate limits (internal field, not in public docs)
+    pub rate_limits: Option<HookRateLimits>,
+    /// Human-readable session name from /rename
+    pub session_name: Option<String>,
+    /// Vim mode when vim mode is enabled
+    pub vim: Option<HookVim>,
+    /// Agent info when running with --agent flag
+    pub agent: Option<HookAgent>,
+    /// Worktree info during --worktree sessions
+    pub worktree: Option<HookWorktree>,
 }

@@ -226,6 +226,7 @@ pub fn print_header(
     beads_info: Option<&BeadsInfo>,
     gastown_info: Option<&GasTownInfo>,
     context_limit_override: Option<u64>,
+    is_fast_mode: bool,
 ) {
     let dir_fmt = format_path(&hook.workspace.current_dir);
     let tc = is_truecolor_enabled(args);
@@ -311,8 +312,14 @@ pub fn print_header(
         }
     }
 
-    // Model segment
-    header_parts.push(format!("{}{}{}", bracket(true), mdisp, bracket(false)));
+    // Model segment (with fast mode indicator)
+    let model_seg = if is_fast_mode {
+        let fast_label = tokens::WARNING.bold("fast", tc);
+        format!("{} {}", mdisp, fast_label)
+    } else {
+        mdisp
+    };
+    header_parts.push(format!("{}{}{}", bracket(true), model_seg, bracket(false)));
 
     // Beads current work segment (if available)
     if let Some(beads) = beads_info {
@@ -408,6 +415,30 @@ pub fn print_header(
                 bracket(false)
             ));
         }
+    }
+
+    // Agent segment (if running as a subagent via --agent)
+    if let Some(ref agent) = hook.agent {
+        let agent_colored = tokens::ACCENT.paint(&agent.name, tc);
+        header_parts.push(format!(
+            "{}{}{}{}",
+            bracket(true),
+            muted_label("agent:", tc),
+            agent_colored,
+            bracket(false),
+        ));
+    }
+
+    // Worktree segment (if in a --worktree session)
+    if let Some(ref wt) = hook.worktree {
+        let wt_name = tokens::ACCENT.paint(&wt.name, tc);
+        header_parts.push(format!(
+            "{}{}{}{}",
+            bracket(true),
+            muted_label("wt:", tc),
+            wt_name,
+            bracket(false),
+        ));
     }
 
     // Output style segment (if present, skip "default")
@@ -965,6 +996,8 @@ pub fn build_json_output(
     beads_info: Option<&BeadsInfo>,
     // Gas Town multi-agent info
     gastown_info: Option<&GasTownInfo>,
+    // Fast mode detected from transcript
+    is_fast_mode: bool,
 ) -> serde_json::Value {
     // Provider from env or deduced from model id
     let provider_env = env::var("CLAUDE_PROVIDER").ok().map(|s| {
@@ -1100,7 +1133,11 @@ pub fn build_json_output(
     });
 
     serde_json::json!({
-        "model": {"id": hook.model.id.clone(), "display_name": hook.model.display_name.clone()},
+        "model": {
+            "id": hook.model.id.clone(),
+            "display_name": hook.model.display_name.clone(),
+            "fast_mode": is_fast_mode,
+        },
         "cwd": hook.workspace.current_dir.clone(),
         "project_dir": hook.workspace.project_dir.clone(),
         "version": hook.version.clone(),
@@ -1171,6 +1208,20 @@ pub fn build_json_output(
             "worktree_count": git_wt_count,
             "is_linked_worktree": git_is_wt
         },
+        "session_name": hook.session_name.clone(),
+        "exceeds_200k_tokens": hook.exceeds_200k_tokens,
+        "vim": hook.vim.as_ref().map(|v| serde_json::json!({"mode": v.mode.clone()})),
+        "agent": hook.agent.as_ref().map(|a| serde_json::json!({
+            "name": a.name.clone(),
+            "type": a.agent_type.clone()
+        })),
+        "worktree": hook.worktree.as_ref().map(|w| serde_json::json!({
+            "name": w.name.clone(),
+            "path": w.path.clone(),
+            "branch": w.branch.clone(),
+            "original_cwd": w.original_cwd.clone(),
+            "original_branch": w.original_branch.clone()
+        })),
         "beads": beads_info.map(|b| serde_json::json!({
             "beads_dir": b.beads_dir.clone(),
             "current_work": b.current_work.as_ref().map(|w| serde_json::json!({
@@ -1284,6 +1335,7 @@ pub fn print_json_output(
     context_limit_override: Option<u64>,
     beads_info: Option<&BeadsInfo>,
     gastown_info: Option<&GasTownInfo>,
+    is_fast_mode: bool,
 ) -> anyhow::Result<()> {
     let json = build_json_output(
         hook,
@@ -1324,6 +1376,7 @@ pub fn print_json_output(
         context_limit_override,
         beads_info,
         gastown_info,
+        is_fast_mode,
     );
     println!("{}", serde_json::to_string(&json)?);
     Ok(())
