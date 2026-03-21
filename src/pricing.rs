@@ -277,8 +277,10 @@ pub fn fast_mode_multiplier(model_id: &str) -> f64 {
     }
     // Partial match: only when no exact match was found
     for (key, mp) in &config.models {
-        if (m.contains(key) || key.contains(&m)) && mp.fast_mode_multiplier.is_some() {
-            return mp.fast_mode_multiplier.unwrap();
+        if let Some(mult) = mp.fast_mode_multiplier {
+            if m.contains(key) || key.contains(&m) {
+                return mult;
+            }
         }
     }
     1.0
