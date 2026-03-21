@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## [1.1.0](https://github.com/camjac251/rust-statusline/compare/v1.0.14...v1.1.0) - 2026-03-21
+
+### Added
+
+- *(pricing)* update pricing data, add fast mode support, session-focused data sourcing
+
+### Fixed
+
+- *(pricing)* replace unwrap with let-else to satisfy clippy
+
 ## [1.0.14](https://github.com/camjac251/rust-statusline/compare/v1.0.13...v1.0.14) - 2026-03-20
 
 ### Other
