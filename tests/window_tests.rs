@@ -24,6 +24,7 @@ fn create_test_entry(
         msg_id: None,
         req_id: None,
         project: Some("test-project".to_string()),
+        agent_id: None,
     }
 }
 

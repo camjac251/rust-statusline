@@ -888,11 +888,6 @@ pub fn scan_usage(
                     Ok(d) => d,
                     Err(_) => continue,
                 };
-                // Skip sidechain entries to avoid double counting non-main chain activity
-                if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
-                    continue;
-                }
-
                 let msg = match v.get("message") {
                     Some(m) => m,
                     None => continue,
@@ -917,8 +912,8 @@ pub fn scan_usage(
                     .get("cache_read_input_tokens")
                     .and_then(|n| n.as_u64())
                     .unwrap_or(0);
-                let mut cost = v.get("costUSD").and_then(|n| n.as_f64()).unwrap_or(0.0);
-                // Include web search request charges if present when we compute fallback cost
+                let mut cost = 0.0f64;
+                // Web search request charges
                 let web_search_reqs = usage
                     .get("server_tool_use")
                     .and_then(|o| o.get("web_search_requests"))
@@ -937,6 +932,10 @@ pub fn scan_usage(
                     .and_then(|s| s.as_str())
                     .map(|s| s.to_string());
                 let is_fast = speed.as_deref() == Some("fast");
+                let agent_id = v
+                    .get("agentId")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
                 // Accept either key spelling for session identifier
                 let sid = v
                     .get("sessionId")
@@ -980,24 +979,19 @@ pub fn scan_usage(
                 if let (Some(r), Some(s)) = (&rid, &sid) {
                     sid_by_rid.insert(r.clone(), s.clone());
                 }
-                if cost == 0.0 {
-                    if let Some(ref mdl) = model {
-                        if let Some(base_p) = pricing_for_model(mdl) {
-                            // Apply tiered pricing if applicable (e.g., long-context pricing)
-                            let total_in = input + cache_create + cache_read;
-                            let p = apply_tiered_pricing(base_p, mdl, total_in);
+                if let Some(ref mdl) = model {
+                    if let Some(base_p) = pricing_for_model(mdl) {
+                        let total_in = input + cache_create + cache_read;
+                        let p = apply_tiered_pricing(base_p, mdl, total_in);
 
-                            // Calculate cost with applied pricing
-                            cost = (input as f64) * p.in_per_tok
-                                + (output as f64) * p.out_per_tok
-                                + (cache_create as f64) * p.cache_create_per_tok
-                                + (cache_read as f64) * p.cache_read_per_tok
-                                + (web_search_reqs as f64) * 0.01; // per-request charge
+                        cost = (input as f64) * p.in_per_tok
+                            + (output as f64) * p.out_per_tok
+                            + (cache_create as f64) * p.cache_create_per_tok
+                            + (cache_read as f64) * p.cache_read_per_tok
+                            + (web_search_reqs as f64) * 0.01;
 
-                            // Apply fast mode multiplier (e.g. 6x for Opus 4.6)
-                            if is_fast {
-                                cost *= fast_mode_multiplier(mdl);
-                            }
+                        if is_fast {
+                            cost *= fast_mode_multiplier(mdl);
                         }
                     }
                 }
@@ -1045,6 +1039,7 @@ pub fn scan_usage(
                     msg_id: mid.clone(),
                     req_id: rid.clone(),
                     project: proj_name.clone(),
+                    agent_id: agent_id.clone(),
                 });
                 if is_delta {
                     // Sum deltas

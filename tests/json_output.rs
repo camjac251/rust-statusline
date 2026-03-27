@@ -69,6 +69,7 @@ fn json_output_shape_minimal() {
         None,                    // beads_info
         None,                    // gastown_info
         false,                   // is_fast_mode
+        None,                    // subagent_breakdown
     );
 
     // High-level keys exist
@@ -178,6 +179,7 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         None,  // beads_info
         None,  // gastown_info
         false, // is_fast_mode
+        None,  // subagent_breakdown
     );
 
     // 1M context (full limit, percentage calculated against this)
@@ -252,6 +254,7 @@ fn json_output_context_limit_override_from_hook() {
         None,  // beads_info
         None,  // gastown_info
         false, // is_fast_mode
+        None,  // subagent_breakdown
     );
     assert_eq!(json_no_override["context"]["limit"], 200_000);
 
@@ -296,6 +299,7 @@ fn json_output_context_limit_override_from_hook() {
         None,            // beads_info
         None,            // gastown_info
         false,           // is_fast_mode
+        None,            // subagent_breakdown
     );
     assert_eq!(json_with_override["context"]["limit"], 1_048_576);
     assert_eq!(json_with_override["context"]["limit_full"], 1_048_576);

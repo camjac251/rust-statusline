@@ -76,9 +76,13 @@ pub struct Args {
     pub truecolor: bool,
 
     /// Show extra status hints (approaching limit, compact countdown)
-    /// Can also be toggled via CLAUDE_STATUS_HINTS=1
-    #[arg(long, env = "CLAUDE_STATUS_HINTS")]
+    /// Enabled by default; disable with --no-hints or CLAUDE_STATUS_HINTS=0
+    #[arg(long)]
     pub hints: bool,
+
+    /// Disable status hints (overrides --hints and CLAUDE_STATUS_HINTS)
+    #[arg(long)]
+    pub no_hints: bool,
 
     /// Burn scope: session|global (default: session)
     #[arg(long, value_enum, default_value_t = BurnScopeArg::Session)]
@@ -92,10 +96,10 @@ pub struct Args {
     #[arg(long, env = "CLAUDE_DEBUG")]
     pub debug: bool,
 
-    /// Window anchor: provider|log (default: log)
-    /// provider uses a persisted/provider reset anchor if available;
+    /// Window anchor: provider|log (default: provider)
+    /// provider uses the actual reset time from API headers;
     /// log uses heuristic log-derived 5-hour blocks (monitor-style)
-    #[arg(long, value_enum, default_value_t = WindowAnchorArg::Log)]
+    #[arg(long, value_enum, default_value_t = WindowAnchorArg::Provider)]
     pub window_anchor: WindowAnchorArg,
 
     /// Disable SQLite database cache for global usage tracking
@@ -116,6 +120,17 @@ pub struct Args {
 
 impl Args {
     pub fn parse() -> Self {
-        <Args as clap::Parser>::parse()
+        let mut args = <Args as clap::Parser>::parse();
+        // Hints are on by default; --no-hints or CLAUDE_STATUS_HINTS=0 disables them
+        if args.no_hints {
+            args.hints = false;
+        } else if !args.hints {
+            // Neither --hints nor --no-hints passed; check env, default to true
+            args.hints = match std::env::var("CLAUDE_STATUS_HINTS") {
+                Ok(v) => !matches!(v.trim(), "0" | "false" | "no" | "off"),
+                Err(_) => true,
+            };
+        }
+        args
     }
 }

@@ -19,4 +19,7 @@ pub struct Entry {
     pub req_id: Option<String>,
     #[allow(dead_code)]
     pub project: Option<String>,
+    /// Agent ID for subagent/sidechain entries (from transcript `agentId` field).
+    /// `None` for main-thread entries.
+    pub agent_id: Option<String>,
 }

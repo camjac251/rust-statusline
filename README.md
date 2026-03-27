@@ -74,7 +74,7 @@ Add to `~/.claude/settings.json`:
 {
   "statusLine": {
     "type": "command",
-    "command": "claude_statusline --hints"
+    "command": "claude_statusline"
   }
 }
 ```
@@ -87,7 +87,7 @@ Restart Claude Code. Done.
 
 | Metric | Description |
 |--------|-------------|
-| **session** | Cost of the current session |
+| **session** | Cost of the current session (includes subagent costs) |
 | **today** | Aggregated cost across all concurrent sessions (via SQLite) |
 | **window** | Cost within the current 5-hour usage window |
 | **usage%** | OAuth-reported utilization and projected usage |
@@ -138,9 +138,12 @@ claude_statusline [OPTIONS]
 | Flag | Description |
 |------|-------------|
 | `--json` | Emit structured JSON instead of colorized text |
-| `--hints` | Show warnings near limits, compact ETA, reset emphasis |
+| `--no-hints` | Disable status hints (on by default) |
 | `--labels <short\|long>` | Label verbosity (default: short) |
 | `--time <auto\|12h\|24h>` | Time format (default: auto-detect from locale) |
+| `--window-anchor <provider\|log>` | Window alignment (default: provider) |
+| `--window-scope <global\|project>` | Window cost scope (default: global) |
+| `--burn-scope <session\|global>` | Burn rate scope (default: session) |
 | `--show-provider` | Show provider/key source in header |
 | `--show-breakdown` | Show per-token-type breakdown and web search count |
 | `--no-gastown` | Disable Gas Town multi-agent display |
@@ -150,7 +153,7 @@ claude_statusline [OPTIONS]
 
 | Variable | Effect |
 |----------|--------|
-| `CLAUDE_STATUS_HINTS=1` | Same as `--hints` |
+| `CLAUDE_STATUS_HINTS=0` | Disable status hints (on by default) |
 | `CLAUDE_TIME_FORMAT=12` | Force 12-hour time |
 | `CLAUDE_CONTEXT_LIMIT=N` | Override context window size (tokens) |
 | `CLAUDE_PROVIDER=...` | Override provider display (`firstParty` becomes `anthropic`) |
@@ -170,8 +173,13 @@ Pass `--json` for machine-readable output. Key fields:
 
 ```json
 {
-  "model": { "id": "claude-sonnet-4-20250514", "display_name": "Claude Sonnet 4" },
-  "session": { "cost_usd": 0.42 },
+  "model": { "id": "claude-opus-4-6", "display_name": "Claude Opus 4.6" },
+  "session": {
+    "cost_usd": 0.42,
+    "subagents": [
+      { "agent_id": "a1234567890abcdef", "cost_usd": 0.15, "input_tokens": 50000, "output_tokens": 2000 }
+    ]
+  },
   "today": { "cost_usd": 3.14 },
   "window": {
     "cost_usd": 1.23,
@@ -197,7 +205,7 @@ Pass `--json` for machine-readable output. Key fields:
 }
 ```
 
-Full schema includes `provider`, `plan`, `reset_at`, `git.remote_url`, `git.worktree_count`, `git.is_linked_worktree`, and token breakdowns per window. Fields are added over time; consumers should tolerate unknown keys.
+Full schema includes `provider`, `plan`, `reset_at`, `session.subagents`, `git.remote_url`, `git.worktree_count`, `git.is_linked_worktree`, and token breakdowns per window. Fields are added over time; consumers should tolerate unknown keys.
 
 ---
 

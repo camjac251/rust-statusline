@@ -29,6 +29,7 @@ fn heuristic_block_start_is_floored_to_hour_when_no_anchor() {
         msg_id: None,
         req_id: None,
         project: None,
+        agent_id: None,
     };
     let e2 = Entry {
         ts: now - TimeDelta::hours(2),

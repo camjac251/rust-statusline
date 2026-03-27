@@ -98,19 +98,16 @@ fn main() -> Result<()> {
     }
 
     // Session cost priority:
-    // 1. SDK result from this session's transcript (most authoritative)
-    // 2. Hook-provided cost (if CLAUDE_SESSION_COST_SOURCE=hook)
-    // 3. Global scan derived cost (default from scan_usage)
+    // 1. SDK result from this session's transcript (most authoritative, includes subagent costs)
+    // 2. Hook-provided cost (from Claude Code's in-memory total, includes subagent costs)
+    // 3. Scan-derived cost (summed from transcript entries including subagent files)
     if let Some(transcript_cost) = session_state.session_cost {
         if transcript_cost > 0.0 {
             session_cost = transcript_cost;
         }
-    } else if std::env::var("CLAUDE_SESSION_COST_SOURCE")
-        .map(|s| s.eq_ignore_ascii_case("hook"))
-        .unwrap_or(false)
-    {
-        if let Some(ref c) = hook.cost {
-            if let Some(v) = c.total_cost_usd {
+    } else if let Some(ref c) = hook.cost {
+        if let Some(v) = c.total_cost_usd {
+            if v > 0.0 {
                 session_cost = v;
             }
         }
@@ -336,8 +333,11 @@ fn main() -> Result<()> {
         }
     }
 
-    // Priority 2: OAuth API (when hook doesn't provide rate_limits)
+    // Priority 2: OAuth API
+    // When hook provided rate_limits, we still call the API to get extra_usage
+    // and model-specific breakdowns that the hook doesn't include.
     if usage_summary.is_none() {
+        // No hook data at all; API is the primary source
         usage_summary = get_usage_summary(&paths, Some(&hook.model.id));
         if let Some(summary) = usage_summary.as_ref() {
             usage_percent_display = summary.window.utilization;
@@ -348,6 +348,19 @@ fn main() -> Result<()> {
                     &mut latest_reset_effective,
                     &mut remaining_minutes_display,
                 );
+            }
+        }
+    } else if let Some(api_summary) = get_usage_summary(&paths, Some(&hook.model.id)) {
+        // Hook provided utilization/reset; enrich with API-only fields
+        if let Some(ref mut summary) = usage_summary {
+            if summary.extra_usage.is_none() {
+                summary.extra_usage = api_summary.extra_usage;
+            }
+            if summary.seven_day_sonnet.utilization.is_none() {
+                summary.seven_day_sonnet = api_summary.seven_day_sonnet;
+            }
+            if summary.seven_day_opus.utilization.is_none() {
+                summary.seven_day_opus = api_summary.seven_day_opus;
             }
         }
     }
@@ -387,6 +400,38 @@ fn main() -> Result<()> {
             entries: Vec::new(),
             tokens: claude_statusline::models::TokenCounts::default(),
             cost: metrics.total_cost,
+        };
+
+        // Compute per-subagent cost breakdown for this session
+        let subagent_breakdown = {
+            let mut by_agent: std::collections::HashMap<String, (f64, u64, u64)> =
+                std::collections::HashMap::new();
+            for e in &entries {
+                if e.session_id.as_deref() == Some(&hook.session_id) {
+                    if let Some(ref aid) = e.agent_id {
+                        let entry = by_agent.entry(aid.clone()).or_insert((0.0, 0, 0));
+                        entry.0 += e.cost;
+                        entry.1 += e.input + e.cache_create + e.cache_read;
+                        entry.2 += e.output;
+                    }
+                }
+            }
+            if by_agent.is_empty() {
+                None
+            } else {
+                let arr: Vec<serde_json::Value> = by_agent
+                    .into_iter()
+                    .map(|(aid, (cost, input, output))| {
+                        serde_json::json!({
+                            "agent_id": aid,
+                            "cost_usd": (cost * 10000.0).round() / 10000.0,
+                            "input_tokens": input,
+                            "output_tokens": output,
+                        })
+                    })
+                    .collect();
+                Some(serde_json::Value::Array(arr))
+            }
         };
 
         print_json_output(
@@ -429,6 +474,7 @@ fn main() -> Result<()> {
             beads_info.as_ref(),
             gastown_info.as_ref(),
             is_fast_mode,
+            subagent_breakdown,
         )?;
     } else {
         // Compute session-level cost per hour from Claude's provided cost

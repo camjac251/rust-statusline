@@ -69,7 +69,8 @@ Pipeline: stdin JSON hook -> transcript parsing -> pricing -> display (text or J
 - Single-line JSON on stdin matching `HookMessage` (see `models/hook.rs`)
 - Transcript files in `~/.config/claude` and `~/.claude`
 - Pricing embedded from `pricing.json`, overridable via `CLAUDE_PRICE_*` env vars
-- OAuth usage API for utilization percentages and reset times
+- OAuth usage API for utilization percentages and reset times (fallback; hook data is preferred)
+- Subagent transcripts in `subagents/agent-*.jsonl` are included in cost calculations
 
 ## Before commits
 

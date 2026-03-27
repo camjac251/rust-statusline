@@ -549,7 +549,7 @@ pub fn print_text_output(
     _sess_tokens_cache_create: u64,
     _sess_tokens_cache_read: u64,
     web_search_requests: u64,
-    // Optional enrichments from Claude's provided cost block
+    // Session cost per hour (from hook duration); reserved for future display use
     _session_cost_per_hour: Option<f64>,
     _lines_delta: Option<(i64, i64)>,
     _rate_limit: Option<&RateLimitInfo>,
@@ -999,6 +999,8 @@ pub fn build_json_output(
     gastown_info: Option<&GasTownInfo>,
     // Fast mode detected from transcript
     is_fast_mode: bool,
+    // Per-subagent cost breakdown (computed from entries with agent_id)
+    subagent_breakdown: Option<serde_json::Value>,
 ) -> serde_json::Value {
     // Provider from env or deduced from model id
     let provider_env = env::var("CLAUDE_PROVIDER").ok().map(|s| {
@@ -1133,7 +1135,7 @@ pub fn build_json_output(
         })
     });
 
-    serde_json::json!({
+    let mut json = serde_json::json!({
         "model": {
             "id": hook.model.id.clone(),
             "display_name": hook.model.display_name.clone(),
@@ -1293,7 +1295,16 @@ pub fn build_json_output(
                 "pending": q.pending
             }))
         }))
-    })
+    });
+
+    // Inject subagent cost breakdown into the session object if available
+    if let Some(breakdown) = subagent_breakdown {
+        if let Some(session) = json.get_mut("session") {
+            session["subagents"] = breakdown;
+        }
+    }
+
+    json
 }
 #[allow(clippy::too_many_arguments)]
 pub fn print_json_output(
@@ -1337,6 +1348,7 @@ pub fn print_json_output(
     beads_info: Option<&BeadsInfo>,
     gastown_info: Option<&GasTownInfo>,
     is_fast_mode: bool,
+    subagent_breakdown: Option<serde_json::Value>,
 ) -> anyhow::Result<()> {
     let json = build_json_output(
         hook,
@@ -1378,6 +1390,7 @@ pub fn print_json_output(
         beads_info,
         gastown_info,
         is_fast_mode,
+        subagent_breakdown,
     );
     println!("{}", serde_json::to_string(&json)?);
     Ok(())

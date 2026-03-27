@@ -71,6 +71,7 @@ fn test_output_style_in_json() {
         None,  // beads_info
         None,  // gastown_info
         false, // is_fast_mode
+        None,  // subagent_breakdown
     );
 
     // Verify output_style is present in JSON
@@ -142,6 +143,7 @@ fn test_output_style_in_json() {
         None,  // beads_info
         None,  // gastown_info
         false, // is_fast_mode
+        None,  // subagent_breakdown
     );
 
     // Verify output_style is null when not present
@@ -218,6 +220,7 @@ fn test_multiple_output_styles() {
             None,  // beads_info
             None,  // gastown_info
             false, // is_fast_mode
+            None,  // subagent_breakdown
         );
 
         assert_eq!(
