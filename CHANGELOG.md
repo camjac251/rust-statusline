@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## [1.2.0](https://github.com/camjac251/rust-statusline/compare/v1.1.1...v1.2.0) - 2026-03-27
+
+### Added
+
+- *(usage)* include subagent costs in all metrics
+
+### Other
+
+- add Windows arm64 build target
+- auto-merge release-plz PRs and trigger release
+- replace mise with Homebrew as recommended install method
+
 ## [1.1.1](https://github.com/camjac251/rust-statusline/compare/v1.1.0...v1.1.1) - 2026-03-21
 
 ### Fixed
