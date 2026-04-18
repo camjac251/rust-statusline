@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## [1.3.0](https://github.com/camjac251/rust-statusline/compare/v1.2.1...v1.3.0) - 2026-04-18
+
+### Added
+
+- *(display)* fit statusline to claude footer
+
+### Fixed
+
+- *(usage)* encode sha2 suffix portably
+
+### Other
+
+- *(deps)* update Rust packages
+
 ## [1.2.1](https://github.com/camjac251/rust-statusline/compare/v1.2.0...v1.2.1) - 2026-04-01
 
 ### Fixed
