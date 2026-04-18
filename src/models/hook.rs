@@ -10,6 +10,9 @@ pub struct HookModel {
 pub struct HookWorkspace {
     pub current_dir: String,
     pub project_dir: Option<String>,
+    #[serde(default)]
+    pub added_dirs: Vec<String>,
+    pub git_worktree: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -91,6 +94,12 @@ pub struct HookWorktree {
     pub original_branch: Option<String>,
 }
 
+/// Remote session information when Claude Code is connected to a remote host
+#[derive(Deserialize, Debug, Clone)]
+pub struct HookRemote {
+    pub session_id: String,
+}
+
 #[derive(Deserialize, Debug)]
 pub struct HookJson {
     pub session_id: String,
@@ -118,4 +127,6 @@ pub struct HookJson {
     pub agent: Option<HookAgent>,
     /// Worktree info during --worktree sessions
     pub worktree: Option<HookWorktree>,
+    /// Remote session info when connected via claude remote/assistant
+    pub remote: Option<HookRemote>,
 }

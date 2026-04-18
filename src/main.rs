@@ -497,9 +497,10 @@ fn main() -> Result<()> {
         });
 
         print_text_output(
+            &hook,
+            git_info.as_ref(),
             &args,
-            &hook.model.id,
-            &hook.model.display_name,
+            is_fast_mode,
             session_cost,
             today_cost,
             metrics.total_cost,

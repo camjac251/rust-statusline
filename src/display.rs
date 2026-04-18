@@ -6,6 +6,7 @@ use crate::models::{BeadsInfo, GasTownInfo};
 use crate::tokens;
 use crate::usage_api::is_direct_claude_api;
 use std::env;
+use std::fmt::Write as _;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // UNICODE SYMBOLS - Matching Claude Code's icon set
@@ -24,6 +25,10 @@ const WIDTH_NARROW: u16 = 140;
 const WIDTH_MEDIUM: u16 = 200;
 // Account for Claude CLI padding/margins (status line container has padding)
 const TERMINAL_MARGIN: u16 = 15;
+// Claude Code's footer shares space with hints/notifications, so fit to a
+// smaller budget than the full terminal width to avoid Ink truncation.
+const CLAUDE_FOOTER_RESERVE: u16 = 44;
+const SHORT_TERMINAL_ROWS: u16 = 24;
 
 // Provide a no-op color shim when "colors" feature is disabled.
 // main.rs references this for its own trivial color usage.
@@ -153,35 +158,132 @@ enum TerminalWidth {
     Wide,   // > 200 cols
 }
 
-fn get_terminal_width() -> TerminalWidth {
-    // Check for override via env var (useful for testing)
-    if let Ok(override_width) = env::var("CLAUDE_TERMINAL_WIDTH")
-        && let Ok(width) = override_width.parse::<u16>()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderMode {
+    Compact,
+    Rich,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RenderProfile {
+    width: TerminalWidth,
+    mode: RenderMode,
+    safe_width: u16,
+}
+
+fn width_class_for(safe_width: u16) -> TerminalWidth {
+    if safe_width < WIDTH_NARROW {
+        TerminalWidth::Narrow
+    } else if safe_width < WIDTH_MEDIUM {
+        TerminalWidth::Medium
+    } else {
+        TerminalWidth::Wide
+    }
+}
+
+fn detect_terminal_dimensions() -> (u16, Option<u16>) {
+    let override_width = env::var("CLAUDE_TERMINAL_WIDTH")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok());
+    let detected = terminal_size::terminal_size();
+
+    let width = override_width
+        .or_else(|| detected.map(|(terminal_size::Width(w), _)| w))
+        .unwrap_or(WIDTH_MEDIUM + TERMINAL_MARGIN + CLAUDE_FOOTER_RESERVE);
+    let height = detected.map(|(_, terminal_size::Height(h))| h);
+
+    (width, height)
+}
+
+fn render_profile_for_dimensions(width: u16, height: Option<u16>) -> RenderProfile {
+    let safe_width = width.saturating_sub(TERMINAL_MARGIN + CLAUDE_FOOTER_RESERVE);
+    let width_class = width_class_for(safe_width);
+    let mode = if height.is_some_and(|rows| rows < SHORT_TERMINAL_ROWS) || safe_width < WIDTH_MEDIUM
     {
-        let effective_width = width.saturating_sub(TERMINAL_MARGIN);
-        return if effective_width < WIDTH_NARROW {
-            TerminalWidth::Narrow
-        } else if effective_width < WIDTH_MEDIUM {
-            TerminalWidth::Medium
-        } else {
-            TerminalWidth::Wide
-        };
+        RenderMode::Compact
+    } else {
+        RenderMode::Rich
+    };
+
+    RenderProfile {
+        width: width_class,
+        mode,
+        safe_width,
+    }
+}
+
+fn render_profile() -> RenderProfile {
+    let (width, height) = detect_terminal_dimensions();
+    render_profile_for_dimensions(width, height)
+}
+
+fn get_terminal_width() -> TerminalWidth {
+    render_profile().width
+}
+
+fn truncate_label(text: &str, max_chars: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".to_string();
     }
 
-    // Detect actual terminal width and subtract margin for CLI padding
-    if let Some((terminal_size::Width(w), _)) = terminal_size::terminal_size() {
-        let effective_width = w.saturating_sub(TERMINAL_MARGIN);
-        if effective_width < WIDTH_NARROW {
-            TerminalWidth::Narrow
-        } else if effective_width < WIDTH_MEDIUM {
-            TerminalWidth::Medium
-        } else {
-            TerminalWidth::Wide
-        }
-    } else {
-        // Fallback to medium if detection fails
-        TerminalWidth::Medium
+    let mut truncated = String::new();
+    for ch in text.chars().take(max_chars - 1) {
+        truncated.push(ch);
     }
+    truncated.push('…');
+    truncated
+}
+
+fn hook_worktree_name(hook: &HookJson) -> Option<&str> {
+    hook.worktree
+        .as_ref()
+        .map(|worktree| worktree.name.as_str())
+        .or(hook.workspace.git_worktree.as_deref())
+        .filter(|name| !name.is_empty())
+}
+
+fn added_dirs_segment(hook: &HookJson, tc: bool) -> Option<String> {
+    let count = hook.workspace.added_dirs.len();
+    if count == 0 {
+        return None;
+    }
+
+    Some(format!(
+        "{}{}",
+        muted_label("dirs:", tc),
+        tokens::ACCENT.paint(&format!("+{}", count), tc)
+    ))
+}
+
+fn worktree_segment(
+    hook: &HookJson,
+    git_info: Option<&GitInfo>,
+    tc: bool,
+    width: TerminalWidth,
+) -> Option<String> {
+    let worktree_name = hook_worktree_name(hook)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            git_info
+                .and_then(|info| info.is_linked_worktree)
+                .filter(|linked| *linked)
+                .map(|_| "linked".to_string())
+        })?;
+    let max_len = match width {
+        TerminalWidth::Narrow => 10,
+        TerminalWidth::Medium => 14,
+        TerminalWidth::Wide => 18,
+    };
+
+    Some(format!(
+        "{}{}",
+        muted_label("wt:", tc),
+        tokens::ACCENT.paint(&truncate_label(&worktree_name, max_len), tc)
+    ))
 }
 
 pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String {
@@ -217,8 +319,284 @@ pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String 
     token.paint(display, tc)
 }
 
+fn normalized_model_label(
+    model_id: &str,
+    model_display_name: &str,
+    context_limit_override: Option<u64>,
+) -> String {
+    let effective_limit = context_limit_override
+        .unwrap_or_else(|| context_limit_for_model_display(model_id, model_display_name));
+    let display_lower = model_display_name.to_lowercase();
+    let already_shows_context = display_lower.contains("1m") || display_lower.contains("200k");
+
+    if effective_limit >= 1_000_000 && !already_shows_context {
+        format!("{model_display_name} 1M")
+    } else if effective_limit < 1_000_000 && display_lower.contains("1m") {
+        model_display_name
+            .replace(" (with 1M context)", "")
+            .replace(" [1m]", "")
+            .replace("[1m]", "")
+            .trim()
+            .to_string()
+    } else {
+        model_display_name.to_string()
+    }
+}
+
+fn render_model_segment(
+    model_id: &str,
+    model_display_name: &str,
+    context_limit_override: Option<u64>,
+    args: &Args,
+    is_fast_mode: bool,
+    max_chars: Option<usize>,
+) -> String {
+    let tc = is_truecolor_enabled(args);
+    let base = normalized_model_label(model_id, model_display_name, context_limit_override);
+    let display = max_chars.map_or(base.clone(), |limit| truncate_label(&base, limit));
+    let colored = model_colored_name(model_id, &display, args);
+
+    if is_fast_mode {
+        format!("{} {}", colored, tokens::WARNING.bold("fast", tc))
+    } else {
+        colored
+    }
+}
+
+fn use_12h_time(args: &Args) -> bool {
+    match args.time_fmt {
+        TimeFormatArg::H12 => true,
+        TimeFormatArg::H24 => false,
+        TimeFormatArg::Auto => {
+            if let Ok(forced) = env::var("CLAUDE_TIME_FORMAT") {
+                forced.trim() == "12"
+            } else {
+                let lc = env::var("LC_TIME")
+                    .or_else(|_| env::var("LANG"))
+                    .unwrap_or_default()
+                    .to_lowercase();
+                lc.contains("en_us")
+            }
+        }
+    }
+}
+
+fn render_reset_inline(
+    remaining_minutes: f64,
+    active_block: Option<&Block>,
+    latest_reset: Option<DateTime<chrono::Utc>>,
+    use_12h: bool,
+    tc: bool,
+) -> String {
+    let rem_h = (remaining_minutes as i64) / 60;
+    let rem_m = (remaining_minutes as i64) % 60;
+    let countdown = if rem_h > 0 {
+        format!("{}h{}m", rem_h, rem_m)
+    } else {
+        format!("{}m", rem_m)
+    };
+
+    let countdown_colored = if remaining_minutes < 30.0 {
+        tokens::ERROR.bold(&countdown, tc)
+    } else if remaining_minutes < 60.0 {
+        tokens::WARNING.bold(&countdown, tc)
+    } else if remaining_minutes < 180.0 {
+        tokens::WARNING.paint(&countdown, tc)
+    } else {
+        tokens::PRIMARY_DIM.paint(&countdown, tc)
+    };
+
+    let window_end_local = if let Some(block) = active_block {
+        block.end.with_timezone(&Local)
+    } else {
+        let now_utc = chrono::Utc::now();
+        let (_, end) = window_bounds(now_utc, latest_reset);
+        end.with_timezone(&Local)
+    };
+
+    let reset_disp = if window_end_local.minute() == 0 {
+        if use_12h {
+            window_end_local.format("%-I%p").to_string().to_lowercase()
+        } else {
+            window_end_local.format("%H").to_string()
+        }
+    } else if use_12h {
+        window_end_local
+            .format("%-I:%M%p")
+            .to_string()
+            .to_lowercase()
+    } else {
+        window_end_local.format("%H:%M").to_string()
+    };
+
+    format!(
+        " {} {}",
+        countdown_colored,
+        muted_label(&format!("({reset_disp})"), tc)
+    )
+}
+
+fn build_git_status_segment(
+    git_info: Option<&GitInfo>,
+    tc: bool,
+    width: TerminalWidth,
+    lines_delta: Option<(i64, i64)>,
+    include_lines_delta: bool,
+) -> Option<String> {
+    let git_info = git_info?;
+    let mut git_seg = String::new();
+    let branch_max_len = match (width, include_lines_delta) {
+        (TerminalWidth::Narrow, true) => 12,
+        (TerminalWidth::Medium, true) => 20,
+        (TerminalWidth::Wide, true) => 28,
+        (TerminalWidth::Narrow, false) => 12,
+        (TerminalWidth::Medium, false) => 16,
+        (TerminalWidth::Wide, false) => 24,
+    };
+
+    if let Some(branch) = git_info.branch.as_ref() {
+        let branch_name = truncate_label(branch, branch_max_len);
+        git_seg.push_str(&tokens::PRIMARY.paint(&branch_name, tc));
+        if let Some(short_commit) = git_info.short_commit.as_ref() {
+            git_seg.push_str(&muted_label("@", tc));
+            git_seg.push_str(&tokens::PRIMARY.paint(short_commit, tc));
+        }
+    } else if let Some(short_commit) = git_info.short_commit.as_ref() {
+        git_seg.push_str(&muted_label("detached@", tc));
+        git_seg.push_str(&tokens::PRIMARY.paint(short_commit, tc));
+    }
+
+    if git_info.is_clean == Some(false) {
+        git_seg.push_str(&tokens::WARNING.paint("*", tc));
+    }
+
+    if let (Some(ahead), Some(behind)) = (git_info.ahead, git_info.behind) {
+        if ahead > 0 {
+            if !git_seg.is_empty() {
+                git_seg.push(' ');
+            }
+            git_seg.push_str(&tokens::SUCCESS.paint(&format!("{}{}", SYM_ARROW_UP, ahead), tc));
+        }
+        if behind > 0 {
+            if !git_seg.is_empty() {
+                git_seg.push(' ');
+            }
+            git_seg.push_str(&tokens::ERROR.paint(&format!("{}{}", SYM_ARROW_DOWN, behind), tc));
+        }
+    }
+
+    if include_lines_delta
+        && let Some((added, removed)) = lines_delta
+        && (added != 0 || removed != 0)
+    {
+        if !git_seg.is_empty() {
+            git_seg.push(' ');
+        }
+        git_seg.push_str(&tokens::SUCCESS.paint(&format!("+{}", added), tc));
+        git_seg.push_str(&tokens::ERROR.paint(&format!("-{}", removed.abs()), tc));
+    }
+
+    if git_seg.is_empty() {
+        None
+    } else {
+        Some(git_seg)
+    }
+}
+
+fn render_usage_compact_segment(
+    model_id: &str,
+    args: &Args,
+    usage_percent: Option<f64>,
+    remaining_minutes: f64,
+    active_block: Option<&Block>,
+    latest_reset: Option<DateTime<chrono::Utc>>,
+    usage_limits: Option<&UsageSummary>,
+) -> Option<String> {
+    if !is_direct_claude_api(Some(model_id)) {
+        return None;
+    }
+
+    let usage_value = usage_percent?;
+    let tc = is_truecolor_enabled(args);
+    let usage_label = if usage_limits.is_some_and(|summary| summary.stale) {
+        "~u:"
+    } else {
+        "u:"
+    };
+
+    Some(format!(
+        "{}{}{}",
+        muted_label(usage_label, tc),
+        colorize_percent(usage_value, args),
+        render_reset_inline(
+            remaining_minutes,
+            active_block,
+            latest_reset,
+            use_12h_time(args),
+            tc
+        )
+    ))
+}
+
+fn render_context_compact_segment(
+    model_id: &str,
+    model_display_name: &str,
+    context: Option<(u64, u32)>,
+    context_limit_override: Option<u64>,
+    tc: bool,
+    width: TerminalWidth,
+) -> String {
+    let label = muted_label("ctx:", tc);
+    let Some((ctx_tokens, pct)) = context else {
+        return format!("{label}{}", muted_label("N/A", tc));
+    };
+
+    let pct_token = tokens::gradient(pct as f64, 100.0);
+    let pct_text = format!("{}%", pct);
+    let pct_colored = if pct >= 80 {
+        pct_token.bold(&pct_text, tc)
+    } else {
+        pct_token.paint(&pct_text, tc)
+    };
+
+    let mut segment = match width {
+        TerminalWidth::Narrow => format!("{}{}", label, pct_colored),
+        _ => format!(
+            "{}{} {}",
+            label,
+            tokens::PRIMARY_DIM.paint(&format_tokens(ctx_tokens), tc),
+            pct_colored
+        ),
+    };
+
+    let ctx_limit_full = context_limit_override
+        .unwrap_or_else(|| context_limit_for_model_display(model_id, model_display_name));
+    let ctx_limit_usable =
+        ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
+    if ctx_tokens > ctx_limit_usable {
+        let reserve_used = ctx_tokens - ctx_limit_usable;
+        let _ = write!(
+            segment,
+            " {}{}",
+            muted_label("r:", tc),
+            tokens::ERROR.paint(&format_tokens(reserve_used), tc)
+        );
+    }
+
+    segment
+}
+
+fn wrap_header_segment(content: String, tc: bool) -> String {
+    format!(
+        "{}{}{}",
+        tokens::MUTED.paint("[", tc),
+        content,
+        tokens::MUTED.paint("]", tc)
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
-pub fn print_header(
+fn render_header_line(
     hook: &HookJson,
     git_info: Option<&GitInfo>,
     args: &Args,
@@ -228,106 +606,44 @@ pub fn print_header(
     gastown_info: Option<&GasTownInfo>,
     context_limit_override: Option<u64>,
     is_fast_mode: bool,
-) {
+) -> Option<String> {
+    let profile = render_profile();
+    if profile.mode == RenderMode::Compact {
+        return None;
+    }
+
     let dir_fmt = format_path(&hook.workspace.current_dir);
     let tc = is_truecolor_enabled(args);
 
-    // Determine effective context limit and build model display
-    let effective_limit = context_limit_override.unwrap_or_else(|| {
-        context_limit_for_model_display(&hook.model.id, &hook.model.display_name)
-    });
-    let display_lower = hook.model.display_name.to_lowercase();
-    let already_shows_context = display_lower.contains("1m") || display_lower.contains("200k");
-
-    let mdisp = if effective_limit >= 1_000_000 && !already_shows_context {
-        // 1M context active but display name doesn't mention it -- append indicator
-        let base = model_colored_name(&hook.model.id, &hook.model.display_name, args);
-        format!("{} {}", base, tokens::MUTED.dim("1M", tc))
-    } else if effective_limit < 1_000_000 && display_lower.contains("1m") {
-        // Display name says 1M but effective limit is lower -- strip the misleading text
-        let cleaned = hook
-            .model
-            .display_name
-            .replace(" (with 1M context)", "")
-            .replace(" [1m]", "")
-            .replace("[1m]", "");
-        model_colored_name(&hook.model.id, cleaned.trim(), args)
-    } else {
-        model_colored_name(&hook.model.id, &hook.model.display_name, args)
-    };
-
     // Build header segments: git (minimal) + model + beads + output_style + optional provider hints
     let mut header_parts: Vec<String> = Vec::new();
-
-    // Helper for bracket styling
-    let bracket = |open: bool| -> String {
-        let ch = if open { "[" } else { "]" };
-        tokens::MUTED.paint(ch, tc)
-    };
-
-    // Git info from project_dir or current_dir
-    if let Some(gi) = git_info {
-        let mut git_seg = String::new();
-        // worktree indicator
-        if gi.is_linked_worktree == Some(true) {
-            git_seg.push_str(&muted_label("wt ", tc));
-        }
-        if let (Some(br), Some(sc)) = (gi.branch.as_ref(), gi.short_commit.as_ref()) {
-            // branch and short sha
-            git_seg.push_str(&tokens::PRIMARY.paint(br, tc));
-            git_seg.push_str(&muted_label("@", tc));
-            git_seg.push_str(&tokens::PRIMARY.paint(sc, tc));
-        } else if let Some(sc) = gi.short_commit.as_ref() {
-            git_seg.push_str(&muted_label("detached@", tc));
-            git_seg.push_str(&tokens::PRIMARY.paint(sc, tc));
-        }
-        // dirty marker
-        if gi.is_clean == Some(false) {
-            git_seg.push_str(&tokens::WARNING.paint("*", tc));
-        }
-        // ahead/behind
-        if let (Some(a), Some(b)) = (gi.ahead, gi.behind) {
-            if a > 0 {
-                git_seg.push(' ');
-                git_seg.push_str(&tokens::SUCCESS.paint(&format!("{}{}", SYM_ARROW_UP, a), tc));
-            }
-            if b > 0 {
-                if a == 0 {
-                    git_seg.push(' ');
-                }
-                git_seg.push_str(&tokens::ERROR.paint(&format!("{}{}", SYM_ARROW_DOWN, b), tc));
-            }
-        }
-        // lines delta (working tree changes)
-        if let Some((added, removed)) = lines_delta {
-            if added != 0 || removed != 0 {
-                if !git_seg.is_empty() {
-                    git_seg.push(' ');
-                }
-                git_seg.push_str(&tokens::SUCCESS.paint(&format!("+{}", added), tc));
-                git_seg.push_str(&tokens::ERROR.paint(&format!("-{}", removed.abs()), tc));
-            }
-        }
-        if !git_seg.is_empty() {
-            header_parts.push(format!("{}{}{}", bracket(true), git_seg, bracket(false)));
-        }
+    if let Some(git_seg) = build_git_status_segment(git_info, tc, profile.width, lines_delta, true)
+    {
+        header_parts.push(wrap_header_segment(git_seg, tc));
+    }
+    if let Some(wt_seg) = worktree_segment(hook, git_info, tc, profile.width) {
+        header_parts.push(wrap_header_segment(wt_seg, tc));
+    }
+    if let Some(dirs_seg) = added_dirs_segment(hook, tc) {
+        header_parts.push(wrap_header_segment(dirs_seg, tc));
     }
 
     // Model segment (with fast mode indicator)
-    let model_seg = if is_fast_mode {
-        let fast_label = tokens::WARNING.bold("fast", tc);
-        format!("{} {}", mdisp, fast_label)
-    } else {
-        mdisp
-    };
-    header_parts.push(format!("{}{}{}", bracket(true), model_seg, bracket(false)));
+    let model_seg = render_model_segment(
+        &hook.model.id,
+        &hook.model.display_name,
+        context_limit_override,
+        args,
+        is_fast_mode,
+        None,
+    );
+    header_parts.push(wrap_header_segment(model_seg, tc));
 
     // Beads current work segment (if available)
     if let Some(beads) = beads_info {
         if let Some(ref work) = beads.current_work {
             // Max display length depends on terminal width
-            let term_width = get_terminal_width();
-            let max_len = match term_width {
+            let max_len = match profile.width {
                 TerminalWidth::Narrow => 25,
                 TerminalWidth::Medium => 35,
                 TerminalWidth::Wide => 50,
@@ -346,22 +662,14 @@ pub fn print_header(
                 tokens::ACCENT.paint(&work_display, tc)
             };
 
-            header_parts.push(format!(
-                "{}{}{}",
-                bracket(true),
-                work_colored,
-                bracket(false)
-            ));
+            header_parts.push(wrap_header_segment(work_colored, tc));
         } else if beads.total_open > 0 {
             // No current work but there are open issues - show count
             let count_text = format!("{} open", beads.total_open);
             let count_colored = tokens::MUTED.dim(&count_text, tc);
-            header_parts.push(format!(
-                "{}{}{}{}",
-                bracket(true),
-                muted_label("bd:", tc),
-                count_colored,
-                bracket(false)
+            header_parts.push(wrap_header_segment(
+                format!("{}{}", muted_label("bd:", tc), count_colored),
+                tc,
             ));
         }
 
@@ -381,19 +689,13 @@ pub fn print_header(
         }
 
         if !alerts.is_empty() {
-            header_parts.push(format!(
-                "{}{}{}",
-                bracket(true),
-                alerts.join(" "),
-                bracket(false)
-            ));
+            header_parts.push(wrap_header_segment(alerts.join(" "), tc));
         }
     }
 
     // Gas Town segment (if in a Gas Town workspace)
     if let Some(gt) = gastown_info {
-        let term_width = get_terminal_width();
-        let max_len = match term_width {
+        let max_len = match profile.width {
             TerminalWidth::Narrow => 30,
             TerminalWidth::Medium => 45,
             TerminalWidth::Wide => 60,
@@ -408,12 +710,9 @@ pub fn print_header(
             };
             let gt_colored = gt_token.paint(&gt_display, tc);
 
-            header_parts.push(format!(
-                "{}{}{}{}",
-                bracket(true),
-                muted_label("gt:", tc),
-                gt_colored,
-                bracket(false)
+            header_parts.push(wrap_header_segment(
+                format!("{}{}", muted_label("gt:", tc), gt_colored),
+                tc,
             ));
         }
     }
@@ -421,24 +720,9 @@ pub fn print_header(
     // Agent segment (if running as a subagent via --agent)
     if let Some(ref agent) = hook.agent {
         let agent_colored = tokens::ACCENT.paint(&agent.name, tc);
-        header_parts.push(format!(
-            "{}{}{}{}",
-            bracket(true),
-            muted_label("agent:", tc),
-            agent_colored,
-            bracket(false),
-        ));
-    }
-
-    // Worktree segment (if in a --worktree session)
-    if let Some(ref wt) = hook.worktree {
-        let wt_name = tokens::ACCENT.paint(&wt.name, tc);
-        header_parts.push(format!(
-            "{}{}{}{}",
-            bracket(true),
-            muted_label("wt:", tc),
-            wt_name,
-            bracket(false),
+        header_parts.push(wrap_header_segment(
+            format!("{}{}", muted_label("agent:", tc), agent_colored),
+            tc,
         ));
     }
 
@@ -447,12 +731,9 @@ pub fn print_header(
         let name_lower = output_style.name.to_lowercase();
         if name_lower != "default" {
             let style_colored = tokens::ACCENT.paint(&output_style.name, tc);
-            header_parts.push(format!(
-                "{}{}{}{}",
-                bracket(true),
-                muted_label("style:", tc),
-                style_colored,
-                bracket(false),
+            header_parts.push(wrap_header_segment(
+                format!("{}{}", muted_label("style:", tc), style_colored),
+                tc,
             ));
         }
     }
@@ -461,8 +742,7 @@ pub fn print_header(
     if let Ok(effort) = env::var("CLAUDE_CODE_EFFORT_LEVEL") {
         let effort_lower = effort.to_lowercase();
         if effort_lower != "unset" && !effort_lower.is_empty() {
-            let term_width = get_terminal_width();
-            let label = match term_width {
+            let label = match profile.width {
                 TerminalWidth::Narrow => "eff:",
                 _ => "effort:",
             };
@@ -473,12 +753,9 @@ pub fn print_header(
                 "max" => tokens::EFFORT_MAX.bold(&effort_lower, tc),
                 other => tokens::EFFORT_MEDIUM.paint(other, tc),
             };
-            header_parts.push(format!(
-                "{}{}{}{}",
-                bracket(true),
-                muted_label(label, tc),
-                effort_colored,
-                bracket(false),
+            header_parts.push(wrap_header_segment(
+                format!("{}{}", muted_label(label, tc), effort_colored),
+                tc,
             ));
         }
     }
@@ -508,25 +785,423 @@ pub fn print_header(
             tokens::PRIMARY_DIM.paint(&prov_disp, tc)
         ));
         if !prov_hint_parts.is_empty() {
-            header_parts.push(format!(
-                "{}{}{}",
-                bracket(true),
-                prov_hint_parts.join(" "),
-                bracket(false)
-            ));
+            header_parts.push(wrap_header_segment(prov_hint_parts.join(" "), tc));
         }
     }
 
     // Print header line: cwd then segments
     let dir_colored = tokens::ACCENT.paint(&dir_fmt, tc);
-    println!("{} {}", dir_colored, header_parts.join(" "));
+    Some(format!("{} {}", dir_colored, header_parts.join(" ")))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn print_header(
+    hook: &HookJson,
+    git_info: Option<&GitInfo>,
+    args: &Args,
+    api_key_source: Option<&str>,
+    lines_delta: Option<(i64, i64)>,
+    beads_info: Option<&BeadsInfo>,
+    gastown_info: Option<&GasTownInfo>,
+    context_limit_override: Option<u64>,
+    is_fast_mode: bool,
+) {
+    if let Some(line) = render_header_line(
+        hook,
+        git_info,
+        args,
+        api_key_source,
+        lines_delta,
+        beads_info,
+        gastown_info,
+        context_limit_override,
+        is_fast_mode,
+    ) {
+        println!("{}", line);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_compact_text_output(
+    hook: &HookJson,
+    git_info: Option<&GitInfo>,
+    args: &Args,
+    is_fast_mode: bool,
+    session_cost: f64,
+    usage_percent: Option<f64>,
+    remaining_minutes: f64,
+    active_block: Option<&Block>,
+    latest_reset: Option<DateTime<chrono::Utc>>,
+    context: Option<(u64, u32)>,
+    lines_delta: Option<(i64, i64)>,
+    usage_limits: Option<&UsageSummary>,
+    context_limit_override: Option<u64>,
+) -> String {
+    let profile = render_profile();
+    let tc = is_truecolor_enabled(args);
+    let prompt = tokens::ACCENT.paint(SYM_PROMPT, tc);
+    let mut segments = Vec::new();
+
+    if let Some(git_seg) = build_git_status_segment(git_info, tc, profile.width, lines_delta, false)
+    {
+        segments.push(git_seg);
+    }
+    if let Some(wt_seg) = worktree_segment(hook, git_info, tc, profile.width) {
+        segments.push(wt_seg);
+    }
+    if let Some(dirs_seg) = added_dirs_segment(hook, tc) {
+        segments.push(dirs_seg);
+    }
+
+    let model_max = match profile.width {
+        TerminalWidth::Narrow => 16,
+        TerminalWidth::Medium => 22,
+        TerminalWidth::Wide => 28,
+    };
+    segments.push(render_model_segment(
+        &hook.model.id,
+        &hook.model.display_name,
+        context_limit_override,
+        args,
+        is_fast_mode,
+        Some(model_max),
+    ));
+
+    let session_cost_str = format_currency(session_cost);
+    segments.push(format!(
+        "{}{}{}",
+        muted_label("s:", tc),
+        tokens::MUTED.paint(SYM_DOLLAR, tc),
+        tokens::PRIMARY.bold(&session_cost_str, tc)
+    ));
+
+    if let Some(usage_seg) = render_usage_compact_segment(
+        &hook.model.id,
+        args,
+        usage_percent,
+        remaining_minutes,
+        active_block,
+        latest_reset,
+        usage_limits,
+    ) {
+        segments.push(usage_seg);
+    }
+
+    segments.push(render_context_compact_segment(
+        &hook.model.id,
+        &hook.model.display_name,
+        context,
+        context_limit_override,
+        tc,
+        profile.width,
+    ));
+
+    format!("{} {}", prompt, segments.join(&separator(tc, true)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_rich_text_output(
+    args: &Args,
+    model_id: &str,
+    model_display_name: &str,
+    session_cost: f64,
+    today_cost: f64,
+    total_cost: f64,
+    usage_percent: Option<f64>,
+    projected_percent: Option<f64>,
+    remaining_minutes: f64,
+    active_block: Option<&Block>,
+    latest_reset: Option<DateTime<chrono::Utc>>,
+    tpm_indicator: f64,
+    context: Option<(u64, u32)>,
+    tokens_input: u64,
+    tokens_output: u64,
+    tokens_cache_create: u64,
+    tokens_cache_read: u64,
+    web_search_requests: u64,
+    usage_limits: Option<&UsageSummary>,
+    context_limit_override: Option<u64>,
+) -> String {
+    let term_width = get_terminal_width();
+    let tc = is_truecolor_enabled(args);
+    let prompt = tokens::ACCENT.paint(SYM_PROMPT, tc);
+    let long_labels = matches!(args.labels, LabelsArg::Long);
+    let is_claude = is_direct_claude_api(Some(model_id));
+    let use_12h = use_12h_time(args);
+    let mut segments: Vec<String> = Vec::new();
+
+    let session_label = match term_width {
+        TerminalWidth::Narrow => "s:",
+        TerminalWidth::Medium => "sess:",
+        TerminalWidth::Wide => "session:",
+    };
+    let session_cost_str = format_currency(session_cost);
+    segments.push(format!(
+        "{}{}{}",
+        muted_label(session_label, tc),
+        tokens::MUTED.paint(SYM_DOLLAR, tc),
+        tokens::PRIMARY.bold(&session_cost_str, tc)
+    ));
+
+    let today_label = match term_width {
+        TerminalWidth::Narrow => "t:",
+        _ => "today:",
+    };
+    let today_cost_str = format_currency(today_cost);
+    segments.push(format!(
+        "{}{}{}",
+        muted_label(today_label, tc),
+        tokens::MUTED.paint(SYM_DOLLAR, tc),
+        tokens::gradient(today_cost, 10.0).paint(&today_cost_str, tc)
+    ));
+
+    if is_claude {
+        let window_label = match term_width {
+            TerminalWidth::Narrow => "w:",
+            TerminalWidth::Medium => "win:",
+            TerminalWidth::Wide if long_labels => "window:",
+            TerminalWidth::Wide => "win:",
+        };
+        let window_cost_str = format_currency(total_cost);
+        segments.push(format!(
+            "{}{}{}",
+            muted_label(window_label, tc),
+            tokens::MUTED.paint(SYM_DOLLAR, tc),
+            tokens::gradient(total_cost, 5.0).bold(&window_cost_str, tc)
+        ));
+    }
+
+    if is_claude && let Some(usage_value) = usage_percent {
+        let usage_label = match (
+            term_width,
+            usage_limits.is_some_and(|summary| summary.stale),
+        ) {
+            (TerminalWidth::Narrow, true) => "~u:",
+            (TerminalWidth::Narrow, false) => "u:",
+            (_, true) => "~usage:",
+            (_, false) => "usage:",
+        };
+        let usage_colored = colorize_percent(usage_value, args);
+        let reset_inline =
+            render_reset_inline(remaining_minutes, active_block, latest_reset, use_12h, tc);
+        let usage_segment = if let Some(projected_value) = projected_percent {
+            format!(
+                "{}{}{}{}{}",
+                muted_label(usage_label, tc),
+                usage_colored,
+                tokens::MUTED.dim(SYM_ARROW_RIGHT, tc),
+                colorize_percent(projected_value, args),
+                reset_inline
+            )
+        } else {
+            format!(
+                "{}{}{}",
+                muted_label(usage_label, tc),
+                usage_colored,
+                reset_inline
+            )
+        };
+        segments.push(usage_segment);
+
+        if let Some(summary) = usage_limits {
+            if let Some(pct) = summary.seven_day.utilization {
+                let label = if long_labels { "weekly:" } else { "7d:" };
+                let mut text = format!("{}{}", muted_label(label, tc), colorize_percent(pct, args));
+                if let Some(reset) = summary.seven_day.resets_at {
+                    let local_reset = reset.with_timezone(&Local);
+                    let now = Local::now();
+                    let hours_until = (reset - now.with_timezone(&chrono::Utc)).num_hours();
+                    let reset_fmt = if hours_until < 24 {
+                        if use_12h {
+                            if local_reset.minute() == 0 {
+                                local_reset.format("%-I%p").to_string().to_lowercase()
+                            } else {
+                                local_reset.format("%-I:%M%p").to_string().to_lowercase()
+                            }
+                        } else if local_reset.minute() == 0 {
+                            local_reset.format("%H:00").to_string()
+                        } else {
+                            local_reset.format("%H:%M").to_string()
+                        }
+                    } else {
+                        local_reset.format("%a").to_string()
+                    };
+                    let _ = write!(text, " {}", muted_label(&format!("({reset_fmt})"), tc));
+                }
+                segments.push(text);
+            }
+            if let Some(pct) = summary.seven_day_opus.utilization {
+                segments.push(format!(
+                    "{}{}",
+                    muted_label("opus:", tc),
+                    colorize_percent(pct, args)
+                ));
+            }
+            if let Some(pct) = summary.seven_day_sonnet.utilization {
+                segments.push(format!(
+                    "{}{}",
+                    muted_label("sonnet:", tc),
+                    colorize_percent(pct, args)
+                ));
+            }
+
+            if let Some(ref extra) = summary.extra_usage
+                && extra.is_enabled
+            {
+                let label = if long_labels { "extra:" } else { "ex:" };
+                let spent = extra.used_credits.unwrap_or(0.0);
+                let limit = extra.monthly_limit.unwrap_or(0.0);
+                let spent_token = if limit > 0.0 {
+                    tokens::gradient(spent / limit * 100.0, 100.0)
+                } else {
+                    tokens::PRIMARY_DIM
+                };
+                let extra_segment = if limit > 0.0 {
+                    format!(
+                        "{}{}{}/{}",
+                        muted_label(label, tc),
+                        tokens::MUTED.paint(SYM_DOLLAR, tc),
+                        spent_token.paint(&format!("{:.0}", spent), tc),
+                        muted_label(&format!("{:.0}", limit), tc)
+                    )
+                } else {
+                    format!(
+                        "{}{}{}",
+                        muted_label(label, tc),
+                        tokens::MUTED.paint(SYM_DOLLAR, tc),
+                        spent_token.paint(&format!("{:.2}", spent), tc)
+                    )
+                };
+                segments.push(extra_segment);
+            }
+        }
+    }
+
+    if args.show_breakdown {
+        let ti = format_tokens(tokens_input);
+        let to = format_tokens(tokens_output);
+        let tcc = format_tokens(tokens_cache_create);
+        let tcr = format_tokens(tokens_cache_read);
+        segments.push(format!(
+            "{}{} {}{} {}{}",
+            muted_label("tok:", tc),
+            tokens::PRIMARY_DIM.paint(&format!("{}/{}", ti, to), tc),
+            muted_label("cache:", tc),
+            tokens::PRIMARY_DIM.paint(&format!("{}/{}", tcc, tcr), tc),
+            muted_label("ws:", tc),
+            tokens::PRIMARY_DIM.paint(&web_search_requests.to_string(), tc)
+        ));
+    }
+
+    let ctx_label = match term_width {
+        TerminalWidth::Narrow => "ctx:",
+        _ => "context:",
+    };
+    let context_segment = if let Some((ctx_tokens, pct)) = context {
+        let pct_token = tokens::gradient(pct as f64, 100.0);
+        let pct_colored = if pct >= 80 {
+            pct_token.bold(&format!("{}%", pct), tc)
+        } else {
+            pct_token.paint(&format!("{}%", pct), tc)
+        };
+
+        let ctx_limit_full = context_limit_override
+            .unwrap_or_else(|| context_limit_for_model_display(model_id, model_display_name));
+        let ctx_limit_usable =
+            ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
+        let output_reserve = reserved_output_tokens_for_model(model_id);
+        let overhead = system_overhead_tokens();
+        let raw_tokens = ctx_tokens.saturating_sub(overhead);
+        let over_usable = (ctx_tokens > ctx_limit_usable).then(|| ctx_tokens - ctx_limit_usable);
+
+        let mut text = if overhead > 0 {
+            format!(
+                "{}{} {}{}{}",
+                muted_label(ctx_label, tc),
+                tokens::PRIMARY_DIM.paint(&format_tokens(raw_tokens), tc),
+                muted_label("+", tc),
+                muted_label(&format!("{} sys = ", format_tokens(overhead)), tc),
+                tokens::PRIMARY_DIM.paint(
+                    &format!(
+                        "{}/{} ({})",
+                        format_tokens(ctx_tokens),
+                        format_tokens(ctx_limit_full),
+                        pct_colored
+                    ),
+                    tc,
+                )
+            )
+        } else {
+            format!(
+                "{}{}/{} {}",
+                muted_label(ctx_label, tc),
+                tokens::PRIMARY_DIM.paint(&format_tokens(ctx_tokens), tc),
+                muted_label(&format_tokens(ctx_limit_full), tc),
+                pct_colored
+            )
+        };
+
+        if let Some(used) = over_usable {
+            let _ = write!(
+                text,
+                " {}{}{}",
+                muted_label("rsv:", tc),
+                tokens::ERROR.paint(&format_tokens(used), tc),
+                muted_label(&format!("/{}", format_tokens(output_reserve)), tc)
+            );
+        }
+
+        if args.hints && pct >= 40 && crate::utils::auto_compact_enabled() {
+            let usable = ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
+            let cushion = crate::utils::auto_compact_headroom_tokens();
+            let compact_trigger = usable.saturating_sub(cushion) as f64;
+            let headroom_to_compact = (compact_trigger - ctx_tokens as f64).max(0.0);
+            let compact_text = if tpm_indicator > 0.0 && headroom_to_compact > 0.0 {
+                let eta_min = headroom_to_compact / tpm_indicator;
+                let eta_min_i = eta_min.round() as i64;
+                let eta_disp = if eta_min_i >= 120 {
+                    format!("~{}h", eta_min_i / 60)
+                } else if eta_min_i >= 60 {
+                    format!("~{}h{}m", eta_min_i / 60, eta_min_i % 60)
+                } else {
+                    format!("~{}m", eta_min_i)
+                };
+                format!(
+                    "{}@{}K {}",
+                    muted_label("compact:", tc),
+                    compact_trigger as u64 / 1000,
+                    eta_disp
+                )
+            } else {
+                format!(
+                    "{}@{}K",
+                    muted_label("compact:", tc),
+                    compact_trigger as u64 / 1000
+                )
+            };
+            let _ = write!(
+                text,
+                "{}{}",
+                separator(tc, false),
+                tokens::WARNING.paint(&compact_text, tc)
+            );
+        }
+
+        text
+    } else {
+        format!("{}{}", muted_label(ctx_label, tc), muted_label("N/A", tc))
+    };
+    segments.push(context_segment);
+
+    format!("{} {}", prompt, segments.join(&separator(tc, false)))
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn print_text_output(
+    hook: &HookJson,
+    git_info: Option<&GitInfo>,
     args: &Args,
-    model_id: &str,
-    model_display_name: &str,
+    is_fast_mode: bool,
     session_cost: f64,
     today_cost: f64,
     total_cost: f64,
@@ -543,414 +1218,204 @@ pub fn print_text_output(
     tokens_output: u64,
     tokens_cache_create: u64,
     tokens_cache_read: u64,
-    // session-scoped tokens within the current window
     _sess_tokens_input: u64,
     _sess_tokens_output: u64,
     _sess_tokens_cache_create: u64,
     _sess_tokens_cache_read: u64,
     web_search_requests: u64,
-    // Session cost per hour (from hook duration); reserved for future display use
     _session_cost_per_hour: Option<f64>,
-    _lines_delta: Option<(i64, i64)>,
+    lines_delta: Option<(i64, i64)>,
     _rate_limit: Option<&RateLimitInfo>,
     usage_limits: Option<&UsageSummary>,
-    // Override context limit from hook.context_window.context_window_size
     context_limit_override: Option<u64>,
 ) {
-    // Detect terminal width for responsive formatting
-    let term_width = get_terminal_width();
-    let tc = is_truecolor_enabled(args);
-    let compact = term_width == TerminalWidth::Narrow;
-
-    // Prompt symbol
-    let prompt = tokens::ACCENT.paint(SYM_PROMPT, tc);
-    print!("{} ", prompt);
-
-    // Labels preference
-    let long_labels = matches!(args.labels, LabelsArg::Long) && !compact;
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // COST SECTION: session | today | window
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    // Session cost
-    let session_label = match term_width {
-        TerminalWidth::Narrow => "s:",
-        TerminalWidth::Medium => "sess:",
-        TerminalWidth::Wide => "session:",
-    };
-    let session_cost_str = format_currency(session_cost);
-    let session_colored = format!(
-        "{}{}",
-        tokens::MUTED.paint(SYM_DOLLAR, tc),
-        tokens::PRIMARY.bold(&session_cost_str, tc)
-    );
-    print!("{}{}", muted_label(session_label, tc), session_colored);
-    print!("{}", separator(tc, compact));
-
-    // Today cost
-    let today_label = match term_width {
-        TerminalWidth::Narrow => "t:",
-        _ => "today:",
-    };
-    let today_cost_str = format_currency(today_cost);
-    let dollar_muted = tokens::MUTED.paint(SYM_DOLLAR, tc);
-    let cost_token = tokens::gradient(today_cost, 10.0);
-    let today_colored = format!("{}{}", dollar_muted, cost_token.paint(&today_cost_str, tc));
-    print!("{}{}", muted_label(today_label, tc), today_colored);
-    print!("{}", separator(tc, compact));
-
-    // Check if we're using direct Claude API (for window/reset display)
-    let is_claude = is_direct_claude_api(Some(model_id));
-
-    // Window cost (Claude-specific)
-    if is_claude {
-        let window_label = match term_width {
-            TerminalWidth::Narrow => "w:",
-            TerminalWidth::Medium => "win:",
-            TerminalWidth::Wide if long_labels => "window:",
-            TerminalWidth::Wide => "win:",
-        };
-        let window_cost_str = format_currency(total_cost);
-        let dollar_win = tokens::MUTED.paint(SYM_DOLLAR, tc);
-        let win_token = tokens::gradient(total_cost, 5.0);
-        let window_colored = format!("{}{}", dollar_win, win_token.bold(&window_cost_str, tc));
-        print!("{}{}", muted_label(window_label, tc), window_colored);
-        print!("{}", separator(tc, compact));
-    }
-
-    let use_12h = match args.time_fmt {
-        TimeFormatArg::H12 => true,
-        TimeFormatArg::H24 => false,
-        TimeFormatArg::Auto => {
-            if let Ok(forced) = env::var("CLAUDE_TIME_FORMAT") {
-                forced.trim() == "12"
-            } else {
-                let lc = env::var("LC_TIME")
-                    .or_else(|_| env::var("LANG"))
-                    .unwrap_or_default()
-                    .to_lowercase();
-                lc.contains("en_us")
-            }
-        }
-    };
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // USAGE SECTION: usage% -> projected% | 7d | model-specific
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    // Usage (only if a plan/window max is configured)
-    let is_stale = usage_limits.is_some_and(|s| s.stale);
-    if is_claude {
-        if let Some(usage_value) = usage_percent {
-            let usage_colored = colorize_percent(usage_value, args);
-
-            let usage_label = match (term_width, is_stale) {
-                (TerminalWidth::Narrow, true) => "~u:",
-                (TerminalWidth::Narrow, false) => "u:",
-                (_, true) => "~usage:",
-                (_, false) => "usage:",
-            };
-
-            // Build reset countdown for inline display next to usage
-            let reset_inline = if is_claude {
-                let rem_h = (remaining_minutes as i64) / 60;
-                let rem_m = (remaining_minutes as i64) % 60;
-                let countdown = if rem_h > 0 {
-                    format!("{}h{}m", rem_h, rem_m)
-                } else {
-                    format!("{}m", rem_m)
-                };
-
-                let countdown_colored = if remaining_minutes < 30.0 {
-                    tokens::ERROR.bold(&countdown, tc)
-                } else if remaining_minutes < 60.0 {
-                    tokens::WARNING.bold(&countdown, tc)
-                } else if remaining_minutes < 180.0 {
-                    tokens::WARNING.paint(&countdown, tc)
-                } else {
-                    tokens::PRIMARY_DIM.paint(&countdown, tc)
-                };
-
-                let window_end_local = if let Some(b) = active_block {
-                    b.end.with_timezone(&Local)
-                } else {
-                    let now_utc = chrono::Utc::now();
-                    let (_start, end) = window_bounds(now_utc, latest_reset);
-                    end.with_timezone(&Local)
-                };
-
-                let reset_disp = if window_end_local.minute() == 0 {
-                    if use_12h {
-                        window_end_local.format("%-I%p").to_string().to_lowercase()
-                    } else {
-                        window_end_local.format("%H").to_string()
-                    }
-                } else if use_12h {
-                    window_end_local
-                        .format("%-I:%M%p")
-                        .to_string()
-                        .to_lowercase()
-                } else {
-                    window_end_local.format("%H:%M").to_string()
-                };
-
-                format!(
-                    " {} {}",
-                    countdown_colored,
-                    muted_label(&format!("({})", reset_disp), tc)
-                )
-            } else {
-                String::new()
-            };
-
-            // Usage with optional projection arrow + inline reset
-            if let Some(projected_value) = projected_percent {
-                let proj_colored = colorize_percent(projected_value, args);
-                let arrow = tokens::MUTED.dim(SYM_ARROW_RIGHT, tc);
-                print!(
-                    "{}{}{}{}{}",
-                    muted_label(usage_label, tc),
-                    usage_colored,
-                    arrow,
-                    proj_colored,
-                    reset_inline
-                );
-            } else {
-                print!(
-                    "{}{}{}",
-                    muted_label(usage_label, tc),
-                    usage_colored,
-                    reset_inline
-                );
-            }
-
-            // 7-day and model-specific usage limits
-            if let Some(summary) = usage_limits {
-                let mut segments: Vec<String> = Vec::new();
-                if let Some(pct) = summary.seven_day.utilization {
-                    let label = if long_labels { "weekly:" } else { "7d:" };
-                    let mut text =
-                        format!("{}{}", muted_label(label, tc), colorize_percent(pct, args));
-                    if let Some(reset) = summary.seven_day.resets_at {
-                        let local_reset = reset.with_timezone(&Local);
-                        let now = Local::now();
-                        let hours_until = (reset - now.with_timezone(&chrono::Utc)).num_hours();
-                        let reset_fmt = if hours_until < 24 {
-                            if use_12h {
-                                if local_reset.minute() == 0 {
-                                    local_reset.format("%-I%p").to_string().to_lowercase()
-                                } else {
-                                    local_reset.format("%-I:%M%p").to_string().to_lowercase()
-                                }
-                            } else if local_reset.minute() == 0 {
-                                local_reset.format("%H:00").to_string()
-                            } else {
-                                local_reset.format("%H:%M").to_string()
-                            }
-                        } else {
-                            local_reset.format("%a").to_string()
-                        };
-                        text.push_str(&format!(
-                            " {}",
-                            muted_label(&format!("({})", reset_fmt), tc)
-                        ));
-                    }
-                    segments.push(text);
-                }
-                if let Some(pct) = summary.seven_day_opus.utilization {
-                    segments.push(format!(
-                        "{}{}",
-                        muted_label("opus:", tc),
-                        colorize_percent(pct, args)
-                    ));
-                }
-                if let Some(pct) = summary.seven_day_sonnet.utilization {
-                    segments.push(format!(
-                        "{}{}",
-                        muted_label("sonnet:", tc),
-                        colorize_percent(pct, args)
-                    ));
-                }
-                if !segments.is_empty() {
-                    print!("{}", separator(tc, compact));
-                    print!("{}", segments.join(&separator(tc, compact)));
-                }
-
-                // Extra usage (overuse credits)
-                if let Some(ref extra) = summary.extra_usage {
-                    if extra.is_enabled {
-                        let label = if long_labels { "extra:" } else { "ex:" };
-                        let spent = extra.used_credits.unwrap_or(0.0);
-                        let limit = extra.monthly_limit.unwrap_or(0.0);
-                        let dollar = tokens::MUTED.paint(SYM_DOLLAR, tc);
-                        let spent_token = if limit > 0.0 {
-                            tokens::gradient(spent / limit * 100.0, 100.0)
-                        } else {
-                            tokens::PRIMARY_DIM
-                        };
-                        let text = if limit > 0.0 {
-                            format!(
-                                "{}{}{}/{}",
-                                muted_label(label, tc),
-                                dollar,
-                                spent_token.paint(&format!("{:.0}", spent), tc),
-                                muted_label(&format!("{:.0}", limit), tc)
-                            )
-                        } else {
-                            format!(
-                                "{}{}{}",
-                                muted_label(label, tc),
-                                dollar,
-                                spent_token.paint(&format!("{:.2}", spent), tc)
-                            )
-                        };
-                        print!("{}{}", separator(tc, compact), text);
-                    }
-                }
-            }
-
-            print!("{}", separator(tc, compact));
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // TOKENS SECTION (optional breakdown)
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    if args.show_breakdown {
-        let ti = format_tokens(tokens_input);
-        let to = format_tokens(tokens_output);
-        let tcc = format_tokens(tokens_cache_create);
-        let tcr = format_tokens(tokens_cache_read);
-        let ws = web_search_requests;
-        print!(
-            "{}{} {}{} {}{}",
-            muted_label("tok:", tc),
-            tokens::PRIMARY_DIM.paint(&format!("{}/{}", ti, to), tc),
-            muted_label("cache:", tc),
-            tokens::PRIMARY_DIM.paint(&format!("{}/{}", tcc, tcr), tc),
-            muted_label("ws:", tc),
-            tokens::PRIMARY_DIM.paint(&ws.to_string(), tc)
-        );
-        print!("{}", separator(tc, compact));
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // CONTEXT SECTION: tokens/limit (%)
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    let ctx_label = match term_width {
-        TerminalWidth::Narrow => "ctx:",
-        _ => "context:",
-    };
-    print!("{}", muted_label(ctx_label, tc));
-
-    if let Some((ctx_tokens, pct)) = context {
-        let pct_token = tokens::gradient(pct as f64, 100.0);
-        let pct_colored = if pct >= 80 {
-            pct_token.bold(&format!("{}%", pct), tc)
-        } else {
-            pct_token.paint(&format!("{}%", pct), tc)
-        };
-
-        let ctx_limit_full = context_limit_override
-            .unwrap_or_else(|| context_limit_for_model_display(model_id, model_display_name));
-        let ctx_limit_usable =
-            ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
-        let output_reserve = reserved_output_tokens_for_model(model_id);
-        let overhead = system_overhead_tokens();
-        let raw_tokens = ctx_tokens.saturating_sub(overhead);
-
-        // Check if we're eating into the output reserve
-        let over_usable = if ctx_tokens > ctx_limit_usable {
-            let reserve_used = ctx_tokens - ctx_limit_usable;
-            let reserve_remaining = output_reserve.saturating_sub(reserve_used);
-            Some((reserve_used, reserve_remaining))
-        } else {
-            None
-        };
-
-        // Display context usage
-        if overhead > 0 {
-            print!(
-                "{} {}{}{}",
-                tokens::PRIMARY_DIM.paint(&format_tokens(raw_tokens), tc),
-                muted_label("+", tc),
-                muted_label(&format!("{} sys = ", format_tokens(overhead)), tc),
-                tokens::PRIMARY_DIM.paint(
-                    &format!(
-                        "{}/{} ({})",
-                        format_tokens(ctx_tokens),
-                        format_tokens(ctx_limit_full),
-                        pct_colored
-                    ),
-                    tc,
-                )
-            );
-        } else {
-            print!(
-                "{}/{} {}",
-                tokens::PRIMARY_DIM.paint(&format_tokens(ctx_tokens), tc),
-                muted_label(&format_tokens(ctx_limit_full), tc),
-                pct_colored
-            );
-        }
-
-        // Compact reserve usage indicator when eating into output reserve
-        if let Some((used, _remaining)) = over_usable {
-            print!(
-                " {}{}{}",
-                muted_label("rsv:", tc),
-                tokens::ERROR.paint(&format_tokens(used), tc),
-                muted_label(&format!("/{}", format_tokens(output_reserve)), tc),
-            );
-        }
-
-        // Auto-compact hint
-        if args.hints && pct >= 40 && crate::utils::auto_compact_enabled() {
-            let usable = ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
-            let cushion = crate::utils::auto_compact_headroom_tokens();
-            let compact_trigger = usable.saturating_sub(cushion) as f64;
-            let headroom_to_compact = (compact_trigger - ctx_tokens as f64).max(0.0);
-
-            if tpm_indicator > 0.0 && headroom_to_compact > 0.0 {
-                let eta_min = headroom_to_compact / tpm_indicator;
-                let eta_min_i = eta_min.round() as i64;
-                let eta_disp = if eta_min_i >= 120 {
-                    format!("~{}h", eta_min_i / 60)
-                } else if eta_min_i >= 60 {
-                    format!("~{}h{}m", eta_min_i / 60, eta_min_i % 60)
-                } else {
-                    format!("~{}m", eta_min_i)
-                };
-                let compact_text = tokens::WARNING.paint(
-                    &format!(
-                        "{}@{}K {}",
-                        muted_label("compact:", tc),
-                        compact_trigger as u64 / 1000,
-                        eta_disp
-                    ),
-                    tc,
-                );
-                print!("{}{}", separator(tc, compact), compact_text);
-            } else {
-                let compact_text = tokens::WARNING.paint(
-                    &format!(
-                        "{}@{}K",
-                        muted_label("compact:", tc),
-                        compact_trigger as u64 / 1000
-                    ),
-                    tc,
-                );
-                print!("{}{}", separator(tc, compact), compact_text);
-            }
-        }
+    let profile = render_profile();
+    let line = if profile.mode == RenderMode::Compact {
+        render_compact_text_output(
+            hook,
+            git_info,
+            args,
+            is_fast_mode,
+            session_cost,
+            usage_percent,
+            remaining_minutes,
+            active_block,
+            latest_reset,
+            context,
+            lines_delta,
+            usage_limits,
+            context_limit_override,
+        )
     } else {
-        print!("{}", muted_label("N/A", tc));
+        let _ = lines_delta;
+        render_rich_text_output(
+            args,
+            &hook.model.id,
+            &hook.model.display_name,
+            session_cost,
+            today_cost,
+            total_cost,
+            usage_percent,
+            projected_percent,
+            remaining_minutes,
+            active_block,
+            latest_reset,
+            tpm_indicator,
+            context,
+            tokens_input,
+            tokens_output,
+            tokens_cache_create,
+            tokens_cache_read,
+            web_search_requests,
+            usage_limits,
+            context_limit_override,
+        )
+    };
+
+    println!("{}", line);
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    use crate::models::hook::{HookJson, HookModel, HookWorkspace};
+
+    fn test_args() -> Args {
+        Args::parse_from(["claude_statusline"])
     }
 
-    println!();
+    fn test_hook(added_dirs: Vec<&str>, git_worktree: Option<&str>) -> HookJson {
+        HookJson {
+            session_id: "sess-test".to_string(),
+            transcript_path: "/tmp/transcript.jsonl".to_string(),
+            cwd: None,
+            model: HookModel {
+                id: "claude-sonnet-4-5".to_string(),
+                display_name: "Claude Sonnet 4.5".to_string(),
+            },
+            workspace: HookWorkspace {
+                current_dir: "/tmp/project".to_string(),
+                project_dir: Some("/tmp/project".to_string()),
+                added_dirs: added_dirs.into_iter().map(str::to_string).collect(),
+                git_worktree: git_worktree.map(str::to_string),
+            },
+            version: None,
+            output_style: None,
+            cost: None,
+            context_window: None,
+            exceeds_200k_tokens: None,
+            rate_limits: None,
+            session_name: None,
+            vim: None,
+            agent: None,
+            worktree: None,
+            remote: None,
+        }
+    }
+
+    #[test]
+    fn render_profile_prefers_compact_for_claude_safe_fit() {
+        assert_eq!(
+            render_profile_for_dimensions(320, Some(32)).mode,
+            RenderMode::Rich
+        );
+        assert_eq!(
+            render_profile_for_dimensions(220, Some(32)).mode,
+            RenderMode::Compact
+        );
+        assert_eq!(
+            render_profile_for_dimensions(320, Some(20)).mode,
+            RenderMode::Compact
+        );
+    }
+
+    #[test]
+    fn header_is_suppressed_in_compact_mode() {
+        assert_eq!(
+            render_profile_for_dimensions(220, Some(32)).mode,
+            RenderMode::Compact
+        );
+    }
+
+    #[test]
+    fn compact_line_includes_added_dirs_and_hook_worktree() {
+        let hook = test_hook(vec!["/tmp/project/docs"], Some("hook-wt"));
+        let git_info = GitInfo {
+            branch: Some("feature/footer".to_string()),
+            short_commit: Some("abc1234".to_string()),
+            is_clean: Some(false),
+            ahead: Some(1),
+            behind: Some(0),
+            remote_url: None,
+            is_head_on_remote: None,
+            worktree_count: Some(2),
+            is_linked_worktree: Some(true),
+        };
+
+        let line = render_compact_text_output(
+            &hook,
+            Some(&git_info),
+            &test_args(),
+            true,
+            1.25,
+            Some(12.0),
+            95.0,
+            None,
+            None,
+            Some((12_345, 6)),
+            Some((8, 3)),
+            None,
+            Some(200_000),
+        );
+
+        assert!(!line.contains('\n'));
+        assert!(line.contains("dirs:"));
+        assert!(line.contains("+1"));
+        assert!(line.contains("wt:"));
+        assert!(line.contains("hook-wt"));
+        assert!(!line.contains("linked"));
+        assert!(line.contains("fast"));
+    }
+
+    #[test]
+    fn rich_header_uses_workspace_segments() {
+        let hook = test_hook(
+            vec!["/tmp/project/docs", "/tmp/project/scripts"],
+            Some("hook-wt"),
+        );
+        let git_info = GitInfo {
+            branch: Some("feature/footer".to_string()),
+            short_commit: Some("abc1234".to_string()),
+            is_clean: Some(true),
+            ahead: Some(0),
+            behind: Some(0),
+            remote_url: None,
+            is_head_on_remote: None,
+            worktree_count: Some(2),
+            is_linked_worktree: Some(true),
+        };
+
+        let line = render_header_line(
+            &hook,
+            Some(&git_info),
+            &test_args(),
+            None,
+            None,
+            None,
+            None,
+            Some(200_000),
+            false,
+        )
+        .unwrap_or_default();
+
+        assert!(line.contains("dirs:"));
+        assert!(line.contains("+2"));
+        assert!(line.contains("wt:"));
+        assert!(line.contains("hook-wt"));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1143,6 +1608,12 @@ pub fn build_json_output(
         },
         "cwd": hook.workspace.current_dir.clone(),
         "project_dir": hook.workspace.project_dir.clone(),
+        "workspace": {
+            "current_dir": hook.workspace.current_dir.clone(),
+            "project_dir": hook.workspace.project_dir.clone(),
+            "added_dirs": hook.workspace.added_dirs.clone(),
+            "git_worktree": hook.workspace.git_worktree.clone(),
+        },
         "version": hook.version.clone(),
         "output_style": hook.output_style.as_ref().map(|s| serde_json::json!({"name": s.name.clone()})),
         "effort": env::var("CLAUDE_CODE_EFFORT_LEVEL").ok().and_then(|e| {
@@ -1214,6 +1685,9 @@ pub fn build_json_output(
         "session_name": hook.session_name.clone(),
         "exceeds_200k_tokens": hook.exceeds_200k_tokens,
         "vim": hook.vim.as_ref().map(|v| serde_json::json!({"mode": v.mode.clone()})),
+        "remote": hook.remote.as_ref().map(|remote| serde_json::json!({
+            "session_id": remote.session_id.clone()
+        })),
         "agent": hook.agent.as_ref().map(|a| serde_json::json!({
             "name": a.name.clone(),
             "type": a.agent_type.clone()

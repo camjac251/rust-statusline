@@ -456,8 +456,7 @@ fn progressive_lookback_block(
 
         // If we've been working for more than one session, find the current block
         let block_start = if total_work_time > session_duration {
-            let completed_blocks =
-                (total_work_time.num_seconds() / session_duration.num_seconds()) as i64;
+            let completed_blocks = total_work_time.num_seconds() / session_duration.num_seconds();
             floored_start + Duration::seconds(completed_blocks * session_duration.num_seconds())
         } else {
             floored_start

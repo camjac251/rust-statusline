@@ -74,10 +74,16 @@ Add to `~/.claude/settings.json`:
 {
   "statusLine": {
     "type": "command",
-    "command": "claude_statusline"
+    "command": "claude_statusline",
+    "padding": 0,
+    "refreshInterval": 5
   }
 }
 ```
+
+`padding` and `refreshInterval` are Claude Code settings. `claude_statusline` just renders the current snapshot when Claude Code invokes it.
+
+Claude Code truncates long footer output, so `claude_statusline` now prefers a more compact, Claude-safe layout unless there is clear room for the richer two-line view.
 
 Restart Claude Code. Done.
 
@@ -95,6 +101,7 @@ Restart Claude Code. Done.
 | **context** | Token count and percentage of context window used |
 | **reset** | Time remaining until usage window reset |
 | **git** | Branch, commit, dirty state, ahead/behind |
+| **workspace** | Added workspace dirs and linked worktree hints from Claude Code |
 
 ---
 
@@ -174,6 +181,12 @@ Pass `--json` for machine-readable output. Key fields:
 ```json
 {
   "model": { "id": "claude-opus-4-6", "display_name": "Claude Opus 4.6" },
+  "workspace": {
+    "current_dir": "/repo",
+    "project_dir": "/repo",
+    "added_dirs": ["/repo/docs"],
+    "git_worktree": "feature/footer"
+  },
   "session": {
     "cost_usd": 0.42,
     "subagents": [
@@ -201,11 +214,14 @@ Pass `--json` for machine-readable output. Key fields:
     "is_clean": true,
     "ahead": 0,
     "behind": 0
+  },
+  "remote": {
+    "session_id": "remote-abc"
   }
 }
 ```
 
-Full schema includes `provider`, `plan`, `reset_at`, `session.subagents`, `git.remote_url`, `git.worktree_count`, `git.is_linked_worktree`, and token breakdowns per window. Fields are added over time; consumers should tolerate unknown keys.
+Full schema includes `provider`, `plan`, `reset_at`, `session.subagents`, `git.remote_url`, `git.worktree_count`, `git.is_linked_worktree`, nested `workspace.*`, optional `remote.session_id`, and token breakdowns per window. Top-level `cwd` and `project_dir` remain as compatibility aliases. Fields are added over time; consumers should tolerate unknown keys.
 
 ---
 

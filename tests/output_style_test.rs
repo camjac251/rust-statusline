@@ -16,6 +16,8 @@ fn test_output_style_in_json() {
         workspace: HookWorkspace {
             current_dir: "/tmp/project".to_string(),
             project_dir: Some("/tmp/project".to_string()),
+            added_dirs: Vec::new(),
+            git_worktree: None,
         },
         version: Some("1.0.0".to_string()),
         output_style: Some(OutputStyle {
@@ -29,6 +31,7 @@ fn test_output_style_in_json() {
         vim: None,
         agent: None,
         worktree: None,
+        remote: None,
     };
 
     let json: Value = build_json_output(
@@ -90,6 +93,8 @@ fn test_output_style_in_json() {
         workspace: HookWorkspace {
             current_dir: "/tmp/project".to_string(),
             project_dir: Some("/tmp/project".to_string()),
+            added_dirs: Vec::new(),
+            git_worktree: None,
         },
         version: Some("1.0.0".to_string()),
         output_style: None,
@@ -101,6 +106,7 @@ fn test_output_style_in_json() {
         vim: None,
         agent: None,
         worktree: None,
+        remote: None,
     };
 
     let json_no_style: Value = build_json_output(
@@ -166,6 +172,8 @@ fn test_multiple_output_styles() {
             workspace: HookWorkspace {
                 current_dir: "/tmp/project".to_string(),
                 project_dir: Some("/tmp/project".to_string()),
+                added_dirs: Vec::new(),
+                git_worktree: None,
             },
             version: Some("1.0.0".to_string()),
             output_style: Some(OutputStyle {
@@ -179,6 +187,7 @@ fn test_multiple_output_styles() {
             vim: None,
             agent: None,
             worktree: None,
+            remote: None,
         };
 
         let json: Value = build_json_output(

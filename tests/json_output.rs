@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use claude_statusline::display::build_json_output;
-use claude_statusline::models::hook::{HookJson, HookModel, HookWorkspace};
+use claude_statusline::models::hook::{HookJson, HookModel, HookRemote, HookWorkspace};
 
 #[test]
 fn json_output_shape_minimal() {
@@ -16,6 +16,8 @@ fn json_output_shape_minimal() {
         workspace: HookWorkspace {
             current_dir: "/tmp/project".to_string(),
             project_dir: Some("/tmp/project".to_string()),
+            added_dirs: vec!["/tmp/project/packages/docs".to_string()],
+            git_worktree: Some("feature-footer".to_string()),
         },
         version: Some("test".to_string()),
         output_style: None,
@@ -27,6 +29,9 @@ fn json_output_shape_minimal() {
         vim: None,
         agent: None,
         worktree: None,
+        remote: Some(HookRemote {
+            session_id: "remote-123".to_string(),
+        }),
     };
 
     let json: Value = build_json_output(
@@ -78,6 +83,7 @@ fn json_output_shape_minimal() {
         "cwd",
         "project_dir",
         "version",
+        "workspace",
         "provider",
         "reset_at",
         "session",
@@ -93,6 +99,16 @@ fn json_output_shape_minimal() {
     // Model sub-keys
     assert_eq!(json["model"]["id"], "claude-3.5-sonnet");
     assert_eq!(json["model"]["display_name"], "Claude 3.5 Sonnet");
+    assert_eq!(json["cwd"], "/tmp/project");
+    assert_eq!(json["project_dir"], "/tmp/project");
+    assert_eq!(json["workspace"]["current_dir"], "/tmp/project");
+    assert_eq!(json["workspace"]["project_dir"], "/tmp/project");
+    assert_eq!(json["workspace"]["git_worktree"], "feature-footer");
+    assert_eq!(
+        json["workspace"]["added_dirs"][0],
+        "/tmp/project/packages/docs"
+    );
+    assert_eq!(json["remote"]["session_id"], "remote-123");
 
     // Basic numeric fields exist and are numbers
     assert!(json["session"]["cost_usd"].is_number());
@@ -126,6 +142,8 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         workspace: HookWorkspace {
             current_dir: "/tmp/project".to_string(),
             project_dir: Some("/tmp/project".to_string()),
+            added_dirs: Vec::new(),
+            git_worktree: None,
         },
         version: Some("test".to_string()),
         output_style: None,
@@ -137,6 +155,7 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         vim: None,
         agent: None,
         worktree: None,
+        remote: None,
     };
 
     let json: Value = build_json_output(
@@ -200,6 +219,8 @@ fn json_output_context_limit_override_from_hook() {
         workspace: HookWorkspace {
             current_dir: "/tmp/project".to_string(),
             project_dir: Some("/tmp/project".to_string()),
+            added_dirs: Vec::new(),
+            git_worktree: None,
         },
         version: Some("test".to_string()),
         output_style: None,
@@ -211,6 +232,7 @@ fn json_output_context_limit_override_from_hook() {
         vim: None,
         agent: None,
         worktree: None,
+        remote: None,
     };
 
     // Without override, unknown model defaults to 200k
