@@ -329,7 +329,10 @@ fn read_from_macos_keychain() -> Option<String> {
         let mut hasher = Sha256::new();
         hasher.update(config_dir.as_bytes());
         let hash = hasher.finalize();
-        let suffix = format!("{:x}", hash).chars().take(8).collect::<String>();
+        let mut suffix = String::with_capacity(8);
+        for byte in hash.iter().take(4) {
+            suffix.push_str(&format!("{:02x}", byte));
+        }
         service_name.push('-');
         service_name.push_str(&suffix);
     }
