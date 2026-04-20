@@ -7,6 +7,7 @@ use crate::tokens;
 use crate::usage_api::is_direct_claude_api;
 use std::env;
 use std::fmt::Write as _;
+use std::path::Path;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // UNICODE SYMBOLS - Matching Claude Code's icon set
@@ -246,11 +247,52 @@ fn hook_worktree_name(hook: &HookJson) -> Option<&str> {
         .filter(|name| !name.is_empty())
 }
 
+fn is_claude_internal_worktree_path(path: &str) -> bool {
+    path.contains("/.claude/worktrees/")
+}
+
+fn path_basename(path: &str) -> Option<&str> {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+}
+
+fn should_show_header_worktree(hook: &HookJson) -> bool {
+    let Some(worktree_name) = hook_worktree_name(hook) else {
+        return false;
+    };
+    if is_claude_internal_worktree_path(&hook.workspace.current_dir) {
+        return false;
+    }
+
+    !path_basename(&hook.workspace.current_dir)
+        .is_some_and(|base| base.eq_ignore_ascii_case(worktree_name))
+}
+
+fn should_show_added_dirs(hook: &HookJson) -> bool {
+    match hook.workspace.added_dirs.as_slice() {
+        [] => false,
+        [only_dir] => {
+            let only_path = Path::new(only_dir);
+            let matches_project = hook
+                .workspace
+                .project_dir
+                .as_deref()
+                .is_some_and(|project_dir| only_path == Path::new(project_dir));
+            let matches_current = only_path == Path::new(&hook.workspace.current_dir);
+
+            !(matches_project || matches_current)
+        }
+        _ => true,
+    }
+}
+
 fn added_dirs_segment(hook: &HookJson, tc: bool) -> Option<String> {
-    let count = hook.workspace.added_dirs.len();
-    if count == 0 {
+    if !should_show_added_dirs(hook) {
         return None;
     }
+    let count = hook.workspace.added_dirs.len();
 
     Some(format!(
         "{}{}",
@@ -621,7 +663,9 @@ fn render_header_line(
     {
         header_parts.push(wrap_header_segment(git_seg, tc));
     }
-    if let Some(wt_seg) = worktree_segment(hook, git_info, tc, profile.width) {
+    if should_show_header_worktree(hook)
+        && let Some(wt_seg) = worktree_segment(hook, git_info, tc, profile.width)
+    {
         header_parts.push(wrap_header_segment(wt_seg, tc));
     }
     if let Some(dirs_seg) = added_dirs_segment(hook, tc) {
@@ -1287,6 +1331,10 @@ mod tests {
         Args::parse_from(["claude_statusline"])
     }
 
+    fn long_args() -> Args {
+        Args::parse_from(["claude_statusline", "--labels", "long"])
+    }
+
     fn test_hook(added_dirs: Vec<&str>, git_worktree: Option<&str>) -> HookJson {
         HookJson {
             session_id: "sess-test".to_string(),
@@ -1401,7 +1449,7 @@ mod tests {
         let line = render_header_line(
             &hook,
             Some(&git_info),
-            &test_args(),
+            &long_args(),
             None,
             None,
             None,
@@ -1415,6 +1463,96 @@ mod tests {
         assert!(line.contains("+2"));
         assert!(line.contains("wt:"));
         assert!(line.contains("hook-wt"));
+    }
+
+    #[test]
+    fn short_rich_header_hides_redundant_workspace_noise() {
+        let mut hook = test_hook(vec!["/tmp/project"], Some("fix+voyageai-rate-limit-retry"));
+        hook.workspace.current_dir =
+            "/tmp/project/.claude/worktrees/fix+voyageai-rate-limit-retry".to_string();
+
+        let git_info = GitInfo {
+            branch: Some("fix/voyageai-rate-limit-retry".to_string()),
+            short_commit: Some("abc1234".to_string()),
+            is_clean: Some(false),
+            ahead: Some(3),
+            behind: Some(0),
+            remote_url: None,
+            is_head_on_remote: None,
+            worktree_count: Some(2),
+            is_linked_worktree: Some(true),
+        };
+
+        let line = render_header_line(
+            &hook,
+            Some(&git_info),
+            &test_args(),
+            None,
+            Some((12, 4)),
+            None,
+            None,
+            Some(200_000),
+            false,
+        )
+        .unwrap_or_default();
+
+        assert!(line.contains(".claude/worktrees"));
+        assert!(!line.contains("wt:"));
+        assert!(!line.contains("dirs:"));
+    }
+
+    #[test]
+    fn rich_usage_row_keeps_existing_detail_by_default() {
+        let summary = UsageSummary {
+            seven_day: UsageLimit {
+                utilization: Some(22.0),
+                ..UsageLimit::default()
+            },
+            seven_day_sonnet: UsageLimit {
+                utilization: Some(0.0),
+                ..UsageLimit::default()
+            },
+            extra_usage: Some(crate::usage_api::ExtraUsage {
+                is_enabled: true,
+                monthly_limit: Some(60.0),
+                used_credits: Some(17.0),
+                utilization: Some(28.3),
+            }),
+            ..UsageSummary::default()
+        };
+
+        let line = render_rich_text_output(
+            &test_args(),
+            "claude-opus-4-7",
+            "Opus 4.7",
+            3.0,
+            11.99,
+            11.99,
+            Some(2.0),
+            None,
+            274.0,
+            None,
+            None,
+            0.0,
+            Some((133_800, 13)),
+            0,
+            0,
+            0,
+            0,
+            0,
+            Some(&summary),
+            Some(1_000_000),
+        );
+
+        assert!(line.contains("session:"));
+        assert!(line.contains("today:"));
+        assert!(line.contains("win:"));
+        assert!(line.contains("7d:"));
+        assert!(line.contains("sonnet:"));
+        assert!(line.contains("ex:"));
+        assert!(line.contains("context:"));
+        assert!(line.contains("1M"));
+        assert!(line.contains("13%"));
     }
 }
 
