@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [1.3.2](https://github.com/camjac251/rust-statusline/compare/v1.3.1...v1.3.2) - 2026-04-28
+
+### Fixed
+
+- *(deps)* update rust crate gix to 0.82.0
+
 ## [1.3.1](https://github.com/camjac251/rust-statusline/compare/v1.3.0...v1.3.1) - 2026-04-20
 
 ### Fixed
