@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [1.4.0](https://github.com/camjac251/rust-statusline/compare/v1.3.3...v1.4.0) - 2026-05-01
+
+### Added
+
+- *(cli)* add diagnostics config and setup
+
 ## [1.3.3](https://github.com/camjac251/rust-statusline/compare/v1.3.2...v1.3.3) - 2026-05-01
 
 ### Fixed
