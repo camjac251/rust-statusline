@@ -10,11 +10,14 @@
 use anyhow::{Context, Result};
 use chrono::{Local, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
+
+const USAGE_CACHE_VERSION: &str = "2";
 
 /// Global usage result containing both session-specific and global costs
 #[derive(Debug, Clone)]
@@ -135,6 +138,13 @@ fn init_schema(conn: &Connection) -> Result<()> {
         }
     }
 
+    let cache_version = get_metadata(conn, "usage_cache_version")?;
+    if cache_version.as_ref().map(|m| m.value.as_str()) != Some(USAGE_CACHE_VERSION) {
+        conn.execute("DELETE FROM sessions", [])?;
+        conn.execute("DELETE FROM metadata WHERE key LIKE 'global_sum:%'", [])?;
+        set_metadata(conn, "usage_cache_version", USAGE_CACHE_VERSION)?;
+    }
+
     Ok(())
 }
 
@@ -219,8 +229,9 @@ fn parse_transcript_today_cost(transcript_path: &Path, today: &str) -> Result<(f
     let file = File::open(transcript_path)?;
     let reader = BufReader::new(file);
 
-    let mut today_cost = 0.0;
-    let mut entry_count = 0;
+    let mut aggregated_costs: HashMap<String, f64> = HashMap::new();
+    let mut last_seen_raw: HashMap<String, (u64, u64, u64, u64)> = HashMap::new();
+    let mut force_delta_mode: HashMap<String, bool> = HashMap::new();
 
     for line in reader.lines() {
         let line = line?;
@@ -252,16 +263,37 @@ fn parse_transcript_today_cost(transcript_path: &Path, today: &str) -> Result<(f
             continue;
         }
 
+        let message = v.get("message");
+        let mid = message
+            .and_then(|m| m.get("id"))
+            .and_then(|m| m.as_str())
+            .map(|s| s.to_string());
+        let rid = v
+            .get("requestId")
+            .or_else(|| v.get("request_id"))
+            .and_then(|r| r.as_str())
+            .map(|s| s.to_string());
+
         if let Some(cost_val) = v.get("costUSD").or_else(|| v.get("cost_usd"))
             && let Some(cost) = cost_val
                 .as_f64()
                 .or_else(|| cost_val.as_str().and_then(|s| s.parse::<f64>().ok()))
         {
-            today_cost += cost;
-            entry_count += 1;
+            let agg_key = if let Some(ref r) = rid {
+                format!("R:{}", r)
+            } else if let Some(ref m) = mid {
+                format!("M:{}", m)
+            } else {
+                format!("C:{}|{}", timestamp_str.unwrap_or_default(), cost)
+            };
+            let current = aggregated_costs.entry(agg_key).or_insert(cost);
+            if cost > *current {
+                *current = cost;
+            }
+            continue;
         }
 
-        if let Some(message) = v.get("message")
+        if let Some(message) = message
             && let Some(usage) = message.get("usage")
         {
             let input = usage
@@ -281,33 +313,73 @@ fn parse_transcript_today_cost(transcript_path: &Path, today: &str) -> Result<(f
                 .and_then(|t| t.as_u64())
                 .unwrap_or(0);
 
-            if (input > 0 || output > 0 || cache_create > 0 || cache_read > 0)
-                && let Some(base_p) = crate::pricing::pricing_for_model({
-                    v.get("model")
-                        .or_else(|| message.get("model"))
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("claude-sonnet-4")
-                })
-            {
+            if input > 0 || output > 0 || cache_create > 0 || cache_read > 0 {
                 let model_id = v
                     .get("model")
                     .or_else(|| message.get("model"))
                     .and_then(|m| m.as_str())
                     .unwrap_or("claude-sonnet-4");
-                let total_in = input + cache_create + cache_read;
-                let p = crate::pricing::apply_tiered_pricing(base_p, model_id, total_in);
+                let cost = crate::pricing::calculate_cost_for_usage(model_id, usage);
 
-                let cost = (input as f64) * p.in_per_tok
-                    + (output as f64) * p.out_per_tok
-                    + (cache_create as f64) * p.cache_create_per_tok
-                    + (cache_read as f64) * p.cache_read_per_tok;
+                let composite = format!(
+                    "{}|{}|{}|{}|{}|{}",
+                    timestamp_str.unwrap_or_default(),
+                    model_id,
+                    input,
+                    output,
+                    cache_create,
+                    cache_read
+                );
+                let agg_key = if let Some(ref r) = rid {
+                    format!("R:{}", r)
+                } else if let Some(ref m) = mid {
+                    format!("M:{}", m)
+                } else {
+                    format!("F:{}", composite)
+                };
 
-                today_cost += cost;
-                entry_count += 1;
+                let prev_raw = last_seen_raw.get(&agg_key).copied();
+                let mut is_delta = *force_delta_mode.get(&agg_key).unwrap_or(&false);
+                if let Some((prev_input, prev_output, prev_cache_create, prev_cache_read)) =
+                    prev_raw
+                {
+                    if input < prev_input
+                        || output < prev_output
+                        || cache_create < prev_cache_create
+                        || cache_read < prev_cache_read
+                    {
+                        force_delta_mode.insert(agg_key.clone(), true);
+                        is_delta = true;
+                    }
+                }
+
+                if is_delta {
+                    let (prev_input, prev_output, prev_cache_create, prev_cache_read) =
+                        prev_raw.unwrap_or((0, 0, 0, 0));
+                    last_seen_raw.insert(
+                        agg_key.clone(),
+                        (
+                            prev_input + input,
+                            prev_output + output,
+                            prev_cache_create + cache_create,
+                            prev_cache_read + cache_read,
+                        ),
+                    );
+                    *aggregated_costs.entry(agg_key).or_insert(0.0) += cost;
+                } else {
+                    last_seen_raw
+                        .insert(agg_key.clone(), (input, output, cache_create, cache_read));
+                    let current = aggregated_costs.entry(agg_key).or_insert(cost);
+                    if cost > *current {
+                        *current = cost;
+                    }
+                }
             }
         }
     }
 
+    let today_cost = aggregated_costs.values().sum();
+    let entry_count = aggregated_costs.len();
     Ok((today_cost, entry_count))
 }
 
@@ -612,6 +684,48 @@ mod tests {
 
         assert_eq!(cost, 1.23);
         unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
+    }
+
+    #[test]
+    fn test_parse_transcript_today_cost_deduplicates_cumulative_usage() {
+        let temp_dir = TempDir::new().unwrap();
+        let transcript_path = temp_dir.path().join("transcript.jsonl");
+        let ts = Local::now().to_rfc3339();
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let first = serde_json::json!({
+            "timestamp": ts,
+            "requestId": "req-1",
+            "message": {
+                "id": "msg-1",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 1000,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+        let second = serde_json::json!({
+            "timestamp": ts,
+            "requestId": "req-1",
+            "message": {
+                "id": "msg-1",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 2000,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+        std::fs::write(&transcript_path, format!("{}\n{}\n", first, second)).unwrap();
+
+        let (cost, count) = parse_transcript_today_cost(&transcript_path, &today).unwrap();
+
+        assert_eq!(count, 1);
+        assert!((cost - 0.03).abs() < 1e-10);
     }
 
     #[test]

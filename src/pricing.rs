@@ -24,6 +24,7 @@
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
 
@@ -114,9 +115,37 @@ fn pricing_from_config(model_id: &str) -> Option<Pricing> {
         });
     }
 
-    // Try partial matches
+    // Try canonical model names before partial matching. Order matters: more
+    // specific 4.x variants must win before their family prefix.
+    if let Some(key) = canonical_pricing_key(&m) {
+        if let Some(model_pricing) = config.models.get(key) {
+            return Some(Pricing {
+                in_per_tok: model_pricing.input,
+                out_per_tok: model_pricing.output,
+                cache_create_per_tok: model_pricing.cache_create,
+                cache_read_per_tok: model_pricing.cache_read,
+            });
+        }
+    }
+
+    // Try provider/date suffix matches and prefer the most specific key.
+    if let Some((_, model_pricing)) = config
+        .models
+        .iter()
+        .filter(|(key, _)| m.contains(key.as_str()))
+        .max_by_key(|(key, _)| key.len())
+    {
+        return Some(Pricing {
+            in_per_tok: model_pricing.input,
+            out_per_tok: model_pricing.output,
+            cache_create_per_tok: model_pricing.cache_create,
+            cache_read_per_tok: model_pricing.cache_read,
+        });
+    }
+
+    // Try short user-provided fragments such as "opus-4-6".
     for (key, model_pricing) in &config.models {
-        if m.contains(key) || key.contains(&m) {
+        if key.contains(&m) {
             return Some(Pricing {
                 in_per_tok: model_pricing.input,
                 out_per_tok: model_pricing.output,
@@ -275,15 +304,115 @@ pub fn fast_mode_multiplier(model_id: &str) -> f64 {
     if let Some(mp) = config.models.get(&m) {
         return mp.fast_mode_multiplier.unwrap_or(1.0);
     }
-    // Partial match: only when no exact match was found
-    for (key, mp) in &config.models {
-        if let Some(mult) = mp.fast_mode_multiplier {
-            if m.contains(key) || key.contains(&m) {
-                return mult;
-            }
+    if let Some(key) = canonical_pricing_key(&m) {
+        if let Some(mp) = config.models.get(key) {
+            return mp.fast_mode_multiplier.unwrap_or(1.0);
         }
     }
+    // Partial match: only when no exact match was found
+    if let Some((_, mp)) = config
+        .models
+        .iter()
+        .filter(|(key, mp)| mp.fast_mode_multiplier.is_some() && m.contains(key.as_str()))
+        .max_by_key(|(key, _)| key.len())
+    {
+        return mp.fast_mode_multiplier.unwrap_or(1.0);
+    }
     1.0
+}
+
+fn canonical_pricing_key(model_id: &str) -> Option<&'static str> {
+    let ordered = [
+        ("opus-4-6", "claude-opus-4-6"),
+        ("opus-4-5", "claude-opus-4-5"),
+        ("opus-4-1", "claude-opus-4-1"),
+        ("opus-4", "claude-opus-4"),
+        ("sonnet-4-6", "claude-sonnet-4-6"),
+        ("sonnet-4-5", "claude-sonnet-4-5"),
+        ("sonnet-4", "claude-sonnet-4"),
+        ("haiku-4-5", "claude-haiku-4-5"),
+        ("3-7-sonnet", "claude-3-7-sonnet"),
+        ("3-5-sonnet", "claude-3-5-sonnet"),
+        ("3-5-haiku", "claude-3-5-haiku"),
+        ("3-opus", "claude-3-opus"),
+        ("3-haiku", "claude-3-haiku"),
+    ];
+
+    ordered
+        .iter()
+        .find_map(|(needle, key)| model_id.contains(needle).then_some(*key))
+}
+
+fn usage_u64(usage: &Value, key: &str) -> u64 {
+    usage.get(key).and_then(|n| n.as_u64()).unwrap_or(0)
+}
+
+fn usage_speed(usage: &Value) -> Option<&str> {
+    usage.get("speed").and_then(|s| s.as_str())
+}
+
+fn web_search_per_request() -> f64 {
+    PRICING_CONFIG
+        .as_ref()
+        .map(|c| c.additional_costs.web_search_per_request)
+        .filter(|v| *v > 0.0)
+        .unwrap_or(0.01)
+}
+
+fn flat_cost_for_usage(model_id: &str, usage: &Value) -> f64 {
+    let Some(base_p) = pricing_for_model(model_id) else {
+        return 0.0;
+    };
+
+    let input = usage_u64(usage, "input_tokens");
+    let output = usage_u64(usage, "output_tokens");
+    let cache_create = usage_u64(usage, "cache_creation_input_tokens");
+    let cache_read = usage_u64(usage, "cache_read_input_tokens");
+    let web_search_requests = usage
+        .get("server_tool_use")
+        .and_then(|o| o.get("web_search_requests"))
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0);
+
+    let p = apply_tiered_pricing(base_p, model_id, input + cache_create + cache_read);
+    let token_cost = (input as f64) * p.in_per_tok
+        + (output as f64) * p.out_per_tok
+        + (cache_create as f64) * p.cache_create_per_tok
+        + (cache_read as f64) * p.cache_read_per_tok;
+    let web_search_cost = (web_search_requests as f64) * web_search_per_request();
+
+    let token_multiplier = if usage_speed(usage) == Some("fast") {
+        fast_mode_multiplier(model_id)
+    } else {
+        1.0
+    };
+
+    token_cost * token_multiplier + web_search_cost
+}
+
+/// Calculate Claude Code-compatible cost for a usage object.
+///
+/// Mirrors `calculateUSDCost` plus `addToTotalSessionCost` in Claude Code:
+/// token/cache costs are model-priced, Opus 4.6 fast mode affects token/cache
+/// tiers only, web search remains a flat per-request charge, and advisor
+/// iteration usage is charged recursively under its own model.
+pub fn calculate_cost_for_usage(model_id: &str, usage: &Value) -> f64 {
+    let advisor_cost = usage
+        .get("iterations")
+        .and_then(|v| v.as_array())
+        .map(|iterations| {
+            iterations
+                .iter()
+                .filter(|it| it.get("type").and_then(|s| s.as_str()) == Some("advisor_message"))
+                .filter_map(|it| {
+                    let model = it.get("model").and_then(|s| s.as_str())?;
+                    Some(calculate_cost_for_usage(model, it))
+                })
+                .sum::<f64>()
+        })
+        .unwrap_or(0.0);
+
+    flat_cost_for_usage(model_id, usage) + advisor_cost
 }
 
 /// Apply tiered pricing multipliers if applicable based on token count
@@ -391,9 +520,56 @@ mod tests {
     fn test_fast_mode_multiplier() {
         // Opus 4.6 has 6x fast mode
         assert!((fast_mode_multiplier("claude-opus-4-6") - 6.0).abs() < 1e-10);
+        assert!((fast_mode_multiplier("us.anthropic.claude-opus-4-6-v1") - 6.0).abs() < 1e-10);
         // Other models have no fast mode (1x)
         assert!((fast_mode_multiplier("claude-sonnet-4-6") - 1.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("claude-sonnet-4-5") - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_provider_model_uses_specific_pricing() {
+        let p = pricing_for_model("us.anthropic.claude-opus-4-6-v1").unwrap();
+        assert!((p.in_per_tok - 5e-6).abs() < 1e-10);
+        assert!((p.out_per_tok - 25e-6).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_fast_mode_does_not_multiply_web_search_cost() {
+        let usage = serde_json::json!({
+            "input_tokens": 1_000_000,
+            "output_tokens": 1_000_000,
+            "cache_creation_input_tokens": 1_000_000,
+            "cache_read_input_tokens": 1_000_000,
+            "server_tool_use": { "web_search_requests": 2 },
+            "speed": "fast"
+        });
+
+        let cost = calculate_cost_for_usage("claude-opus-4-6", &usage);
+        assert!((cost - 220.52).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_advisor_iterations_are_charged() {
+        let usage = serde_json::json!({
+            "input_tokens": 1_000_000,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "iterations": [
+                {
+                    "type": "advisor_message",
+                    "model": "claude-opus-4-6",
+                    "input_tokens": 1_000_000,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "speed": "fast"
+                }
+            ]
+        });
+
+        let cost = calculate_cost_for_usage("claude-sonnet-4-6", &usage);
+        assert!((cost - 33.0).abs() < 1e-10);
     }
 
     #[test]

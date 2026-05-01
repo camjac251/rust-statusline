@@ -22,7 +22,7 @@ use std::time::SystemTime;
 use walkdir::WalkDir;
 
 use crate::models::{Entry, MessageUsage, RateLimitInfo, TranscriptLine};
-use crate::pricing::{apply_tiered_pricing, fast_mode_multiplier, pricing_for_model};
+use crate::pricing::calculate_cost_for_usage;
 use crate::utils::{context_limit_for_model_display, parse_iso_date, system_overhead_tokens};
 
 /// Session-specific state extracted from the session's own transcript file.
@@ -102,7 +102,11 @@ pub fn parse_session_state(transcript_path: &Path) -> SessionState {
             continue;
         }
 
-        if let Some(spd) = v.get("speed").and_then(|s| s.as_str()) {
+        if let Some(spd) = usage
+            .get("speed")
+            .and_then(|s| s.as_str())
+            .or_else(|| v.get("speed").and_then(|s| s.as_str()))
+        {
             state.speed = Some(spd.to_string());
         }
         if let Some(mdl) = msg.get("model").and_then(|s| s.as_str()) {
@@ -929,9 +933,9 @@ pub fn scan_usage(
                     .map(|s| s.to_string());
                 let speed = v
                     .get("speed")
+                    .or_else(|| usage.get("speed"))
                     .and_then(|s| s.as_str())
                     .map(|s| s.to_string());
-                let is_fast = speed.as_deref() == Some("fast");
                 let agent_id = v
                     .get("agentId")
                     .and_then(|s| s.as_str())
@@ -980,20 +984,7 @@ pub fn scan_usage(
                     sid_by_rid.insert(r.clone(), s.clone());
                 }
                 if let Some(ref mdl) = model {
-                    if let Some(base_p) = pricing_for_model(mdl) {
-                        let total_in = input + cache_create + cache_read;
-                        let p = apply_tiered_pricing(base_p, mdl, total_in);
-
-                        cost = (input as f64) * p.in_per_tok
-                            + (output as f64) * p.out_per_tok
-                            + (cache_create as f64) * p.cache_create_per_tok
-                            + (cache_read as f64) * p.cache_read_per_tok
-                            + (web_search_reqs as f64) * 0.01;
-
-                        if is_fast {
-                            cost *= fast_mode_multiplier(mdl);
-                        }
-                    }
+                    cost = calculate_cost_for_usage(mdl, usage);
                 }
                 // Decide whether updates for this key are cumulative totals or per-chunk deltas
                 let key_clone = agg_key.clone();
@@ -1407,5 +1398,108 @@ fn write_persisted_reset_state(
             "fallback_percentage": fallback_percentage,
         });
         let _ = std::fs::write(p, obj.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn write_transcript_line(
+        session_id: &str,
+        line: serde_json::Value,
+    ) -> Result<tempfile::TempDir> {
+        let dir = tempdir()?;
+        let project = dir.path().join("projects").join("project");
+        fs::create_dir_all(&project)?;
+        let transcript = project.join(format!("{}.jsonl", session_id));
+        fs::write(&transcript, format!("{}\n", line))?;
+        Ok(dir)
+    }
+
+    #[test]
+    fn scan_usage_reads_nested_fast_speed_and_keeps_web_search_flat() -> Result<()> {
+        let session_id = format!(
+            "fast-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let line = json!({
+            "type": "assistant",
+            "sessionId": session_id,
+            "timestamp": Local::now().to_rfc3339(),
+            "message": {
+                "role": "assistant",
+                "id": "msg-fast",
+                "model": "claude-opus-4-6",
+                "usage": {
+                    "input_tokens": 1_000_000,
+                    "output_tokens": 1_000_000,
+                    "cache_creation_input_tokens": 1_000_000,
+                    "cache_read_input_tokens": 1_000_000,
+                    "server_tool_use": { "web_search_requests": 2 },
+                    "speed": "fast"
+                }
+            }
+        });
+        let dir = write_transcript_line(&session_id, line)?;
+        let base = dir.path().to_path_buf();
+
+        let (session_cost, session_today_cost, today_cost, entries, _, _, _) =
+            scan_usage(&[base], &session_id, None, None)?;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].speed.as_deref(), Some("fast"));
+        assert!((entries[0].cost - 220.52).abs() < 1e-10);
+        assert!((session_cost - 220.52).abs() < 1e-10);
+        assert!((session_today_cost - 220.52).abs() < 1e-10);
+        assert!((today_cost - 220.52).abs() < 1e-10);
+        Ok(())
+    }
+
+    #[test]
+    fn scan_usage_includes_advisor_iteration_cost() -> Result<()> {
+        let session_id = format!(
+            "advisor-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let line = json!({
+            "type": "assistant",
+            "sessionId": session_id,
+            "timestamp": Local::now().to_rfc3339(),
+            "message": {
+                "role": "assistant",
+                "id": "msg-advisor",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 1_000_000,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "iterations": [
+                        {
+                            "type": "advisor_message",
+                            "model": "claude-opus-4-6",
+                            "input_tokens": 1_000_000,
+                            "output_tokens": 0,
+                            "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "speed": "fast"
+                        }
+                    ]
+                }
+            }
+        });
+        let dir = write_transcript_line(&session_id, line)?;
+        let base = dir.path().to_path_buf();
+
+        let (session_cost, _, _, entries, _, _, _) = scan_usage(&[base], &session_id, None, None)?;
+
+        assert_eq!(entries.len(), 1);
+        assert!((entries[0].cost - 33.0).abs() < 1e-10);
+        assert!((session_cost - 33.0).abs() < 1e-10);
+        Ok(())
     }
 }
