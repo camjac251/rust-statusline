@@ -75,6 +75,8 @@ fn test_output_style_in_json() {
         None,  // gastown_info
         false, // is_fast_mode
         None,  // subagent_breakdown
+        None,  // cost_provenance
+        None,  // prompt_cache
     );
 
     // Verify output_style is present in JSON
@@ -150,6 +152,8 @@ fn test_output_style_in_json() {
         None,  // gastown_info
         false, // is_fast_mode
         None,  // subagent_breakdown
+        None,  // cost_provenance
+        None,  // prompt_cache
     );
 
     // Verify output_style is null when not present
@@ -230,6 +234,8 @@ fn test_multiple_output_styles() {
             None,  // gastown_info
             false, // is_fast_mode
             None,  // subagent_breakdown
+            None,  // cost_provenance
+            None,  // prompt_cache
         );
 
         assert_eq!(

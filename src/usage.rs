@@ -37,6 +37,8 @@ pub struct SessionState {
     pub service_tier: Option<String>,
     /// Session cost from the most recent SDK result message
     pub session_cost: Option<f64>,
+    /// Timestamp of the latest assistant response in this session
+    pub last_assistant_at: Option<DateTime<Utc>>,
 }
 
 /// Parse session-specific state directly from a transcript file.
@@ -82,6 +84,20 @@ pub fn parse_session_state(transcript_path: &Path) -> SessionState {
         };
         if msg.get("role").and_then(|s| s.as_str()) != Some("assistant") {
             continue;
+        }
+        if let Some(ts) = v
+            .get("timestamp")
+            .and_then(|s| s.as_str())
+            .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+        {
+            if state
+                .last_assistant_at
+                .map(|last| ts > last)
+                .unwrap_or(true)
+            {
+                state.last_assistant_at = Some(ts);
+            }
         }
         let usage = match msg.get("usage") {
             Some(u) => u,

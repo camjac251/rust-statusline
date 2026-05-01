@@ -2,7 +2,9 @@ use chrono::{DateTime, Local, Timelike};
 
 use crate::beads::format_bead_display;
 use crate::gastown::format_gastown_display;
+use crate::models::PromptCacheInfo;
 use crate::models::{BeadsInfo, GasTownInfo};
+use crate::provenance::CostProvenance;
 use crate::tokens;
 use crate::usage_api::is_direct_claude_api;
 use std::env;
@@ -87,8 +89,9 @@ use crate::cli::{Args, LabelsArg, TimeFormatArg};
 use crate::models::{Block, GitInfo, HookJson, RateLimitInfo};
 use crate::usage_api::{UsageLimit, UsageSummary};
 use crate::utils::{
-    context_limit_for_model_display, deduce_provider_from_model, format_currency, format_path,
-    format_tokens, reserved_output_tokens_for_model, system_overhead_tokens,
+    auto_compact_enabled, auto_compact_headroom_tokens, context_limit_for_model_display,
+    deduce_provider_from_model, format_currency, format_path, format_tokens,
+    reserved_output_tokens_for_model, system_overhead_tokens,
 };
 use crate::window::window_bounds;
 
@@ -130,6 +133,54 @@ fn usage_limit_json(limit: &UsageLimit) -> serde_json::Value {
         "remaining": limit.remaining,
         "resets_at": limit.resets_at.map(|d| d.to_rfc3339()),
     })
+}
+
+fn prompt_cache_json(info: Option<&PromptCacheInfo>) -> serde_json::Value {
+    info.map(|info| {
+        serde_json::json!({
+            "ttl_seconds": info.ttl_seconds,
+            "last_response_at": info.last_response_at.to_rfc3339(),
+            "expires_at": info.expires_at().to_rfc3339(),
+            "age_seconds": info.age_seconds(),
+            "remaining_seconds": info.remaining_seconds(),
+            "percent_remaining": (info.percent_remaining() * 10.0).round() / 10.0,
+        })
+    })
+    .unwrap_or(serde_json::Value::Null)
+}
+
+fn format_duration_compact(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    if seconds >= 3600 {
+        let hours = seconds / 3600;
+        let mins = (seconds % 3600) / 60;
+        if mins == 0 {
+            format!("{}h", hours)
+        } else {
+            format!("{}h{}m", hours, mins)
+        }
+    } else if seconds >= 60 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}s", seconds)
+    }
+}
+
+fn render_prompt_cache_segment(info: &PromptCacheInfo, tc: bool) -> String {
+    let remaining = info.remaining_seconds();
+    let age = info.age_seconds();
+    let token = if remaining == 0 {
+        tokens::WARNING
+    } else {
+        tokens::PRIMARY_DIM
+    };
+    format!(
+        "{}{} {}{}",
+        muted_label("cache:", tc),
+        token.paint(&format_duration_compact(remaining), tc),
+        muted_label("age:", tc),
+        tokens::PRIMARY_DIM.paint(&format_duration_compact(age), tc)
+    )
 }
 
 fn is_truecolor_enabled(args: &Args) -> bool {
@@ -965,6 +1016,7 @@ fn render_rich_text_output(
     web_search_requests: u64,
     usage_limits: Option<&UsageSummary>,
     context_limit_override: Option<u64>,
+    prompt_cache: Option<&PromptCacheInfo>,
 ) -> String {
     let term_width = get_terminal_width();
     let tc = is_truecolor_enabled(args);
@@ -1137,6 +1189,10 @@ fn render_rich_text_output(
         ));
     }
 
+    if let Some(info) = prompt_cache {
+        segments.push(render_prompt_cache_segment(info, tc));
+    }
+
     let ctx_label = match term_width {
         TerminalWidth::Narrow => "ctx:",
         _ => "context:",
@@ -1272,9 +1328,11 @@ pub fn print_text_output(
     _rate_limit: Option<&RateLimitInfo>,
     usage_limits: Option<&UsageSummary>,
     context_limit_override: Option<u64>,
+    cost_provenance: Option<&CostProvenance>,
+    prompt_cache: Option<&PromptCacheInfo>,
 ) {
     let profile = render_profile();
-    let line = if profile.mode == RenderMode::Compact {
+    let mut line = if profile.mode == RenderMode::Compact {
         render_compact_text_output(
             hook,
             git_info,
@@ -1313,8 +1371,27 @@ pub fn print_text_output(
             web_search_requests,
             usage_limits,
             context_limit_override,
+            prompt_cache,
         )
     };
+
+    if args.show_provenance
+        && let Some(provenance) = cost_provenance
+    {
+        let tc = is_truecolor_enabled(args);
+        let compact = profile.mode == RenderMode::Compact;
+        let _ = write!(
+            line,
+            "{}{}{} {}{} {}{}",
+            separator(tc, compact),
+            muted_label("src:", tc),
+            tokens::PRIMARY_DIM.paint(provenance.session_cost.as_str(), tc),
+            muted_label("today:", tc),
+            tokens::PRIMARY_DIM.paint(provenance.today_cost.as_str(), tc),
+            muted_label("price:", tc),
+            tokens::PRIMARY_DIM.paint(provenance.pricing.as_str(), tc)
+        );
+    }
 
     println!("{}", line);
 }
@@ -1542,6 +1619,7 @@ mod tests {
             0,
             Some(&summary),
             Some(1_000_000),
+            None,
         );
 
         assert!(line.contains("session:"));
@@ -1604,6 +1682,8 @@ pub fn build_json_output(
     is_fast_mode: bool,
     // Per-subagent cost breakdown (computed from entries with agent_id)
     subagent_breakdown: Option<serde_json::Value>,
+    cost_provenance: Option<&CostProvenance>,
+    prompt_cache: Option<&PromptCacheInfo>,
 ) -> serde_json::Value {
     // Provider from env or deduced from model id
     let provider_env = env::var("CLAUDE_PROVIDER").ok().map(|s| {
@@ -1632,6 +1712,13 @@ pub fn build_json_output(
         None
     };
     let ctx_tokens_raw = ctx_tokens.map(|t| t.saturating_sub(overhead_value));
+    let ctx_usable_limit =
+        ctx_limit.saturating_sub(reserved_output_tokens_for_model(&hook.model.id));
+    let ctx_usable_percent = ctx_tokens.and_then(|tokens| {
+        (ctx_usable_limit > 0)
+            .then(|| ((tokens as f64 / ctx_usable_limit as f64) * 100.0).round() as u32)
+    });
+    let auto_compact_buffer = auto_compact_enabled().then(auto_compact_headroom_tokens);
     // Optional headroom and ETA for consumers
     let (context_headroom, context_eta_minutes) = if let Some(toks) = ctx_tokens {
         let head = (ctx_limit as i64 - toks as i64).max(0) as u64;
@@ -1766,6 +1853,7 @@ pub fn build_json_output(
         "reset_at": reset_iso,
         "session": {
             "cost_usd": (session_cost * 100.0).round() / 100.0,
+            "cost_source": cost_provenance.map(|p| p.session_cost.as_str()),
             "duration_ms": sess_duration_ms,
             "api_duration_ms": sess_api_ms,
             "lines_added": sess_lines_added,
@@ -1781,6 +1869,7 @@ pub fn build_json_output(
         },
         "today": {
             "cost_usd": (today_cost * 100.0).round() / 100.0,
+            "cost_source": cost_provenance.map(|p| p.today_cost.as_str()),
             "sessions_count": sessions_count
         },
         "block": block_json.clone(),
@@ -1792,11 +1881,21 @@ pub fn build_json_output(
             "percent": ctx_pct,
             "limit": ctx_limit,
             "limit_full": ctx_limit, // Same as limit, uses hook override when available
+            "usable_limit": ctx_usable_limit,
+            "usable_percent": ctx_usable_percent,
+            "auto_compact_buffer_tokens": auto_compact_buffer,
             "output_reserve": reserved_output_tokens_for_model(&hook.model.id),
             "output_reserve_used": ctx_tokens.map(|t| t.saturating_sub(ctx_limit)),
             "source": context_source,
             "headroom_tokens": context_headroom,
             "eta_minutes": context_eta_minutes
+        },
+        "prompt_cache": prompt_cache_json(prompt_cache),
+        "provenance": {
+            "session_cost": cost_provenance.map(|p| p.session_cost.as_str()),
+            "today_cost": cost_provenance.map(|p| p.today_cost.as_str()),
+            "pricing": cost_provenance.map(|p| p.pricing.as_str()),
+            "context": context_source
         },
         "usage_limits": usage_limits_value,
         "rate_limit": rate_limit.as_ref().map(|rl| serde_json::json!({
@@ -1961,6 +2060,8 @@ pub fn print_json_output(
     gastown_info: Option<&GasTownInfo>,
     is_fast_mode: bool,
     subagent_breakdown: Option<serde_json::Value>,
+    cost_provenance: Option<&CostProvenance>,
+    prompt_cache: Option<&PromptCacheInfo>,
 ) -> anyhow::Result<()> {
     let json = build_json_output(
         hook,
@@ -2003,6 +2104,8 @@ pub fn print_json_output(
         gastown_info,
         is_fast_mode,
         subagent_breakdown,
+        cost_provenance,
+        prompt_cache,
     );
     println!("{}", serde_json::to_string(&json)?);
     Ok(())

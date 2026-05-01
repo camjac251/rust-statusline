@@ -25,6 +25,12 @@ cargo clippy --all-targets --all-features -- -D warnings  # Lint (warnings = err
 # Run (expects JSON hook on stdin)
 echo '{"session_id":"...","transcript_path":"...","model":{"id":"...","display_name":"..."},"workspace":{"current_dir":"...","project_dir":"..."}}' \
   | ./target/release/claude_statusline
+
+# Diagnostics and setup
+claude_statusline doctor
+claude_statusline doctor --json
+claude_statusline init --dry-run
+claude_statusline init --refresh-interval 5
 ```
 
 ## Architecture
@@ -38,10 +44,13 @@ Pipeline: stdin JSON hook -> transcript parsing -> pricing -> display (text or J
 | `main.rs` | Entry point |
 | `lib.rs` | Library root, public API |
 | `cli.rs` | Argument parsing with env var fallbacks |
+| `config.rs` | Config file discovery and CLI/env/file precedence |
+| `doctor.rs` | Diagnostics and Claude Code `statusLine` installer |
 | `models/hook.rs` | Hook input (`HookMessage`) |
 | `models/entry.rs` | Transcript entries |
 | `models/block.rs` | Usage blocks |
 | `models/message.rs` | Message types |
+| `models/prompt_cache.rs` | Prompt cache countdown state |
 | `models/git.rs` | Git status structs |
 | `models/ratelimit.rs` | Rate limit info |
 | `models/beads.rs` | Beads models |
@@ -49,6 +58,7 @@ Pipeline: stdin JSON hook -> transcript parsing -> pricing -> display (text or J
 | `usage.rs` | Transcript analysis, session/window/daily metrics, burn rates |
 | `usage_api.rs` | OAuth usage API client with SQLite-cached responses |
 | `pricing.rs` | Model pricing tables (compile-time from `pricing.json`) |
+| `provenance.rs` | Cost, pricing, and context source metadata |
 | `cache.rs` | In-memory usage cache keyed by (session_id, project_dir) |
 | `db.rs` | SQLite persistent cache for cross-session usage tracking |
 | `window.rs` | Usage window calculations |
@@ -69,8 +79,12 @@ Pipeline: stdin JSON hook -> transcript parsing -> pricing -> display (text or J
 - Single-line JSON on stdin matching `HookMessage` (see `models/hook.rs`)
 - Transcript files in `~/.config/claude` and `~/.claude`
 - Pricing embedded from `pricing.json`, overridable via `CLAUDE_PRICE_*` env vars
+- Config files are optional: explicit `--config`, project `.claude-statusline.toml`, then `~/.config/claude-statusline/config.toml`; precedence is defaults < config < env < CLI
+- `doctor` reports Claude paths, `settings.json`, DB/WAL health, OAuth cache/token availability, config load status, and pricing source without reading hook stdin
+- `init` writes/updates the Claude Code `statusLine` command, padding, and `refreshInterval`
 - OAuth usage API for utilization percentages and reset times (fallback; hook data is preferred)
 - Subagent transcripts in `subagents/agent-*.jsonl` are included in cost calculations
+- JSON output includes provenance fields for session cost, today cost, pricing source, context source, and prompt cache countdown state
 
 ## Before commits
 

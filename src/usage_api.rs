@@ -57,6 +57,36 @@ pub fn is_direct_claude_api(model_id: Option<&str>) -> bool {
     true
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct UsageApiHealth {
+    pub fetch_enabled: bool,
+    pub direct_claude_api: bool,
+    pub oauth_token_present: bool,
+    pub fresh_cache_present: bool,
+    pub stale_cache_present: bool,
+    pub negative_cache_active: bool,
+}
+
+pub fn inspect_usage_api(claude_paths: &[PathBuf], model_id: Option<&str>) -> UsageApiHealth {
+    UsageApiHealth {
+        fetch_enabled: fetch_enabled(),
+        direct_claude_api: is_direct_claude_api(model_id),
+        oauth_token_present: find_oauth_token(claude_paths).is_some(),
+        fresh_cache_present: crate::db::get_api_cache(API_CACHE_KEY)
+            .ok()
+            .flatten()
+            .is_some(),
+        stale_cache_present: crate::db::get_stale_api_cache(API_CACHE_KEY)
+            .ok()
+            .flatten()
+            .is_some(),
+        negative_cache_active: crate::db::get_api_cache(NEGATIVE_CACHE_KEY)
+            .ok()
+            .flatten()
+            .is_some(),
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageLimit {
     pub utilization: Option<f64>,

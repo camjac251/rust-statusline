@@ -140,27 +140,92 @@ Pricing is embedded at compile time from `pricing.json`. The OAuth API is option
 
 ```
 claude_statusline [OPTIONS]
+claude_statusline doctor [OPTIONS]
+claude_statusline init [OPTIONS]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--json` | Emit structured JSON instead of colorized text |
+| `--config <PATH>` | Load a config file |
+| `--no-config` | Disable config file loading |
 | `--no-hints` | Disable status hints (on by default) |
+| `--no-prompt-cache` | Disable prompt-cache countdown |
+| `--prompt-cache-ttl-seconds <N>` | Prompt cache TTL (default: 300) |
 | `--labels <short\|long>` | Label verbosity (default: short) |
 | `--time <auto\|12h\|24h>` | Time format (default: auto-detect from locale) |
 | `--window-anchor <provider\|log>` | Window alignment (default: provider) |
 | `--window-scope <global\|project>` | Window cost scope (default: global) |
 | `--burn-scope <session\|global>` | Burn rate scope (default: session) |
 | `--show-provider` | Show provider/key source in header |
+| `--show-provenance` | Show cost/pricing source details in text output |
 | `--show-breakdown` | Show per-token-type breakdown and web search count |
 | `--no-gastown` | Disable Gas Town multi-agent display |
 | `--claude-config-dir <PATHS>` | Override Claude data roots (comma-separated) |
+
+### Setup and diagnostics
+
+```bash
+claude_statusline doctor
+claude_statusline doctor --json
+claude_statusline init
+claude_statusline init --dry-run
+claude_statusline init --refresh-interval 5
+```
+
+`doctor` checks Claude config paths, `settings.json`, SQLite cache health, OAuth cache/token availability, config loading, and pricing lookup provenance without reading statusline stdin.
+
+`init` writes the Claude Code `statusLine` block to `settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "claude_statusline",
+    "padding": 0,
+    "refreshInterval": 5
+  }
+}
+```
+
+### Config file
+
+Config files are optional. Precedence is:
+
+```text
+defaults < config file < environment < CLI
+```
+
+Discovery order:
+
+1. `--config <PATH>` or `CLAUDE_STATUSLINE_CONFIG`
+2. `./.claude-statusline.toml`
+3. `~/.config/claude-statusline/config.toml`
+
+Supported keys mirror the stable CLI options:
+
+```toml
+[display]
+labels = "long"
+git = "verbose"
+show_provenance = true
+show_breakdown = true
+prompt_cache = true
+prompt_cache_ttl_seconds = 300
+truecolor = true
+window_scope = "global"
+burn_scope = "session"
+window_anchor = "provider"
+```
 
 ### Environment Variables
 
 | Variable | Effect |
 |----------|--------|
+| `CLAUDE_STATUSLINE_CONFIG=...` | Explicit config file path |
 | `CLAUDE_STATUS_HINTS=0` | Disable status hints (on by default) |
+| `CLAUDE_PROMPT_CACHE=0` | Disable prompt-cache countdown |
+| `CLAUDE_PROMPT_CACHE_TTL_SECONDS=N` | Override prompt-cache TTL |
 | `CLAUDE_TIME_FORMAT=12` | Force 12-hour time |
 | `CLAUDE_CONTEXT_LIMIT=N` | Override context window size (tokens) |
 | `CLAUDE_PROVIDER=...` | Override provider display (`firstParty` becomes `anthropic`) |
@@ -189,11 +254,12 @@ Pass `--json` for machine-readable output. Key fields:
   },
   "session": {
     "cost_usd": 0.42,
+    "cost_source": "transcript_result",
     "subagents": [
       { "agent_id": "a1234567890abcdef", "cost_usd": 0.15, "input_tokens": 50000, "output_tokens": 2000 }
     ]
   },
-  "today": { "cost_usd": 3.14 },
+  "today": { "cost_usd": 3.14, "cost_source": "db_global_usage" },
   "window": {
     "cost_usd": 1.23,
     "remaining_minutes": 161,
@@ -205,8 +271,21 @@ Pass `--json` for machine-readable output. Key fields:
     "tokens": 12345,
     "percent": 6,
     "limit": 200000,
+    "usable_limit": 168000,
+    "usable_percent": 8,
     "headroom_tokens": 187655,
     "eta_minutes": 42
+  },
+  "prompt_cache": {
+    "ttl_seconds": 300,
+    "remaining_seconds": 120,
+    "percent_remaining": 40.0
+  },
+  "provenance": {
+    "session_cost": "transcript_result",
+    "today_cost": "db_global_usage",
+    "pricing": "embedded",
+    "context": "hook"
   },
   "git": {
     "branch": "main",
@@ -221,7 +300,7 @@ Pass `--json` for machine-readable output. Key fields:
 }
 ```
 
-Full schema includes `provider`, `plan`, `reset_at`, `session.subagents`, `git.remote_url`, `git.worktree_count`, `git.is_linked_worktree`, nested `workspace.*`, optional `remote.session_id`, and token breakdowns per window. Top-level `cwd` and `project_dir` remain as compatibility aliases. Fields are added over time; consumers should tolerate unknown keys.
+Full schema includes `provider`, `plan`, `reset_at`, `session.subagents`, `prompt_cache`, `provenance`, `git.remote_url`, `git.worktree_count`, `git.is_linked_worktree`, nested `workspace.*`, optional `remote.session_id`, and token breakdowns per window. Top-level `cwd` and `project_dir` remain as compatibility aliases. Fields are added over time; consumers should tolerate unknown keys.
 
 ---
 
@@ -232,6 +311,8 @@ src/
 ├── main.rs          # Entry point
 ├── lib.rs           # Library root, public API
 ├── cli.rs           # Argument parsing with env var fallbacks
+├── config.rs        # Config file discovery and precedence
+├── doctor.rs        # Diagnostics and statusLine installer
 ├── models/          # Data structures
 │   ├── hook.rs      # Hook input (HookMessage)
 │   ├── entry.rs     # Transcript entries
@@ -244,6 +325,7 @@ src/
 ├── usage.rs         # Transcript analysis, session/window/daily metrics, burn rates
 ├── usage_api.rs     # OAuth usage API client with SQLite-cached responses
 ├── pricing.rs       # Model pricing tables (compile-time from pricing.json)
+├── provenance.rs    # Cost/pricing/context source metadata
 ├── cache.rs         # In-memory usage cache (30s TTL)
 ├── db.rs            # SQLite persistent cache (WAL mode, concurrent-safe)
 ├── display.rs       # Text (colorized) and JSON output formatting

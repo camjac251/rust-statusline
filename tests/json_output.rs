@@ -1,7 +1,12 @@
 use serde_json::Value;
 
+use chrono::{TimeZone, Utc};
 use claude_statusline::display::build_json_output;
+use claude_statusline::models::PromptCacheInfo;
 use claude_statusline::models::hook::{HookJson, HookModel, HookRemote, HookWorkspace};
+use claude_statusline::provenance::{
+    CostProvenance, PricingSource, SessionCostSource, TodayCostSource,
+};
 
 #[test]
 fn json_output_shape_minimal() {
@@ -75,6 +80,8 @@ fn json_output_shape_minimal() {
         None,                    // gastown_info
         false,                   // is_fast_mode
         None,                    // subagent_breakdown
+        None,                    // cost_provenance
+        None,                    // prompt_cache
     );
 
     // High-level keys exist
@@ -199,6 +206,8 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         None,  // gastown_info
         false, // is_fast_mode
         None,  // subagent_breakdown
+        None,  // cost_provenance
+        None,  // prompt_cache
     );
 
     // 1M context (full limit, percentage calculated against this)
@@ -277,6 +286,8 @@ fn json_output_context_limit_override_from_hook() {
         None,  // gastown_info
         false, // is_fast_mode
         None,  // subagent_breakdown
+        None,  // cost_provenance
+        None,  // prompt_cache
     );
     assert_eq!(json_no_override["context"]["limit"], 200_000);
 
@@ -322,7 +333,102 @@ fn json_output_context_limit_override_from_hook() {
         None,            // gastown_info
         false,           // is_fast_mode
         None,            // subagent_breakdown
+        None,            // cost_provenance
+        None,            // prompt_cache
     );
     assert_eq!(json_with_override["context"]["limit"], 1_048_576);
     assert_eq!(json_with_override["context"]["limit_full"], 1_048_576);
+}
+
+#[test]
+fn json_output_includes_provenance_and_prompt_cache() {
+    let hook = HookJson {
+        session_id: "s1".to_string(),
+        transcript_path: "/tmp/transcript.jsonl".to_string(),
+        cwd: None,
+        model: HookModel {
+            id: "claude-sonnet-4-5".to_string(),
+            display_name: "Claude Sonnet 4.5".to_string(),
+        },
+        workspace: HookWorkspace {
+            current_dir: "/tmp/project".to_string(),
+            project_dir: Some("/tmp/project".to_string()),
+            added_dirs: Vec::new(),
+            git_worktree: None,
+        },
+        version: None,
+        output_style: None,
+        cost: None,
+        context_window: None,
+        exceeds_200k_tokens: None,
+        rate_limits: None,
+        session_name: None,
+        vim: None,
+        agent: None,
+        worktree: None,
+        remote: None,
+    };
+    let provenance = CostProvenance {
+        session_cost: SessionCostSource::TranscriptResult,
+        today_cost: TodayCostSource::DbGlobalUsage,
+        pricing: PricingSource::Embedded,
+    };
+    let prompt_cache = PromptCacheInfo {
+        last_response_at: Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap(),
+        ttl_seconds: 300,
+        now: Utc.with_ymd_and_hms(2026, 5, 1, 12, 3, 0).unwrap(),
+    };
+
+    let json: Value = build_json_output(
+        &hook,
+        1.0,
+        2.0,
+        1,
+        0.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        None,
+        None,
+        None,
+        0.0,
+        None,
+        None,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        Some((100_000, 50)),
+        Some("hook"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        Some(&provenance),
+        Some(&prompt_cache),
+    );
+
+    assert_eq!(json["session"]["cost_source"], "transcript_result");
+    assert_eq!(json["today"]["cost_source"], "db_global_usage");
+    assert_eq!(json["provenance"]["pricing"], "embedded");
+    assert_eq!(json["prompt_cache"]["remaining_seconds"], 120);
+    assert_eq!(json["prompt_cache"]["percent_remaining"], 40.0);
+    assert!(json["context"]["usable_limit"].is_number());
+    assert!(json["context"]["usable_percent"].is_number());
 }

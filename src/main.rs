@@ -13,7 +13,8 @@ use claude_statusline::cli::{Args, BurnScopeArg, WindowAnchorArg, WindowScopeArg
 use claude_statusline::display::color_shim::ColorizeShim;
 use claude_statusline::display::{print_header, print_json_output, print_text_output};
 use claude_statusline::gastown::get_gastown_info;
-use claude_statusline::models::HookJson;
+use claude_statusline::models::{HookJson, PromptCacheInfo};
+use claude_statusline::provenance::{CostProvenance, SessionCostSource, TodayCostSource};
 use claude_statusline::usage::{
     calc_context_from_entries, calc_context_from_transcript, parse_session_state, scan_usage,
 };
@@ -23,6 +24,10 @@ use claude_statusline::window::{BurnScope, WindowScope, calculate_window_metrics
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(ref command) = args.command {
+        return claude_statusline::doctor::run_command(&args, command);
+    }
+
     let stdin = read_stdin()?;
     if stdin.is_empty() {
         println!(
@@ -64,6 +69,17 @@ fn main() -> Result<()> {
     // - fast mode status (speed field from most recent API call)
     // - session cost (from SDK result messages)
     let session_state = parse_session_state(Path::new(&hook.transcript_path));
+    let prompt_cache_info = if args.prompt_cache {
+        session_state
+            .last_assistant_at
+            .map(|last_response_at| PromptCacheInfo {
+                last_response_at,
+                ttl_seconds: args.prompt_cache_ttl_seconds.unwrap_or(300),
+                now: Utc::now(),
+            })
+    } else {
+        None
+    };
 
     if let Some(ref actual_model) = session_state.model {
         if *actual_model != hook.model.id {
@@ -77,6 +93,7 @@ fn main() -> Result<()> {
     // Global usage tracking: SQLite-based aggregation across all sessions
     // Pass session_today_cost (this session only) for proper aggregation
     let mut sessions_count = 1;
+    let mut today_cost_source = TodayCostSource::ScanFallback;
     if let Some(ref project_dir) = hook.workspace.project_dir {
         // Skip DB cache if --no-db-cache flag is set
         if !args.no_db_cache {
@@ -89,6 +106,7 @@ fn main() -> Result<()> {
                 Ok(global_usage) => {
                     today_cost = global_usage.global_today;
                     sessions_count = global_usage.sessions_count;
+                    today_cost_source = TodayCostSource::DbGlobalUsage;
                 }
                 Err(e) => {
                     eprintln!("DB cache error (using scan_usage fallback): {}", e);
@@ -101,14 +119,17 @@ fn main() -> Result<()> {
     // 1. SDK result from this session's transcript (most authoritative, includes subagent costs)
     // 2. Hook-provided cost (from Claude Code's in-memory total, includes subagent costs)
     // 3. Scan-derived cost (summed from transcript entries including subagent files)
+    let mut session_cost_source = SessionCostSource::TranscriptScan;
     if let Some(transcript_cost) = session_state.session_cost {
         if transcript_cost > 0.0 {
             session_cost = transcript_cost;
+            session_cost_source = SessionCostSource::TranscriptResult;
         }
     } else if let Some(ref c) = hook.cost {
         if let Some(v) = c.total_cost_usd {
             if v > 0.0 {
                 session_cost = v;
+                session_cost_source = SessionCostSource::HookCost;
             }
         }
     }
@@ -237,6 +258,11 @@ fn main() -> Result<()> {
 
     let oauth_org_type: Option<String> = None;
     let oauth_rate_tier: Option<String> = None;
+    let cost_provenance = CostProvenance {
+        session_cost: session_cost_source,
+        today_cost: today_cost_source,
+        pricing: claude_statusline::pricing::pricing_source_for_model(&hook.model.id),
+    };
 
     // Calculate window metrics
     let now_utc = Utc::now();
@@ -475,6 +501,8 @@ fn main() -> Result<()> {
             gastown_info.as_ref(),
             is_fast_mode,
             subagent_breakdown,
+            Some(&cost_provenance),
+            prompt_cache_info.as_ref(),
         )?;
     } else {
         // Compute session-level cost per hour from Claude's provided cost
@@ -527,6 +555,8 @@ fn main() -> Result<()> {
             rate_limit_info.as_ref(),
             usage_summary.as_ref(),
             context_limit_override,
+            Some(&cost_provenance),
+            prompt_cache_info.as_ref(),
         );
 
         // Debug output if requested

@@ -1,5 +1,6 @@
 // Edition 2024 migration: allow collapsible_if for now, can refactor incrementally
 #![allow(clippy::collapsible_if)]
+#![recursion_limit = "256"]
 
 //! # Claude Statusline
 //!
@@ -36,8 +37,14 @@ pub mod db;
 /// Command-line argument parsing and configuration
 pub mod cli;
 
+/// File-backed configuration loading
+pub mod config;
+
 /// Display formatting for text and JSON output
 pub mod display;
+
+/// Diagnostics and setup commands
+pub mod doctor;
 
 /// Git repository inspection (feature-gated)
 #[cfg(feature = "git")]
@@ -48,6 +55,9 @@ pub mod models;
 
 /// Model-specific pricing calculations
 pub mod pricing;
+
+/// Source metadata for costs, pricing, and context values
+pub mod provenance;
 
 /// Usage tracking and block identification
 pub mod usage;

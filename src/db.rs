@@ -10,6 +10,7 @@
 use anyhow::{Context, Result};
 use chrono::{Local, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -35,6 +36,19 @@ pub struct GlobalUsage {
 pub struct MetadataEntry {
     pub value: String,
     pub updated_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DbHealth {
+    pub path: String,
+    pub exists: bool,
+    pub parent_exists: bool,
+    pub writable: bool,
+    pub journal_mode: Option<String>,
+    pub schema_version: Option<String>,
+    pub usage_cache_version: Option<String>,
+    pub ok: bool,
+    pub error: Option<String>,
 }
 
 /// Get the database file path
@@ -81,6 +95,71 @@ fn open_db() -> Result<Connection> {
             }
             Err(e) => return Err(e.into()),
         }
+    }
+}
+
+pub fn inspect_health() -> DbHealth {
+    let path = match get_db_path() {
+        Ok(path) => path,
+        Err(err) => {
+            return DbHealth {
+                path: String::new(),
+                exists: false,
+                parent_exists: false,
+                writable: false,
+                journal_mode: None,
+                schema_version: None,
+                usage_cache_version: None,
+                ok: false,
+                error: Some(err.to_string()),
+            };
+        }
+    };
+    let exists = path.exists();
+    let parent_exists = path.parent().is_some_and(|parent| parent.is_dir());
+
+    match open_db() {
+        Ok(conn) => {
+            let exists = path.exists();
+            let parent_exists = path.parent().is_some_and(|parent| parent.is_dir());
+            let journal_mode = conn
+                .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+                .ok();
+            let schema_version = get_metadata(&conn, "schema_version")
+                .ok()
+                .flatten()
+                .map(|entry| entry.value);
+            let usage_cache_version = get_metadata(&conn, "usage_cache_version")
+                .ok()
+                .flatten()
+                .map(|entry| entry.value);
+            let writable = conn
+                .execute_batch("CREATE TEMP TABLE IF NOT EXISTS statusline_write_check (id INTEGER); DROP TABLE statusline_write_check;")
+                .is_ok();
+
+            DbHealth {
+                path: path.display().to_string(),
+                exists,
+                parent_exists,
+                writable,
+                journal_mode,
+                schema_version,
+                usage_cache_version,
+                ok: writable,
+                error: None,
+            }
+        }
+        Err(err) => DbHealth {
+            path: path.display().to_string(),
+            exists,
+            parent_exists,
+            writable: false,
+            journal_mode: None,
+            schema_version: None,
+            usage_cache_version: None,
+            ok: false,
+            error: Some(err.to_string()),
+        },
     }
 }
 

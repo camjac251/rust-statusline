@@ -28,6 +28,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
 
+use crate::provenance::PricingSource;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Pricing {
     pub in_per_tok: f64,
@@ -232,10 +234,7 @@ pub(crate) fn static_pricing_lookup(model_id: &str) -> Option<Pricing> {
     None
 }
 
-pub fn pricing_for_model(model_id: &str) -> Option<Pricing> {
-    let m = model_id.to_lowercase();
-
-    // Priority 1: Environment variable overrides (when all four are provided)
+fn env_pricing_override() -> Option<Pricing> {
     if let (Ok(gi), Ok(go), Ok(gc), Ok(gr)) = (
         env::var("CLAUDE_PRICE_INPUT").map(|s| s.parse::<f64>()),
         env::var("CLAUDE_PRICE_OUTPUT").map(|s| s.parse::<f64>()),
@@ -250,6 +249,16 @@ pub fn pricing_for_model(model_id: &str) -> Option<Pricing> {
                 cache_read_per_tok: cr,
             });
         }
+    }
+    None
+}
+
+pub fn pricing_for_model(model_id: &str) -> Option<Pricing> {
+    let m = model_id.to_lowercase();
+
+    // Priority 1: Environment variable overrides (when all four are provided)
+    if let Some(p) = env_pricing_override() {
+        return Some(p);
     }
 
     // Priority 2: Embedded pricing.json config
@@ -290,6 +299,24 @@ pub fn pricing_for_model(model_id: &str) -> Option<Pricing> {
     } else {
         None
     }
+}
+
+pub fn pricing_source_for_model(model_id: &str) -> PricingSource {
+    let m = model_id.to_lowercase();
+
+    if env_pricing_override().is_some() {
+        return PricingSource::EnvOverride;
+    }
+    if pricing_from_config(&m).is_some() {
+        return PricingSource::Embedded;
+    }
+    if static_pricing_lookup(&m).is_some() {
+        return PricingSource::StaticFallback;
+    }
+    if m.contains("opus") || m.contains("sonnet") || m.contains("haiku") {
+        return PricingSource::FamilyHeuristic;
+    }
+    PricingSource::Unavailable
 }
 
 /// Get the fast mode multiplier for a model (e.g. 6x for Opus 4.6).
