@@ -2,8 +2,8 @@ use chrono::{DateTime, Local, Timelike};
 
 use crate::beads::format_bead_display;
 use crate::gastown::format_gastown_display;
-use crate::models::PromptCacheInfo;
 use crate::models::{BeadsInfo, GasTownInfo};
+use crate::models::{PromptCacheBucketKind, PromptCacheInfo};
 use crate::provenance::CostProvenance;
 use crate::tokens;
 use crate::usage_api::is_direct_claude_api;
@@ -137,13 +137,33 @@ fn usage_limit_json(limit: &UsageLimit) -> serde_json::Value {
 
 fn prompt_cache_json(info: Option<&PromptCacheInfo>) -> serde_json::Value {
     info.map(|info| {
+        let primary = info.primary_bucket();
+        let buckets = info
+            .buckets
+            .iter()
+            .map(|bucket| {
+                serde_json::json!({
+                    "kind": bucket.kind.as_str(),
+                    "input_tokens": bucket.input_tokens,
+                    "ttl_seconds": bucket.ttl_seconds,
+                    "created_at": bucket.created_at.to_rfc3339(),
+                    "expires_at": bucket.expires_at().to_rfc3339(),
+                    "age_seconds": bucket.age_seconds_at(info.now),
+                    "remaining_seconds": bucket.remaining_seconds_at(info.now),
+                    "percent_remaining": (bucket.percent_remaining_at(info.now) * 10.0).round() / 10.0,
+                })
+            })
+            .collect::<Vec<_>>();
         serde_json::json!({
-            "ttl_seconds": info.ttl_seconds,
-            "last_response_at": info.last_response_at.to_rfc3339(),
-            "expires_at": info.expires_at().to_rfc3339(),
+            "ttl_seconds": primary.map(|bucket| bucket.ttl_seconds),
+            "last_response_at": primary.map(|bucket| bucket.created_at.to_rfc3339()),
+            "last_activity_at": info.last_activity_at.to_rfc3339(),
+            "expires_at": primary.map(|bucket| bucket.expires_at().to_rfc3339()),
             "age_seconds": info.age_seconds(),
             "remaining_seconds": info.remaining_seconds(),
             "percent_remaining": (info.percent_remaining() * 10.0).round() / 10.0,
+            "cache_read_input_tokens": info.cache_read_input_tokens,
+            "buckets": buckets,
         })
     })
     .unwrap_or(serde_json::Value::Null)
@@ -167,9 +187,35 @@ fn format_duration_compact(seconds: i64) -> String {
 }
 
 fn render_prompt_cache_segment(info: &PromptCacheInfo, tc: bool) -> String {
-    let remaining = info.remaining_seconds();
+    let mut parts: Vec<String> = info
+        .buckets
+        .iter()
+        .filter(|bucket| bucket.remaining_seconds_at(info.now) > 0)
+        .map(|bucket| {
+            let remaining = format_duration_compact(bucket.remaining_seconds_at(info.now));
+            match bucket.kind {
+                PromptCacheBucketKind::FiveMinute => {
+                    format!("5m={remaining}")
+                }
+                PromptCacheBucketKind::OneHour => {
+                    format!("1h={remaining}")
+                }
+                PromptCacheBucketKind::Unknown => {
+                    format!("~{remaining}")
+                }
+            }
+        })
+        .collect();
+    if parts.is_empty() && info.cache_read_input_tokens > 0 {
+        parts.push("hit".to_string());
+    }
+    if parts.is_empty() {
+        parts.push("expired".to_string());
+    }
+
     let age = info.age_seconds();
-    let token = if remaining == 0 {
+    let remaining = info.remaining_seconds();
+    let token = if remaining == 0 && info.cache_read_input_tokens == 0 {
         tokens::WARNING
     } else {
         tokens::PRIMARY_DIM
@@ -177,7 +223,7 @@ fn render_prompt_cache_segment(info: &PromptCacheInfo, tc: bool) -> String {
     format!(
         "{}{} {}{}",
         muted_label("cache:", tc),
-        token.paint(&format_duration_compact(remaining), tc),
+        token.paint(&parts.join(" "), tc),
         muted_label("age:", tc),
         tokens::PRIMARY_DIM.paint(&format_duration_compact(age), tc)
     )

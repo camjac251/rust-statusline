@@ -1,12 +1,19 @@
 use serde::Deserialize;
 
 #[derive(Deserialize, Debug)]
+pub struct CacheCreationUsage {
+    pub ephemeral_1h_input_tokens: Option<u64>,
+    pub ephemeral_5m_input_tokens: Option<u64>,
+}
+
+#[derive(Deserialize, Debug)]
 pub struct MessageUsage {
     pub input_tokens: Option<u64>,
     #[allow(dead_code)]
     pub output_tokens: Option<u64>,
     pub cache_creation_input_tokens: Option<u64>,
     pub cache_read_input_tokens: Option<u64>,
+    pub cache_creation: Option<CacheCreationUsage>,
 }
 
 #[derive(Deserialize, Debug)]

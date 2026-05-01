@@ -35,7 +35,48 @@ pub struct Pricing {
     pub in_per_tok: f64,
     pub out_per_tok: f64,
     pub cache_create_per_tok: f64,
+    pub cache_create_1h_per_tok: f64,
     pub cache_read_per_tok: f64,
+}
+
+impl Pricing {
+    fn new(
+        in_per_tok: f64,
+        out_per_tok: f64,
+        cache_create_per_tok: f64,
+        cache_create_1h_per_tok: f64,
+        cache_read_per_tok: f64,
+    ) -> Self {
+        Self {
+            in_per_tok,
+            out_per_tok,
+            cache_create_per_tok,
+            cache_create_1h_per_tok,
+            cache_read_per_tok,
+        }
+    }
+
+    fn from_model_pricing(model_pricing: &ModelPricing) -> Self {
+        Self::new(
+            model_pricing.input,
+            model_pricing.output,
+            model_pricing.cache_create,
+            model_pricing
+                .cache_create_1h
+                .unwrap_or(model_pricing.cache_create),
+            model_pricing.cache_read,
+        )
+    }
+
+    fn from_input_multipliers(in_per_tok: f64, out_per_tok: f64) -> Self {
+        Self::new(
+            in_per_tok,
+            out_per_tok,
+            in_per_tok * 1.25,
+            in_per_tok * 2.0,
+            in_per_tok * 0.1,
+        )
+    }
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -109,24 +150,14 @@ fn pricing_from_config(model_id: &str) -> Option<Pricing> {
 
     // Try exact match first
     if let Some(model_pricing) = config.models.get(&m) {
-        return Some(Pricing {
-            in_per_tok: model_pricing.input,
-            out_per_tok: model_pricing.output,
-            cache_create_per_tok: model_pricing.cache_create,
-            cache_read_per_tok: model_pricing.cache_read,
-        });
+        return Some(Pricing::from_model_pricing(model_pricing));
     }
 
     // Try canonical model names before partial matching. Order matters: more
     // specific 4.x variants must win before their family prefix.
     if let Some(key) = canonical_pricing_key(&m) {
         if let Some(model_pricing) = config.models.get(key) {
-            return Some(Pricing {
-                in_per_tok: model_pricing.input,
-                out_per_tok: model_pricing.output,
-                cache_create_per_tok: model_pricing.cache_create,
-                cache_read_per_tok: model_pricing.cache_read,
-            });
+            return Some(Pricing::from_model_pricing(model_pricing));
         }
     }
 
@@ -137,23 +168,13 @@ fn pricing_from_config(model_id: &str) -> Option<Pricing> {
         .filter(|(key, _)| m.contains(key.as_str()))
         .max_by_key(|(key, _)| key.len())
     {
-        return Some(Pricing {
-            in_per_tok: model_pricing.input,
-            out_per_tok: model_pricing.output,
-            cache_create_per_tok: model_pricing.cache_create,
-            cache_read_per_tok: model_pricing.cache_read,
-        });
+        return Some(Pricing::from_model_pricing(model_pricing));
     }
 
     // Try short user-provided fragments such as "opus-4-6".
     for (key, model_pricing) in &config.models {
         if key.contains(&m) {
-            return Some(Pricing {
-                in_per_tok: model_pricing.input,
-                out_per_tok: model_pricing.output,
-                cache_create_per_tok: model_pricing.cache_create,
-                cache_read_per_tok: model_pricing.cache_read,
-            });
+            return Some(Pricing::from_model_pricing(model_pricing));
         }
     }
 
@@ -166,70 +187,35 @@ pub(crate) fn static_pricing_lookup(model_id: &str) -> Option<Pricing> {
     // Opus 4.5/4.6 (and catch generic "claude-4-5" as flagship/Opus)
     if m.contains("opus-4-5") || m.contains("opus-4-6") || m == "claude-4-5" {
         let in_pt = 5e-6; // $5 / 1M
-        return Some(Pricing {
-            in_per_tok: in_pt,
-            out_per_tok: 25e-6,
-            cache_create_per_tok: in_pt * 1.25,
-            cache_read_per_tok: in_pt * 0.1,
-        });
+        return Some(Pricing::from_input_multipliers(in_pt, 25e-6));
     }
     // Opus 4.1
     if m.contains("opus-4-1") {
         let in_pt = 15e-6; // $15 / 1M
-        return Some(Pricing {
-            in_per_tok: in_pt,
-            out_per_tok: 75e-6,
-            cache_create_per_tok: in_pt * 1.25,
-            cache_read_per_tok: in_pt * 0.1,
-        });
+        return Some(Pricing::from_input_multipliers(in_pt, 75e-6));
     }
     // Opus 4 (avoid matching 4.1 above)
     if m.contains("opus-4") {
         let in_pt = 15e-6;
-        return Some(Pricing {
-            in_per_tok: in_pt,
-            out_per_tok: 75e-6,
-            cache_create_per_tok: in_pt * 1.25,
-            cache_read_per_tok: in_pt * 0.1,
-        });
+        return Some(Pricing::from_input_multipliers(in_pt, 75e-6));
     }
     // Sonnet 4 (also catch "claude-4-sonnet")
     if m.contains("sonnet-4") || m.contains("4-sonnet") {
         let in_pt = 3e-6; // $3 / 1M
-        return Some(Pricing {
-            in_per_tok: in_pt,
-            out_per_tok: 15e-6,
-            cache_create_per_tok: in_pt * 1.25,
-            cache_read_per_tok: in_pt * 0.1,
-        });
+        return Some(Pricing::from_input_multipliers(in_pt, 15e-6));
     }
     // Claude 3.7 Sonnet
     if m.contains("3-7-sonnet") {
         let in_pt = 3e-6; // treat like sonnet family
-        return Some(Pricing {
-            in_per_tok: in_pt,
-            out_per_tok: 15e-6,
-            cache_create_per_tok: in_pt * 1.25,
-            cache_read_per_tok: in_pt * 0.1,
-        });
+        return Some(Pricing::from_input_multipliers(in_pt, 15e-6));
     }
     // Claude 3.5 Sonnet
     if m.contains("3-5-sonnet") {
         let in_pt = 3e-6;
-        return Some(Pricing {
-            in_per_tok: in_pt,
-            out_per_tok: 15e-6,
-            cache_create_per_tok: in_pt * 1.25,
-            cache_read_per_tok: in_pt * 0.1,
-        });
+        return Some(Pricing::from_input_multipliers(in_pt, 15e-6));
     }
     if m.contains("3-5-haiku") {
-        return Some(Pricing {
-            in_per_tok: 0.8e-6,  // $0.8 / 1M
-            out_per_tok: 4.0e-6, // $4 / 1M
-            cache_create_per_tok: 1.0e-6,
-            cache_read_per_tok: 0.08e-6,
-        });
+        return Some(Pricing::new(0.8e-6, 4.0e-6, 1.0e-6, 1.6e-6, 0.08e-6));
     }
     None
 }
@@ -242,12 +228,7 @@ fn env_pricing_override() -> Option<Pricing> {
         env::var("CLAUDE_PRICE_CACHE_READ").map(|s| s.parse::<f64>()),
     ) {
         if let (Ok(ii), Ok(oo), Ok(cc), Ok(cr)) = (gi, go, gc, gr) {
-            return Some(Pricing {
-                in_per_tok: ii,
-                out_per_tok: oo,
-                cache_create_per_tok: cc,
-                cache_read_per_tok: cr,
-            });
+            return Some(Pricing::new(ii, oo, cc, cc, cr));
         }
     }
     None
@@ -274,28 +255,13 @@ pub fn pricing_for_model(model_id: &str) -> Option<Pricing> {
     // Priority 4: Family heuristics fallback
     if m.contains("opus") {
         let in_pt = 5e-6; // $5 / 1M (current Opus 4.5/4.6 pricing)
-        Some(Pricing {
-            in_per_tok: in_pt,
-            out_per_tok: 25e-6,
-            cache_create_per_tok: in_pt * 1.25,
-            cache_read_per_tok: in_pt * 0.1,
-        })
+        Some(Pricing::from_input_multipliers(in_pt, 25e-6))
     } else if m.contains("sonnet") {
         let in_pt = 3e-6; // $3 / 1M
-        Some(Pricing {
-            in_per_tok: in_pt,
-            out_per_tok: 15e-6,
-            cache_create_per_tok: in_pt * 1.25,
-            cache_read_per_tok: in_pt * 0.1,
-        })
+        Some(Pricing::from_input_multipliers(in_pt, 15e-6))
     } else if m.contains("haiku") {
         let in_pt = 0.25e-6; // $0.25 / 1M
-        Some(Pricing {
-            in_per_tok: in_pt,
-            out_per_tok: 1.25e-6,
-            cache_create_per_tok: in_pt * 1.25,
-            cache_read_per_tok: in_pt * 0.1,
-        })
+        Some(Pricing::from_input_multipliers(in_pt, 1.25e-6))
     } else {
         None
     }
@@ -374,6 +340,14 @@ fn usage_u64(usage: &Value, key: &str) -> u64 {
     usage.get(key).and_then(|n| n.as_u64()).unwrap_or(0)
 }
 
+fn usage_nested_u64(usage: &Value, parent: &str, key: &str) -> u64 {
+    usage
+        .get(parent)
+        .and_then(|value| value.get(key))
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0)
+}
+
 fn usage_speed(usage: &Value) -> Option<&str> {
     usage.get("speed").and_then(|s| s.as_str())
 }
@@ -394,6 +368,11 @@ fn flat_cost_for_usage(model_id: &str, usage: &Value) -> f64 {
     let input = usage_u64(usage, "input_tokens");
     let output = usage_u64(usage, "output_tokens");
     let cache_create = usage_u64(usage, "cache_creation_input_tokens");
+    let cache_create_1h = usage_nested_u64(usage, "cache_creation", "ephemeral_1h_input_tokens");
+    let cache_create_5m = usage_nested_u64(usage, "cache_creation", "ephemeral_5m_input_tokens");
+    let cache_create_nested = cache_create_1h + cache_create_5m;
+    let cache_create_effective = cache_create.max(cache_create_nested);
+    let cache_create_unknown = cache_create_effective.saturating_sub(cache_create_nested);
     let cache_read = usage_u64(usage, "cache_read_input_tokens");
     let web_search_requests = usage
         .get("server_tool_use")
@@ -401,10 +380,15 @@ fn flat_cost_for_usage(model_id: &str, usage: &Value) -> f64 {
         .and_then(|n| n.as_u64())
         .unwrap_or(0);
 
-    let p = apply_tiered_pricing(base_p, model_id, input + cache_create + cache_read);
+    let p = apply_tiered_pricing(
+        base_p,
+        model_id,
+        input + cache_create_effective + cache_read,
+    );
     let token_cost = (input as f64) * p.in_per_tok
         + (output as f64) * p.out_per_tok
-        + (cache_create as f64) * p.cache_create_per_tok
+        + ((cache_create_5m + cache_create_unknown) as f64) * p.cache_create_per_tok
+        + (cache_create_1h as f64) * p.cache_create_1h_per_tok
         + (cache_read as f64) * p.cache_read_per_tok;
     let web_search_cost = (web_search_requests as f64) * web_search_per_request();
 
@@ -483,6 +467,11 @@ pub fn apply_tiered_pricing(
                 out_per_tok: base_pricing.out_per_tok * tier.multipliers.output,
                 cache_create_per_tok: base_pricing.cache_create_per_tok
                     * tier.multipliers.cache_create,
+                cache_create_1h_per_tok: base_pricing.cache_create_1h_per_tok
+                    * tier
+                        .multipliers
+                        .cache_create_1h
+                        .unwrap_or(tier.multipliers.cache_create),
                 cache_read_per_tok: base_pricing.cache_read_per_tok * tier.multipliers.cache_read,
             };
         }
@@ -573,6 +562,23 @@ mod tests {
 
         let cost = calculate_cost_for_usage("claude-opus-4-6", &usage);
         assert!((cost - 220.52).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cache_creation_1h_uses_1h_price_when_reported() {
+        let usage = serde_json::json!({
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 2_000_000,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 1_000_000,
+                "ephemeral_1h_input_tokens": 1_000_000
+            }
+        });
+
+        let cost = calculate_cost_for_usage("claude-sonnet-4-6", &usage);
+        assert!((cost - 9.75).abs() < 1e-10);
     }
 
     #[test]

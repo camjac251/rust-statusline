@@ -13,7 +13,7 @@ use claude_statusline::cli::{Args, BurnScopeArg, WindowAnchorArg, WindowScopeArg
 use claude_statusline::display::color_shim::ColorizeShim;
 use claude_statusline::display::{print_header, print_json_output, print_text_output};
 use claude_statusline::gastown::get_gastown_info;
-use claude_statusline::models::{HookJson, PromptCacheInfo};
+use claude_statusline::models::HookJson;
 use claude_statusline::provenance::{CostProvenance, SessionCostSource, TodayCostSource};
 use claude_statusline::usage::{
     calc_context_from_entries, calc_context_from_transcript, parse_session_state, scan_usage,
@@ -70,13 +70,11 @@ fn main() -> Result<()> {
     // - session cost (from SDK result messages)
     let session_state = parse_session_state(Path::new(&hook.transcript_path));
     let prompt_cache_info = if args.prompt_cache {
-        session_state
-            .last_assistant_at
-            .map(|last_response_at| PromptCacheInfo {
-                last_response_at,
-                ttl_seconds: args.prompt_cache_ttl_seconds.unwrap_or(300),
-                now: Utc::now(),
-            })
+        session_state.prompt_cache.clone().map(|mut info| {
+            info.now = Utc::now();
+            info.set_unknown_ttl_seconds(args.prompt_cache_ttl_seconds.unwrap_or(300));
+            info
+        })
     } else {
         None
     };

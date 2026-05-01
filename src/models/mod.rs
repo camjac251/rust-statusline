@@ -17,5 +17,5 @@ pub use gastown::{
 pub use git::GitInfo;
 pub use hook::HookJson;
 pub use message::{MessageUsage, TranscriptLine};
-pub use prompt_cache::PromptCacheInfo;
+pub use prompt_cache::{PromptCacheBucketInfo, PromptCacheBucketKind, PromptCacheInfo};
 pub use ratelimit::RateLimitInfo;

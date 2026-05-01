@@ -151,7 +151,7 @@ claude_statusline init [OPTIONS]
 | `--no-config` | Disable config file loading |
 | `--no-hints` | Disable status hints (on by default) |
 | `--no-prompt-cache` | Disable prompt-cache countdown |
-| `--prompt-cache-ttl-seconds <N>` | Prompt cache TTL (default: 300) |
+| `--prompt-cache-ttl-seconds <N>` | Fallback TTL when transcripts only expose aggregate cache creation (default: 300) |
 | `--labels <short\|long>` | Label verbosity (default: short) |
 | `--time <auto\|12h\|24h>` | Time format (default: auto-detect from locale) |
 | `--window-anchor <provider\|log>` | Window alignment (default: provider) |
@@ -279,7 +279,11 @@ Pass `--json` for machine-readable output. Key fields:
   "prompt_cache": {
     "ttl_seconds": 300,
     "remaining_seconds": 120,
-    "percent_remaining": 40.0
+    "percent_remaining": 40.0,
+    "cache_read_input_tokens": 8000,
+    "buckets": [
+      { "kind": "5m", "input_tokens": 5000, "ttl_seconds": 300, "remaining_seconds": 120 }
+    ]
   },
   "provenance": {
     "session_cost": "transcript_result",
