@@ -380,7 +380,8 @@ fn json_output_includes_provenance_and_prompt_cache() {
             ttl_seconds: 300,
             input_tokens: 5000,
         }],
-        last_activity_at: Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap(),
+        last_cache_write_at: Some(Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap()),
+        last_cache_read_at: Some(Utc.with_ymd_and_hms(2026, 5, 1, 12, 2, 0).unwrap()),
         cache_read_input_tokens: 8000,
         now: Utc.with_ymd_and_hms(2026, 5, 1, 12, 3, 0).unwrap(),
     };
@@ -435,6 +436,9 @@ fn json_output_includes_provenance_and_prompt_cache() {
     assert_eq!(json["provenance"]["pricing"], "embedded");
     assert_eq!(json["prompt_cache"]["remaining_seconds"], 120);
     assert_eq!(json["prompt_cache"]["percent_remaining"], 40.0);
+    assert_eq!(json["prompt_cache"]["age_seconds"], 60);
+    assert_eq!(json["prompt_cache"]["write_age_seconds"], 180);
+    assert_eq!(json["prompt_cache"]["read_age_seconds"], 60);
     assert_eq!(json["prompt_cache"]["buckets"][0]["kind"], "5m");
     assert_eq!(json["prompt_cache"]["cache_read_input_tokens"], 8000);
     assert!(json["context"]["usable_limit"].is_number());

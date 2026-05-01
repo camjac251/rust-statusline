@@ -52,7 +52,8 @@ impl PromptCacheBucketInfo {
 #[derive(Debug, Clone)]
 pub struct PromptCacheInfo {
     pub buckets: Vec<PromptCacheBucketInfo>,
-    pub last_activity_at: DateTime<Utc>,
+    pub last_cache_write_at: Option<DateTime<Utc>>,
+    pub last_cache_read_at: Option<DateTime<Utc>>,
     pub cache_read_input_tokens: u64,
     pub now: DateTime<Utc>,
 }
@@ -74,8 +75,28 @@ impl PromptCacheInfo {
             .or_else(|| self.buckets.first())
     }
 
-    pub fn age_seconds(&self) -> i64 {
-        (self.now - self.last_activity_at).num_seconds().max(0)
+    pub fn last_activity_at(&self) -> Option<DateTime<Utc>> {
+        match (self.last_cache_write_at, self.last_cache_read_at) {
+            (Some(write), Some(read)) => Some(write.max(read)),
+            (Some(write), None) => Some(write),
+            (None, Some(read)) => Some(read),
+            (None, None) => None,
+        }
+    }
+
+    pub fn activity_age_seconds(&self) -> Option<i64> {
+        self.last_activity_at()
+            .map(|last| (self.now - last).num_seconds().max(0))
+    }
+
+    pub fn write_age_seconds(&self) -> Option<i64> {
+        self.last_cache_write_at
+            .map(|last| (self.now - last).num_seconds().max(0))
+    }
+
+    pub fn read_age_seconds(&self) -> Option<i64> {
+        self.last_cache_read_at
+            .map(|last| (self.now - last).num_seconds().max(0))
     }
 
     pub fn remaining_seconds(&self) -> i64 {

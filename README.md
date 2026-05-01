@@ -278,9 +278,15 @@ Pass `--json` for machine-readable output. Key fields:
   },
   "prompt_cache": {
     "ttl_seconds": 300,
+    "age_seconds": 60,
+    "write_age_seconds": 180,
+    "read_age_seconds": 60,
     "remaining_seconds": 120,
     "percent_remaining": 40.0,
     "cache_read_input_tokens": 8000,
+    "last_activity_at": "2026-05-01T12:02:00+00:00",
+    "last_cache_write_at": "2026-05-01T12:00:00+00:00",
+    "last_cache_read_at": "2026-05-01T12:02:00+00:00",
     "buckets": [
       { "kind": "5m", "input_tokens": 5000, "ttl_seconds": 300, "remaining_seconds": 120 }
     ]

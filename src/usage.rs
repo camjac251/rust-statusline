@@ -54,7 +54,8 @@ pub fn parse_session_state(transcript_path: &Path) -> SessionState {
     let mut cache_5m_bucket: Option<PromptCacheBucketInfo> = None;
     let mut cache_1h_bucket: Option<PromptCacheBucketInfo> = None;
     let mut cache_unknown_bucket: Option<PromptCacheBucketInfo> = None;
-    let mut last_cache_activity_at: Option<DateTime<Utc>> = None;
+    let mut last_cache_write_at: Option<DateTime<Utc>> = None;
+    let mut last_cache_read_at: Option<DateTime<Utc>> = None;
     let mut last_cache_read_tokens = 0;
 
     let file = match File::open(transcript_path) {
@@ -211,8 +212,11 @@ pub fn parse_session_state(transcript_path: &Path) -> SessionState {
                     input_tokens: cache_create_unknown,
                 });
             }
-            if cache_create_known > 0 || cache_create_unknown > 0 || cache_read > 0 {
-                last_cache_activity_at = Some(ts);
+            if cache_create_known > 0 || cache_create_unknown > 0 {
+                last_cache_write_at = Some(ts);
+            }
+            if cache_read > 0 {
+                last_cache_read_at = Some(ts);
                 last_cache_read_tokens = cache_read;
             }
         }
@@ -228,10 +232,11 @@ pub fn parse_session_state(transcript_path: &Path) -> SessionState {
     if let Some(bucket) = cache_unknown_bucket {
         buckets.push(bucket);
     }
-    if let Some(last_activity_at) = last_cache_activity_at {
+    if last_cache_write_at.is_some() || last_cache_read_at.is_some() {
         state.prompt_cache = Some(PromptCacheInfo {
             buckets,
-            last_activity_at,
+            last_cache_write_at,
+            last_cache_read_at,
             cache_read_input_tokens: last_cache_read_tokens,
             now: Utc::now(),
         });
@@ -1653,7 +1658,9 @@ mod tests {
         let state = parse_session_state(&transcript);
         let prompt_cache = state.prompt_cache.expect("prompt cache activity");
 
-        assert_eq!(prompt_cache.last_activity_at, ts);
+        assert_eq!(prompt_cache.last_cache_write_at, Some(ts));
+        assert_eq!(prompt_cache.last_cache_read_at, Some(ts));
+        assert_eq!(prompt_cache.last_activity_at(), Some(ts));
         assert_eq!(prompt_cache.cache_read_input_tokens, 4000);
         assert_eq!(prompt_cache.buckets.len(), 2);
         assert!(prompt_cache.buckets.iter().any(|bucket| {
@@ -1698,7 +1705,9 @@ mod tests {
         let state = parse_session_state(&transcript);
         let prompt_cache = state.prompt_cache.expect("prompt cache activity");
 
-        assert_eq!(prompt_cache.last_activity_at, ts);
+        assert_eq!(prompt_cache.last_cache_write_at, Some(ts));
+        assert_eq!(prompt_cache.last_cache_read_at, None);
+        assert_eq!(prompt_cache.last_activity_at(), Some(ts));
         assert_eq!(prompt_cache.buckets.len(), 2);
         assert!(
             prompt_cache
@@ -1748,6 +1757,65 @@ mod tests {
         assert!(prompt_cache.buckets.iter().any(|bucket| {
             bucket.kind == PromptCacheBucketKind::Unknown && bucket.input_tokens == 500
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_session_state_separates_cache_write_from_later_read() -> Result<()> {
+        let dir = tempdir()?;
+        let transcript = dir.path().join("session.jsonl");
+        let write_ts = Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap();
+        let read_ts = Utc.with_ymd_and_hms(2026, 5, 1, 12, 2, 0).unwrap();
+        let write_line = json!({
+            "type": "assistant",
+            "timestamp": write_ts.to_rfc3339(),
+            "message": {
+                "role": "assistant",
+                "id": "msg-cache-write",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 2000,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation": {
+                        "ephemeral_1h_input_tokens": 2000
+                    }
+                }
+            }
+        });
+        let read_line = json!({
+            "type": "assistant",
+            "timestamp": read_ts.to_rfc3339(),
+            "message": {
+                "role": "assistant",
+                "id": "msg-cache-read",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 1800
+                }
+            }
+        });
+        fs::write(&transcript, format!("{}\n{}\n", write_line, read_line))?;
+
+        let state = parse_session_state(&transcript);
+        let prompt_cache = state.prompt_cache.expect("prompt cache activity");
+
+        assert_eq!(prompt_cache.last_cache_write_at, Some(write_ts));
+        assert_eq!(prompt_cache.last_cache_read_at, Some(read_ts));
+        assert_eq!(prompt_cache.last_activity_at(), Some(read_ts));
+        assert_eq!(prompt_cache.cache_read_input_tokens, 1800);
+        assert_eq!(
+            prompt_cache
+                .buckets
+                .iter()
+                .find(|bucket| bucket.kind == PromptCacheBucketKind::OneHour)
+                .map(|bucket| bucket.created_at),
+            Some(write_ts)
+        );
         Ok(())
     }
 }

@@ -157,9 +157,13 @@ fn prompt_cache_json(info: Option<&PromptCacheInfo>) -> serde_json::Value {
         serde_json::json!({
             "ttl_seconds": primary.map(|bucket| bucket.ttl_seconds),
             "last_response_at": primary.map(|bucket| bucket.created_at.to_rfc3339()),
-            "last_activity_at": info.last_activity_at.to_rfc3339(),
+            "last_activity_at": info.last_activity_at().map(|d| d.to_rfc3339()),
+            "last_cache_write_at": info.last_cache_write_at.map(|d| d.to_rfc3339()),
+            "last_cache_read_at": info.last_cache_read_at.map(|d| d.to_rfc3339()),
             "expires_at": primary.map(|bucket| bucket.expires_at().to_rfc3339()),
-            "age_seconds": info.age_seconds(),
+            "age_seconds": info.activity_age_seconds(),
+            "write_age_seconds": info.write_age_seconds(),
+            "read_age_seconds": info.read_age_seconds(),
             "remaining_seconds": info.remaining_seconds(),
             "percent_remaining": (info.percent_remaining() * 10.0).round() / 10.0,
             "cache_read_input_tokens": info.cache_read_input_tokens,
@@ -213,20 +217,39 @@ fn render_prompt_cache_segment(info: &PromptCacheInfo, tc: bool) -> String {
         parts.push("expired".to_string());
     }
 
-    let age = info.age_seconds();
     let remaining = info.remaining_seconds();
     let token = if remaining == 0 && info.cache_read_input_tokens == 0 {
         tokens::WARNING
     } else {
         tokens::PRIMARY_DIM
     };
-    format!(
-        "{}{} {}{}",
+
+    let mut activity_parts = Vec::new();
+    if let Some(write_age) = info.write_age_seconds() {
+        activity_parts.push(format!("made:{}", format_duration_compact(write_age)));
+    }
+    let show_hit_age = match (info.last_cache_write_at, info.last_cache_read_at) {
+        (_, None) => false,
+        (None, Some(_)) => true,
+        (Some(write), Some(read)) => read > write,
+    };
+    if show_hit_age && let Some(read_age) = info.read_age_seconds() {
+        activity_parts.push(format!("hit:{}", format_duration_compact(read_age)));
+    }
+
+    let mut segment = format!(
+        "{}{}",
         muted_label("cache:", tc),
-        token.paint(&parts.join(" "), tc),
-        muted_label("age:", tc),
-        tokens::PRIMARY_DIM.paint(&format_duration_compact(age), tc)
-    )
+        token.paint(&parts.join(" "), tc)
+    );
+    if !activity_parts.is_empty() {
+        let _ = write!(
+            segment,
+            " {}",
+            tokens::PRIMARY_DIM.paint(&activity_parts.join(" "), tc)
+        );
+    }
+    segment
 }
 
 fn is_truecolor_enabled(args: &Args) -> bool {
@@ -1446,8 +1469,10 @@ pub fn print_text_output(
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use clap::Parser;
 
+    use crate::models::PromptCacheBucketInfo;
     use crate::models::hook::{HookJson, HookModel, HookWorkspace};
 
     fn test_args() -> Args {
@@ -1677,6 +1702,55 @@ mod tests {
         assert!(line.contains("context:"));
         assert!(line.contains("1M"));
         assert!(line.contains("13%"));
+    }
+
+    #[test]
+    fn prompt_cache_segment_labels_write_age_as_made() {
+        let write_ts = chrono::Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap();
+        let info = PromptCacheInfo {
+            buckets: vec![PromptCacheBucketInfo {
+                kind: PromptCacheBucketKind::OneHour,
+                created_at: write_ts,
+                ttl_seconds: 3600,
+                input_tokens: 2000,
+            }],
+            last_cache_write_at: Some(write_ts),
+            last_cache_read_at: Some(write_ts),
+            cache_read_input_tokens: 1800,
+            now: chrono::Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 42).unwrap(),
+        };
+
+        let segment = render_prompt_cache_segment(&info, false);
+
+        assert!(segment.contains("1h=59m"));
+        assert!(segment.contains("made:42s"));
+        assert!(!segment.contains("hit:"));
+        assert!(!segment.contains("age:"));
+    }
+
+    #[test]
+    fn prompt_cache_segment_shows_hit_age_for_later_reads() {
+        let write_ts = chrono::Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap();
+        let read_ts = chrono::Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 30).unwrap();
+        let info = PromptCacheInfo {
+            buckets: vec![PromptCacheBucketInfo {
+                kind: PromptCacheBucketKind::OneHour,
+                created_at: write_ts,
+                ttl_seconds: 3600,
+                input_tokens: 2000,
+            }],
+            last_cache_write_at: Some(write_ts),
+            last_cache_read_at: Some(read_ts),
+            cache_read_input_tokens: 1800,
+            now: chrono::Utc.with_ymd_and_hms(2026, 5, 1, 12, 1, 0).unwrap(),
+        };
+
+        let segment = render_prompt_cache_segment(&info, false);
+
+        assert!(segment.contains("1h=59m"));
+        assert!(segment.contains("made:1m"));
+        assert!(segment.contains("hit:30s"));
+        assert!(!segment.contains("age:"));
     }
 }
 
