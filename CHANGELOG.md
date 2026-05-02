@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [1.4.3](https://github.com/camjac251/rust-statusline/compare/v1.4.2...v1.4.3) - 2026-05-02
+
+### Fixed
+
+- *(prompt-cache)* show same-turn cache hits
+
 ## [1.4.2](https://github.com/camjac251/rust-statusline/compare/v1.4.1...v1.4.2) - 2026-05-01
 
 ### Fixed
