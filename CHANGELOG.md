@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## [1.5.1](https://github.com/camjac251/rust-statusline/compare/v1.5.0...v1.5.1) - 2026-05-02
+
+### Fixed
+
+- *(cost)* dedupe moved sessions
+
+### Other
+
+- *(usage)* stabilize transcript mtime test
+
 ## [1.5.0](https://github.com/camjac251/rust-statusline/compare/v1.4.3...v1.5.0) - 2026-05-02
 
 ### Added
