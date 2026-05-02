@@ -59,7 +59,6 @@ Pipeline: stdin JSON hook -> transcript parsing -> pricing -> display (text or J
 | `usage_api.rs` | OAuth usage API client with SQLite-cached responses |
 | `pricing.rs` | Model pricing tables (compile-time from `pricing.json`) |
 | `provenance.rs` | Cost, pricing, and context source metadata |
-| `cache.rs` | In-memory usage cache keyed by (session_id, project_dir) |
 | `db.rs` | SQLite persistent cache for cross-session usage tracking |
 | `window.rs` | Usage window calculations |
 | `git.rs` | Repository inspection via gix (feature-gated) |
@@ -120,5 +119,5 @@ Config: `release-plz.toml` (git-only, no crates.io publish, no CHANGELOG.md)
 - **Binary size**: Release < 7MB (CI enforced)
 - **MSRV**: 1.88.0, edition 2024
 - **Pricing**: Compile-time embedded; override with all four `CLAUDE_PRICE_*` env vars
-- **Cache**: In-memory (30s TTL) + SQLite at `~/.claude/statusline.db` (WAL mode, concurrent-safe)
+- **Cache**: SQLite at `~/.claude/statusline.db` (WAL mode, concurrent-safe)
 - **Time format**: Auto-detects locale; override with `CLAUDE_TIME_FORMAT` or `--time`

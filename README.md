@@ -121,13 +121,11 @@ flowchart LR
 
     subgraph Cache
         direction TB
-        METRICS --> MEM[In-Memory\n30s TTL]
         METRICS --> DB[(SQLite\nWAL mode)]
         UTIL --> DB
     end
 
     DB --> OUT[Display]
-    MEM --> OUT
     OUT -->|colorized text| STDOUT[stdout]
     OUT -->|--json| JSON[structured JSON]
 ```
@@ -336,7 +334,6 @@ src/
 ├── usage_api.rs     # OAuth usage API client with SQLite-cached responses
 ├── pricing.rs       # Model pricing tables (compile-time from pricing.json)
 ├── provenance.rs    # Cost/pricing/context source metadata
-├── cache.rs         # In-memory usage cache (30s TTL)
 ├── db.rs            # SQLite persistent cache (WAL mode, concurrent-safe)
 ├── display.rs       # Text (colorized) and JSON output formatting
 ├── window.rs        # Usage window calculations

@@ -543,7 +543,7 @@ fn find_recent_jsonl_files(root: &Path, cutoff: SystemTime) -> Vec<PathBuf> {
 pub fn scan_usage(
     paths: &[PathBuf],
     session_id: &str,
-    project_dir: Option<&str>,
+    _project_dir: Option<&str>,
     _model_id_for_probe: Option<&str>,
 ) -> Result<(
     f64, /*session*/
@@ -554,45 +554,6 @@ pub fn scan_usage(
     Option<String>,
     Option<RateLimitInfo>,
 )> {
-    // Check cache first
-    if let Some((cached_entries, cached_today_cost, cached_reset, cached_api_key)) =
-        crate::cache::get_cached_usage(session_id, project_dir)
-    {
-        let today = Local::now().date_naive();
-        // Calculate session cost and session today cost from cached entries
-        let mut session_cost = 0.0;
-        let mut session_today_cost = 0.0;
-        for e in &cached_entries {
-            if e.session_id.as_deref() == Some(session_id) {
-                session_cost += e.cost;
-                let ts_s = e.ts.to_rfc3339();
-                if let Some(d) = parse_iso_date(&ts_s) {
-                    if d == today {
-                        session_today_cost += e.cost;
-                    }
-                }
-            }
-        }
-        return Ok((
-            session_cost,
-            session_today_cost,
-            cached_today_cost,
-            cached_entries,
-            cached_reset,
-            cached_api_key,
-            read_persisted_reset_state().map(|st| RateLimitInfo {
-                status: st.status,
-                resets_at: st.reset_at,
-                fallback_available: st.fallback.as_deref().map(|s| s == "available"),
-                fallback_percentage: st.fallback_percentage,
-                rate_limit_type: st.rate_limit_type,
-                overage_status: st.overage_status,
-                overage_resets_at: st.overage_resets_at,
-                is_using_overage: None,
-            }),
-        ));
-    }
-
     let today = Local::now().date_naive();
     let mut session_cost = 0.0f64;
     // Prefer precise session cost from SDK result messages when available.
@@ -1295,16 +1256,6 @@ pub fn scan_usage(
         }
         session_cost = session_cost_via_results;
     }
-
-    // Cache the results before returning
-    crate::cache::cache_usage(
-        session_id,
-        project_dir,
-        entries.clone(),
-        today_cost,
-        latest_reset,
-        api_key_source.clone(),
-    );
 
     // Persist log-derived reset too so we don't need to re-probe until after expiry
     if let Some(dt) = latest_reset {
