@@ -231,7 +231,7 @@ fn render_prompt_cache_segment(info: &PromptCacheInfo, tc: bool) -> String {
     let show_hit_age = match (info.last_cache_write_at, info.last_cache_read_at) {
         (_, None) => false,
         (None, Some(_)) => true,
-        (Some(write), Some(read)) => read > write,
+        (Some(write), Some(read)) => read >= write,
     };
     if show_hit_age && let Some(read_age) = info.read_age_seconds() {
         activity_parts.push(format!("hit:{}", format_duration_compact(read_age)));
@@ -1724,7 +1724,7 @@ mod tests {
 
         assert!(segment.contains("1h=59m"));
         assert!(segment.contains("made:42s"));
-        assert!(!segment.contains("hit:"));
+        assert!(segment.contains("hit:42s"));
         assert!(!segment.contains("age:"));
     }
 
