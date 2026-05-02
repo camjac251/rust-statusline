@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [1.5.0](https://github.com/camjac251/rust-statusline/compare/v1.4.3...v1.5.0) - 2026-05-02
+
+### Added
+
+- *(prompt-cache)* show read write token counts
+
 ## [1.4.3](https://github.com/camjac251/rust-statusline/compare/v1.4.2...v1.4.3) - 2026-05-02
 
 ### Fixed
