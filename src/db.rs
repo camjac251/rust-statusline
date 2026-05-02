@@ -7,7 +7,7 @@
 //! - Global usage aggregation across all active sessions
 //! - Concurrent access support via WAL mode
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{Local, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
@@ -18,7 +18,118 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION_STR: &str = "2";
 const USAGE_CACHE_VERSION: &str = "2";
+const METADATA_KEY_SCHEMA_VERSION: &str = "schema_version";
+const METADATA_KEY_USAGE_CACHE_VERSION: &str = "usage_cache_version";
+const GLOBAL_SUM_CACHE_PREFIX: &str = "global_sum:";
+const GLOBAL_SUM_CACHE_TTL_SECONDS: i64 = 5;
+const OAUTH_USAGE_SUMMARY_CACHE_KEY: &str = "oauth_usage_summary";
+
+mod sql {
+    pub const INIT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sessions (
+            session_key TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL DEFAULT '',
+            transcript_path TEXT NOT NULL,
+            transcript_mtime INTEGER NOT NULL CHECK (transcript_mtime >= 0),
+            today_date TEXT NOT NULL CHECK (length(today_date) = 10),
+            today_cost REAL NOT NULL CHECK (today_cost >= 0.0),
+            entry_count INTEGER NOT NULL CHECK (entry_count >= 0),
+            last_parsed_at INTEGER NOT NULL CHECK (last_parsed_at >= 0),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+        );
+        CREATE INDEX IF NOT EXISTS idx_today_date ON sessions(today_date);
+        CREATE INDEX IF NOT EXISTS idx_transcript_path ON sessions(transcript_path);
+        CREATE TABLE IF NOT EXISTS api_cache (
+            cache_key TEXT PRIMARY KEY,
+            data TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_expires_at ON api_cache(expires_at);
+        CREATE TABLE IF NOT EXISTS metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at INTEGER
+        );";
+
+    pub const ADD_METADATA_UPDATED_AT: &str = "ALTER TABLE metadata ADD COLUMN updated_at INTEGER";
+    pub const CREATE_SESSIONS_TODAY_SESSION_ID_INDEX: &str = "CREATE INDEX IF NOT EXISTS idx_sessions_today_session_id ON sessions(today_date, session_id)";
+    pub const ADD_SESSION_ID: &str =
+        "ALTER TABLE sessions ADD COLUMN session_id TEXT NOT NULL DEFAULT ''";
+    pub const BACKFILL_SESSION_ID: &str = "UPDATE sessions
+         SET session_id = CASE
+             WHEN instr(session_key, ':') > 0
+             THEN substr(session_key, 1, instr(session_key, ':') - 1)
+             ELSE session_key
+         END
+         WHERE session_id IS NULL OR session_id = ''";
+    pub const DELETE_ALL_SESSIONS: &str = "DELETE FROM sessions";
+    pub const DELETE_GLOBAL_SUM_CACHE: &str = "DELETE FROM metadata WHERE key LIKE 'global_sum:%'";
+    pub const GET_METADATA: &str = "SELECT value, updated_at FROM metadata WHERE key = ?1";
+    pub const SET_METADATA: &str = "INSERT INTO metadata (key, value, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at";
+    pub const UPSERT_SESSION: &str = "INSERT INTO sessions (session_key, session_id, transcript_path, transcript_mtime, today_date, today_cost, entry_count, last_parsed_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(session_key) DO UPDATE SET
+             session_id = excluded.session_id,
+             transcript_path = excluded.transcript_path,
+             transcript_mtime = excluded.transcript_mtime,
+             today_date = excluded.today_date,
+             today_cost = excluded.today_cost,
+             entry_count = excluded.entry_count,
+             last_parsed_at = excluded.last_parsed_at,
+             updated_at = excluded.updated_at";
+    pub const DELETE_LEGACY_PROJECT_SESSION_ROWS: &str = "DELETE FROM sessions
+         WHERE COALESCE(
+             NULLIF(session_id, ''),
+             CASE
+                 WHEN instr(session_key, ':') > 0
+                 THEN substr(session_key, 1, instr(session_key, ':') - 1)
+                 ELSE session_key
+             END
+         ) = ?
+           AND session_key != ?";
+    pub const SELECT_CACHED_SESSION: &str = "SELECT transcript_mtime, today_cost, today_date, transcript_path, entry_count FROM sessions WHERE session_key = ?";
+    pub const DELETE_STALE_SESSIONS: &str = "DELETE FROM sessions WHERE today_date != ?";
+    pub const SELECT_GLOBAL_TODAY: &str = "WITH logical_sessions AS (
+                SELECT
+                    COALESCE(
+                        NULLIF(session_id, ''),
+                        CASE
+                            WHEN instr(session_key, ':') > 0
+                            THEN substr(session_key, 1, instr(session_key, ':') - 1)
+                            ELSE session_key
+                        END
+                    ) AS logical_session_id,
+                    MAX(today_cost) AS today_cost
+                FROM sessions
+                WHERE today_date = ?
+                GROUP BY logical_session_id
+            )
+            SELECT COALESCE(SUM(today_cost), 0.0), COUNT(*) FROM logical_sessions";
+    pub const GET_FRESH_API_CACHE: &str =
+        "SELECT data FROM api_cache WHERE cache_key = ? AND expires_at > ?";
+    pub const GET_STALE_API_CACHE: &str = "SELECT data FROM api_cache WHERE cache_key = ?";
+    pub const DELETE_EXPIRED_API_CACHE_KEY: &str =
+        "DELETE FROM api_cache WHERE cache_key = ? AND expires_at <= ?";
+    pub const TRY_INSERT_API_CACHE: &str =
+        "INSERT INTO api_cache (cache_key, data, fetched_at, expires_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(cache_key) DO NOTHING";
+    pub const UPSERT_API_CACHE: &str =
+        "INSERT INTO api_cache (cache_key, data, fetched_at, expires_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(cache_key) DO UPDATE SET
+             data = excluded.data,
+             fetched_at = excluded.fetched_at,
+             expires_at = excluded.expires_at";
+    pub const DELETE_EXPIRED_API_CACHE: &str =
+        "DELETE FROM api_cache WHERE expires_at <= ? AND cache_key != ?";
+}
 
 /// Global usage result containing both session-specific and global costs
 #[derive(Debug, Clone)]
@@ -38,6 +149,52 @@ pub struct MetadataEntry {
     pub updated_at: Option<i64>,
 }
 
+impl MetadataEntry {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        let value: String = row.get(0)?;
+        let updated_at = row.get::<_, Option<i64>>(1).unwrap_or(None);
+        Ok(Self { value, updated_at })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CachedSessionRow {
+    transcript_mtime: i64,
+    today_cost: f64,
+    today_date: String,
+    transcript_path: String,
+    entry_count: usize,
+}
+
+impl CachedSessionRow {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        let entry_count: i64 = row.get(4)?;
+        Ok(Self {
+            transcript_mtime: row.get(0)?,
+            today_cost: row.get(1)?,
+            today_date: row.get(2)?,
+            transcript_path: row.get(3)?,
+            entry_count: usize::try_from(entry_count).unwrap_or(0),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GlobalTodayRow {
+    total_cost: f64,
+    sessions_count: usize,
+}
+
+impl GlobalTodayRow {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        let count: i64 = row.get(1)?;
+        Ok(Self {
+            total_cost: row.get(0)?,
+            sessions_count: usize::try_from(count).unwrap_or(0),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DbHealth {
     pub path: String,
@@ -46,6 +203,7 @@ pub struct DbHealth {
     pub writable: bool,
     pub journal_mode: Option<String>,
     pub schema_version: Option<String>,
+    pub user_version: Option<i64>,
     pub usage_cache_version: Option<String>,
     pub ok: bool,
     pub error: Option<String>,
@@ -109,6 +267,7 @@ pub fn inspect_health() -> DbHealth {
                 writable: false,
                 journal_mode: None,
                 schema_version: None,
+                user_version: None,
                 usage_cache_version: None,
                 ok: false,
                 error: Some(err.to_string()),
@@ -125,11 +284,12 @@ pub fn inspect_health() -> DbHealth {
             let journal_mode = conn
                 .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
                 .ok();
-            let schema_version = get_metadata(&conn, "schema_version")
+            let schema_version = get_metadata(&conn, METADATA_KEY_SCHEMA_VERSION)
                 .ok()
                 .flatten()
                 .map(|entry| entry.value);
-            let usage_cache_version = get_metadata(&conn, "usage_cache_version")
+            let user_version = sqlite_user_version(&conn).ok();
+            let usage_cache_version = get_metadata(&conn, METADATA_KEY_USAGE_CACHE_VERSION)
                 .ok()
                 .flatten()
                 .map(|entry| entry.value);
@@ -144,6 +304,7 @@ pub fn inspect_health() -> DbHealth {
                 writable,
                 journal_mode,
                 schema_version,
+                user_version,
                 usage_cache_version,
                 ok: writable,
                 error: None,
@@ -156,6 +317,7 @@ pub fn inspect_health() -> DbHealth {
             writable: false,
             journal_mode: None,
             schema_version: None,
+            user_version: None,
             usage_cache_version: None,
             ok: false,
             error: Some(err.to_string()),
@@ -180,62 +342,123 @@ pub fn store_metadata(key: &str, value: &str) -> Result<()> {
 /// Creates tables and indexes if they don't exist.
 /// Handles schema versioning via metadata table.
 fn init_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS sessions (
-            session_key TEXT PRIMARY KEY,
-            transcript_path TEXT NOT NULL,
-            transcript_mtime INTEGER NOT NULL,
-            today_date TEXT NOT NULL,
-            today_cost REAL NOT NULL,
-            entry_count INTEGER NOT NULL,
-            last_parsed_at INTEGER NOT NULL,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_today_date ON sessions(today_date);
-        CREATE INDEX IF NOT EXISTS idx_transcript_path ON sessions(transcript_path);
-        CREATE TABLE IF NOT EXISTS api_cache (
-            cache_key TEXT PRIMARY KEY,
-            data TEXT NOT NULL,
-            fetched_at INTEGER NOT NULL,
-            expires_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_expires_at ON api_cache(expires_at);
-        CREATE TABLE IF NOT EXISTS metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at INTEGER
-        );
-        INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '1');",
-    )?;
+    conn.execute_batch(sql::INIT_SCHEMA)?;
 
-    // Ensure updated_at column exists (older installs may lack it)
-    if let Err(e) = conn.execute("ALTER TABLE metadata ADD COLUMN updated_at INTEGER", []) {
-        let msg = e.to_string();
-        if !msg.contains("duplicate column name") {
-            return Err(e.into());
+    migrate_schema(conn)?;
+
+    match get_metadata(conn, METADATA_KEY_USAGE_CACHE_VERSION)? {
+        Some(cache_version) if cache_version.value == USAGE_CACHE_VERSION => {}
+        Some(_) => {
+            conn.execute(sql::DELETE_ALL_SESSIONS, [])?;
+            clear_global_sum_cache(conn)?;
+            set_metadata(conn, METADATA_KEY_USAGE_CACHE_VERSION, USAGE_CACHE_VERSION)?;
         }
-    }
-
-    let cache_version = get_metadata(conn, "usage_cache_version")?;
-    if cache_version.as_ref().map(|m| m.value.as_str()) != Some(USAGE_CACHE_VERSION) {
-        conn.execute("DELETE FROM sessions", [])?;
-        conn.execute("DELETE FROM metadata WHERE key LIKE 'global_sum:%'", [])?;
-        set_metadata(conn, "usage_cache_version", USAGE_CACHE_VERSION)?;
+        None => {
+            clear_global_sum_cache(conn)?;
+            set_metadata(conn, METADATA_KEY_USAGE_CACHE_VERSION, USAGE_CACHE_VERSION)?;
+        }
     }
 
     Ok(())
 }
 
+fn migrate_schema(conn: &Connection) -> Result<()> {
+    let user_version = sqlite_user_version(conn)?;
+    let mut schema_changed = false;
+
+    if user_version > SCHEMA_VERSION {
+        bail!(
+            "SQLite schema version {} is newer than supported version {}",
+            user_version,
+            SCHEMA_VERSION
+        );
+    }
+
+    if !table_has_column(conn, "metadata", "updated_at")? {
+        conn.execute(sql::ADD_METADATA_UPDATED_AT, [])?;
+        schema_changed = true;
+    }
+
+    if user_version < 2 || !table_has_column(conn, "sessions", "session_id")? {
+        migrate_sessions_session_id(conn)?;
+        schema_changed = true;
+    }
+
+    conn.execute(sql::CREATE_SESSIONS_TODAY_SESSION_ID_INDEX, [])?;
+
+    let metadata_version = get_metadata(conn, METADATA_KEY_SCHEMA_VERSION)?;
+    if metadata_version.as_ref().map(|m| m.value.as_str()) != Some(SCHEMA_VERSION_STR) {
+        set_metadata(conn, METADATA_KEY_SCHEMA_VERSION, SCHEMA_VERSION_STR)?;
+        schema_changed = true;
+    }
+
+    if user_version != SCHEMA_VERSION {
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        schema_changed = true;
+    }
+
+    if schema_changed {
+        clear_global_sum_cache(conn)?;
+    }
+
+    Ok(())
+}
+
+fn migrate_sessions_session_id(conn: &Connection) -> Result<()> {
+    if !table_has_column(conn, "sessions", "session_id")? {
+        conn.execute(sql::ADD_SESSION_ID, [])?;
+    }
+
+    conn.execute(sql::BACKFILL_SESSION_ID, [])?;
+
+    Ok(())
+}
+
+fn sqlite_user_version(conn: &Connection) -> Result<i64> {
+    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(Into::into)
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    debug_assert!(table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    let sql = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn clear_global_sum_cache(conn: &Connection) -> Result<usize> {
+    conn.execute(sql::DELETE_GLOBAL_SUM_CACHE, [])
+        .map_err(Into::into)
+}
+
+fn global_sum_cache_key(today: &str) -> String {
+    format!("{GLOBAL_SUM_CACHE_PREFIX}{today}")
+}
+
+fn encode_global_sum_cache(total_cost: f64, sessions_count: usize) -> String {
+    format!("{total_cost}:{sessions_count}")
+}
+
+fn decode_global_sum_cache(value: &str) -> Option<GlobalTodayRow> {
+    let (sum_str, count_str) = value.split_once(':')?;
+    Some(GlobalTodayRow {
+        total_cost: sum_str.parse().ok()?,
+        sessions_count: count_str.parse().ok()?,
+    })
+}
+
 /// Fetch metadata value and optional timestamp
 pub fn get_metadata(conn: &Connection, key: &str) -> Result<Option<MetadataEntry>> {
-    let mut stmt = conn.prepare("SELECT value, updated_at FROM metadata WHERE key = ?1")?;
+    let mut stmt = conn.prepare(sql::GET_METADATA)?;
     let result = stmt
-        .query_row(params![key], |row| {
-            let value: String = row.get(0)?;
-            let updated_at: Option<i64> = row.get::<_, Option<i64>>(1).unwrap_or(None);
-            Ok(MetadataEntry { value, updated_at })
-        })
+        .query_row(params![key], MetadataEntry::from_row)
         .optional()?;
     Ok(result)
 }
@@ -243,12 +466,7 @@ pub fn get_metadata(conn: &Connection, key: &str) -> Result<Option<MetadataEntry
 /// Set metadata value with current timestamp
 pub fn set_metadata(conn: &Connection, key: &str, value: &str) -> Result<()> {
     let now = Utc::now().timestamp();
-    conn.execute(
-        "INSERT INTO metadata (key, value, updated_at)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-        params![key, value, now],
-    )?;
+    conn.execute(sql::SET_METADATA, params![key, value, now])?;
     Ok(())
 }
 
@@ -268,22 +486,13 @@ fn upsert_session(
     let transcript_str = transcript_path
         .to_str()
         .context("Invalid transcript path")?;
+    let session_id = logical_session_id(session_key);
 
-    let mut stmt = conn.prepare(
-        "INSERT INTO sessions (session_key, transcript_path, transcript_mtime, today_date, today_cost, entry_count, last_parsed_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(session_key) DO UPDATE SET
-             transcript_path = excluded.transcript_path,
-             transcript_mtime = excluded.transcript_mtime,
-             today_date = excluded.today_date,
-             today_cost = excluded.today_cost,
-             entry_count = excluded.entry_count,
-             last_parsed_at = excluded.last_parsed_at,
-             updated_at = excluded.updated_at",
-    )?;
+    let mut stmt = conn.prepare(sql::UPSERT_SESSION)?;
 
     stmt.execute(params![
         session_key,
+        session_id,
         transcript_str,
         mtime,
         today,
@@ -301,14 +510,20 @@ fn stable_session_key(session_id: &str) -> String {
     session_id.to_string()
 }
 
-fn delete_legacy_project_session_rows(conn: &Connection, session_id: &str) -> Result<usize> {
-    let session_len = session_id.len() as i64;
-    let colon_pos = session_len + 1;
+fn logical_session_id(session_key: &str) -> &str {
+    session_key
+        .split_once(':')
+        .map_or(session_key, |(id, _)| id)
+}
+
+fn delete_legacy_project_session_rows(
+    conn: &Connection,
+    session_id: &str,
+    stable_session_key: &str,
+) -> Result<usize> {
     let deleted = conn.execute(
-        "DELETE FROM sessions
-         WHERE substr(session_key, 1, ?) = ?
-           AND substr(session_key, ?, 1) = ':'",
-        params![session_len, session_id, colon_pos],
+        sql::DELETE_LEGACY_PROJECT_SESSION_ROWS,
+        params![session_id, stable_session_key],
     )?;
     Ok(deleted)
 }
@@ -509,6 +724,18 @@ fn parse_transcript_today_cost(transcript_path: &Path, today: &str) -> Result<(f
     Ok((today_cost, entry_count))
 }
 
+fn session_cost_for_today(
+    transcript_path: &Path,
+    today: &str,
+    provided_cost: Option<f64>,
+) -> Result<(f64, usize)> {
+    if let Some(cost) = provided_cost {
+        Ok((cost, 0))
+    } else {
+        parse_transcript_today_cost(transcript_path, today)
+    }
+}
+
 /// Get global usage across all sessions
 ///
 /// This is the main entry point for retrieving usage data. It:
@@ -546,65 +773,34 @@ pub fn get_global_usage(
 
     let cached = conn
         .query_row(
-            "SELECT transcript_mtime, today_cost, today_date, transcript_path FROM sessions WHERE session_key = ?",
+            sql::SELECT_CACHED_SESSION,
             params![session_key],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, f64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            },
+            CachedSessionRow::from_row,
         )
         .optional()?;
 
     // Track whether we modified the DB (to invalidate global sum cache)
     let mut db_was_modified = false;
 
-    let current_session_cost =
-        if let Some((cached_mtime, cached_cost, cached_date, cached_transcript_path)) = cached {
-            // Only use cached cost if both mtime and date match (prevents using yesterday's cost after midnight)
-            if cached_mtime == current_mtime && cached_date == today {
-                if cached_transcript_path != transcript_str {
-                    upsert_session(
-                        &conn,
-                        &session_key,
-                        transcript_path,
-                        current_mtime,
-                        &today,
-                        cached_cost,
-                        0,
-                    )?;
-                    db_was_modified = true;
-                }
-                cached_cost
-            } else {
-                // Use provided session_today_cost if available (avoids re-parsing)
-                let (cost, count) = if let Some(provided_cost) = session_today_cost {
-                    (provided_cost, 0) // entry_count not needed when cost is provided
-                } else {
-                    parse_transcript_today_cost(transcript_path, &today)?
-                };
+    let current_session_cost = if let Some(cached_session) = cached {
+        // Only use cached cost if both mtime and date match (prevents using yesterday's cost after midnight)
+        if cached_session.transcript_mtime == current_mtime && cached_session.today_date == today {
+            if cached_session.transcript_path != transcript_str {
                 upsert_session(
                     &conn,
                     &session_key,
                     transcript_path,
                     current_mtime,
                     &today,
-                    cost,
-                    count,
+                    cached_session.today_cost,
+                    cached_session.entry_count,
                 )?;
                 db_was_modified = true;
-                cost
             }
+            cached_session.today_cost
         } else {
-            // Use provided session_today_cost if available (avoids re-parsing)
-            let (cost, count) = if let Some(provided_cost) = session_today_cost {
-                (provided_cost, 0) // entry_count not needed when cost is provided
-            } else {
-                parse_transcript_today_cost(transcript_path, &today)?
-            };
+            let (cost, count) =
+                session_cost_for_today(transcript_path, &today, session_today_cost)?;
             upsert_session(
                 &conn,
                 &session_key,
@@ -616,32 +812,40 @@ pub fn get_global_usage(
             )?;
             db_was_modified = true;
             cost
-        };
+        }
+    } else {
+        let (cost, count) = session_cost_for_today(transcript_path, &today, session_today_cost)?;
+        upsert_session(
+            &conn,
+            &session_key,
+            transcript_path,
+            current_mtime,
+            &today,
+            cost,
+            count,
+        )?;
+        db_was_modified = true;
+        cost
+    };
 
-    if delete_legacy_project_session_rows(&conn, session_id)? > 0 {
+    if delete_legacy_project_session_rows(&conn, session_id, &session_key)? > 0 {
         db_was_modified = true;
     }
 
-    conn.execute("DELETE FROM sessions WHERE today_date != ?", params![today])?;
+    if conn.execute(sql::DELETE_STALE_SESSIONS, params![today])? > 0 {
+        db_was_modified = true;
+    }
 
     // Check cache for global sum (5s TTL to reduce redundant SUM queries across concurrent sessions)
     // Skip cache if we just modified the DB (invalidates cache)
-    let cache_key = format!("global_sum:{}", today);
+    let cache_key = global_sum_cache_key(&today);
     let now = Utc::now().timestamp();
-    let cached_sum: Option<(f64, usize)> = if !db_was_modified {
+    let cached_sum: Option<GlobalTodayRow> = if !db_was_modified {
         if let Ok(Some(entry)) = get_metadata(&conn, &cache_key) {
             if let Some(updated_at) = entry.updated_at {
-                if now - updated_at < 5 {
+                if now - updated_at < GLOBAL_SUM_CACHE_TTL_SECONDS {
                     // Cache is fresh (< 5 seconds old)
-                    entry
-                        .value
-                        .split_once(':')
-                        .and_then(|(sum_str, count_str)| {
-                            sum_str
-                                .parse::<f64>()
-                                .ok()
-                                .zip(count_str.parse::<usize>().ok())
-                        })
+                    decode_global_sum_cache(&entry.value)
                 } else {
                     None
                 }
@@ -655,38 +859,22 @@ pub fn get_global_usage(
         None // DB was modified, so cache is invalid
     };
 
-    let (global_today, sessions_count) = if let Some((sum, count)) = cached_sum {
+    let (global_today, sessions_count) = if let Some(cached_sum) = cached_sum {
         // Use cached value
-        (sum, count)
+        (cached_sum.total_cost, cached_sum.sessions_count)
     } else {
         // Cache miss or expired - run the query
-        let (global_today, sessions_count): (f64, usize) = conn.query_row(
-            "WITH logical_sessions AS (
-                SELECT
-                    CASE
-                        WHEN instr(session_key, ':') > 0
-                        THEN substr(session_key, 1, instr(session_key, ':') - 1)
-                        ELSE session_key
-                    END AS logical_session_key,
-                    MAX(today_cost) AS today_cost
-                FROM sessions
-                WHERE today_date = ?
-                GROUP BY logical_session_key
-            )
-            SELECT COALESCE(SUM(today_cost), 0.0), COUNT(*) FROM logical_sessions",
+        let row = conn.query_row(
+            sql::SELECT_GLOBAL_TODAY,
             params![today],
-            |row| {
-                let sum: f64 = row.get(0)?;
-                let count: i64 = row.get(1)?;
-                Ok((sum, count as usize))
-            },
+            GlobalTodayRow::from_row,
         )?;
 
         // Cache the result for 5 seconds
-        let cache_value = format!("{}:{}", global_today, sessions_count);
+        let cache_value = encode_global_sum_cache(row.total_cost, row.sessions_count);
         let _ = set_metadata(&conn, &cache_key, &cache_value); // Ignore errors on cache write
 
-        (global_today, sessions_count)
+        (row.total_cost, row.sessions_count)
     };
 
     Ok(GlobalUsage {
@@ -704,11 +892,9 @@ pub fn get_api_cache(cache_key: &str) -> Result<Option<String>> {
     let now = Utc::now().timestamp();
 
     let result = conn
-        .query_row(
-            "SELECT data FROM api_cache WHERE cache_key = ? AND expires_at > ?",
-            params![cache_key, now],
-            |row| row.get::<_, String>(0),
-        )
+        .query_row(sql::GET_FRESH_API_CACHE, params![cache_key, now], |row| {
+            row.get::<_, String>(0)
+        })
         .optional()?;
 
     Ok(result)
@@ -719,11 +905,9 @@ pub fn get_stale_api_cache(cache_key: &str) -> Result<Option<String>> {
     let conn = open_db()?;
 
     let result = conn
-        .query_row(
-            "SELECT data FROM api_cache WHERE cache_key = ?",
-            params![cache_key],
-            |row| row.get::<_, String>(0),
-        )
+        .query_row(sql::GET_STALE_API_CACHE, params![cache_key], |row| {
+            row.get::<_, String>(0)
+        })
         .optional()?;
 
     Ok(result)
@@ -740,16 +924,11 @@ pub fn try_set_api_cache(cache_key: &str, data: &str, ttl_seconds: i64) -> Resul
     let expires_at = now + ttl_seconds;
 
     // Delete expired entry for this key first so INSERT can succeed
-    conn.execute(
-        "DELETE FROM api_cache WHERE cache_key = ? AND expires_at <= ?",
-        params![cache_key, now],
-    )?;
+    conn.execute(sql::DELETE_EXPIRED_API_CACHE_KEY, params![cache_key, now])?;
 
     // INSERT ... ON CONFLICT DO NOTHING -- only the first writer wins
     let rows = conn.execute(
-        "INSERT INTO api_cache (cache_key, data, fetched_at, expires_at)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(cache_key) DO NOTHING",
+        sql::TRY_INSERT_API_CACHE,
         params![cache_key, data, now, expires_at],
     )?;
 
@@ -765,19 +944,14 @@ pub fn set_api_cache(cache_key: &str, data: &str, ttl_seconds: i64) -> Result<()
     let expires_at = now + ttl_seconds;
 
     conn.execute(
-        "INSERT INTO api_cache (cache_key, data, fetched_at, expires_at)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(cache_key) DO UPDATE SET
-             data = excluded.data,
-             fetched_at = excluded.fetched_at,
-             expires_at = excluded.expires_at",
+        sql::UPSERT_API_CACHE,
         params![cache_key, data, now, expires_at],
     )?;
 
     // Clean up expired entries, but keep the main usage cache for stale fallback
     conn.execute(
-        "DELETE FROM api_cache WHERE expires_at <= ? AND cache_key != 'oauth_usage_summary'",
-        params![now],
+        sql::DELETE_EXPIRED_API_CACHE,
+        params![now, OAUTH_USAGE_SUMMARY_CACHE_KEY],
     )?;
 
     Ok(())
@@ -805,7 +979,164 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(version, "1");
+        assert_eq!(version, SCHEMA_VERSION_STR);
+        assert_eq!(sqlite_user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert!(table_has_column(&conn, "sessions", "session_id").unwrap());
+        unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_schema_migration_backfills_session_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("legacy.db");
+        let legacy_conn = Connection::open(&db_path).unwrap();
+        legacy_conn
+            .execute_batch(
+                "CREATE TABLE sessions (
+                    session_key TEXT PRIMARY KEY,
+                    transcript_path TEXT NOT NULL,
+                    transcript_mtime INTEGER NOT NULL,
+                    today_date TEXT NOT NULL,
+                    today_cost REAL NOT NULL,
+                    entry_count INTEGER NOT NULL,
+                    last_parsed_at INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                INSERT INTO metadata (key, value) VALUES ('schema_version', '1');
+                INSERT INTO metadata (key, value) VALUES ('usage_cache_version', '2');",
+            )
+            .unwrap();
+        legacy_conn
+            .execute(
+                "INSERT INTO sessions (
+                    session_key,
+                    transcript_path,
+                    transcript_mtime,
+                    today_date,
+                    today_cost,
+                    entry_count,
+                    last_parsed_at,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    "legacy-session:/old/project",
+                    "/tmp/transcript.jsonl",
+                    1,
+                    "2025-10-18",
+                    1.23,
+                    1,
+                    1,
+                    1,
+                    1
+                ],
+            )
+            .unwrap();
+        drop(legacy_conn);
+
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
+
+        let conn = open_db().unwrap();
+        let session_id: String = conn
+            .query_row(
+                "SELECT session_id FROM sessions WHERE session_key = ?1",
+                params!["legacy-session:/old/project"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let schema_version = get_metadata(&conn, METADATA_KEY_SCHEMA_VERSION)
+            .unwrap()
+            .unwrap();
+        let metadata_has_updated_at = table_has_column(&conn, "metadata", "updated_at").unwrap();
+
+        assert_eq!(session_id, "legacy-session");
+        assert_eq!(schema_version.value, SCHEMA_VERSION_STR);
+        assert_eq!(sqlite_user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert!(metadata_has_updated_at);
+        unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_missing_usage_cache_version_does_not_delete_sessions() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("missing-cache-version.db");
+        let legacy_conn = Connection::open(&db_path).unwrap();
+        legacy_conn
+            .execute_batch(
+                "CREATE TABLE sessions (
+                    session_key TEXT PRIMARY KEY,
+                    session_id TEXT,
+                    transcript_path TEXT NOT NULL,
+                    transcript_mtime INTEGER NOT NULL,
+                    today_date TEXT NOT NULL,
+                    today_cost REAL NOT NULL,
+                    entry_count INTEGER NOT NULL,
+                    last_parsed_at INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at INTEGER
+                );
+                INSERT INTO metadata (key, value, updated_at)
+                VALUES ('schema_version', '2', 1);",
+            )
+            .unwrap();
+        legacy_conn
+            .execute(
+                "INSERT INTO sessions (
+                    session_key,
+                    session_id,
+                    transcript_path,
+                    transcript_mtime,
+                    today_date,
+                    today_cost,
+                    entry_count,
+                    last_parsed_at,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    "session-kept",
+                    "session-kept",
+                    "/tmp/transcript.jsonl",
+                    1,
+                    "2025-10-18",
+                    1.23,
+                    1,
+                    1,
+                    1,
+                    1
+                ],
+            )
+            .unwrap();
+        drop(legacy_conn);
+
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
+
+        let conn = open_db().unwrap();
+        let sessions_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        let usage_cache_version = get_metadata(&conn, METADATA_KEY_USAGE_CACHE_VERSION)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(sessions_count, 1);
+        assert_eq!(usage_cache_version.value, USAGE_CACHE_VERSION);
         unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
     }
 
@@ -838,8 +1169,63 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let session_id: String = conn
+            .query_row(
+                "SELECT session_id FROM sessions WHERE session_key = ?",
+                params!["sess1:/path/to/project"],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         assert_eq!(cost, 1.23);
+        assert_eq!(session_id, "sess1");
+        unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_global_usage_path_refresh_preserves_entry_count() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("path-refresh.db");
+        let old_transcript_path = temp_dir.path().join("old-transcript.jsonl");
+        let new_transcript_path = temp_dir.path().join("new-transcript.jsonl");
+        std::fs::write(&new_transcript_path, "{}\n").unwrap();
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
+
+        let conn = open_db().unwrap();
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let current_mtime = fs::metadata(&new_transcript_path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        upsert_session(
+            &conn,
+            "sess-path-refresh",
+            &old_transcript_path,
+            current_mtime,
+            &today,
+            4.56,
+            7,
+        )
+        .unwrap();
+
+        let usage =
+            get_global_usage("sess-path-refresh", "/project", &new_transcript_path, None).unwrap();
+        let (entry_count, transcript_path): (i64, String) = conn
+            .query_row(
+                "SELECT entry_count, transcript_path FROM sessions WHERE session_key = ?",
+                params!["sess-path-refresh"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert!((usage.session_cost - 4.56).abs() < 1e-10);
+        assert_eq!(entry_count, 7);
+        assert_eq!(transcript_path, new_transcript_path.display().to_string());
         unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
     }
 

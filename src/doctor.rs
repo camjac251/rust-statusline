@@ -160,11 +160,16 @@ fn print_report(report: &DoctorReport) {
             .unwrap_or_else(|| "n/a".to_string())
     );
     println!(
-        "db: {} ok={} wal={} schema={} cache_version={}",
+        "db: {} ok={} wal={} schema={} user_version={} cache_version={}",
         report.db.path,
         report.db.ok,
         report.db.journal_mode.as_deref().unwrap_or("unknown"),
         report.db.schema_version.as_deref().unwrap_or("unknown"),
+        report
+            .db
+            .user_version
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
         report
             .db
             .usage_cache_version
