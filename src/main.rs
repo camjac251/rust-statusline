@@ -100,6 +100,7 @@ fn main() -> Result<()> {
                 project_dir,
                 Path::new(&hook.transcript_path),
                 Some(session_today_cost),
+                Some(&entries),
             ) {
                 Ok(global_usage) => {
                     today_cost = global_usage.global_today;

@@ -57,6 +57,7 @@ fn test_concurrent_db_access() {
                             &project_dir,
                             &path,
                             Some((i as f64 * 0.1) + (i as f64 * 0.05)), // session_today_cost
+                            None,
                         ) {
                             Ok(r) => break Ok(r),
                             Err(e) if e.to_string().contains("locked") && attempts < 5 => {
@@ -92,6 +93,7 @@ fn test_concurrent_db_access() {
         "/tmp/final-project",
         &transcript_files[0],
         Some(1.0),
+        None,
     )
     .unwrap();
 
@@ -125,6 +127,7 @@ fn test_provided_cost_optimization() {
         "/tmp/test-project",
         &transcript_path,
         Some(2.5), // Provide different cost than what's in file
+        None,
     )
     .unwrap();
     // Should use provided cost, not file cost (1.0)
@@ -133,8 +136,14 @@ fn test_provided_cost_optimization() {
 
     // Second call without provided cost - should parse from cache (same mtime)
     // This verifies cache is working
-    let result2 =
-        get_global_usage("test-session", "/tmp/test-project", &transcript_path, None).unwrap();
+    let result2 = get_global_usage(
+        "test-session",
+        "/tmp/test-project",
+        &transcript_path,
+        None,
+        None,
+    )
+    .unwrap();
     // Should still be 2.5 (cached from previous call)
     assert_eq!(result2.session_cost, 2.5);
 
@@ -155,6 +164,7 @@ fn test_provided_cost_optimization() {
         "/tmp/test-project",
         &transcript_path,
         Some(3.7), // New provided cost
+        None,
     )
     .unwrap();
     assert_eq!(result3.session_cost, 3.7);
@@ -186,6 +196,7 @@ fn test_date_rollover_cleanup() {
         "/tmp/test-project",
         &transcript_path,
         Some(1.0),
+        None,
     )
     .unwrap();
 

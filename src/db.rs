@@ -7,10 +7,12 @@
 //! - Global usage aggregation across all active sessions
 //! - Concurrent access support via WAL mode
 
+use crate::models::Entry;
 use anyhow::{Context, Result, bail};
 use chrono::{Local, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -18,14 +20,15 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-const SCHEMA_VERSION: i64 = 3;
-const SCHEMA_VERSION_STR: &str = "3";
+const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION_STR: &str = "4";
 const USAGE_CACHE_VERSION: &str = "2";
 const METADATA_KEY_SCHEMA_VERSION: &str = "schema_version";
 const METADATA_KEY_USAGE_CACHE_VERSION: &str = "usage_cache_version";
 const GLOBAL_SUM_CACHE_PREFIX: &str = "global_sum:";
 const GLOBAL_SUM_CACHE_TTL_SECONDS: i64 = 5;
 const OAUTH_USAGE_SUMMARY_CACHE_KEY: &str = "oauth_usage_summary";
+const COST_EPSILON: f64 = 1e-9;
 
 mod sql {
     pub const INIT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sessions (
@@ -53,7 +56,28 @@ mod sql {
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
             updated_at INTEGER
-        );";
+        );
+        CREATE TABLE IF NOT EXISTS usage_events (
+            event_key TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            transcript_path TEXT NOT NULL,
+            ts INTEGER NOT NULL,
+            today_date TEXT NOT NULL CHECK (length(today_date) = 10),
+            model TEXT,
+            input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
+            output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
+            cache_create_tokens INTEGER NOT NULL CHECK (cache_create_tokens >= 0),
+            cache_read_tokens INTEGER NOT NULL CHECK (cache_read_tokens >= 0),
+            web_search_requests INTEGER NOT NULL CHECK (web_search_requests >= 0),
+            cost REAL NOT NULL CHECK (cost >= 0.0),
+            source TEXT NOT NULL,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+        );
+        CREATE INDEX IF NOT EXISTS idx_usage_events_today_session
+            ON usage_events(today_date, session_id);
+        CREATE INDEX IF NOT EXISTS idx_usage_events_session_date
+            ON usage_events(session_id, today_date);";
 
     pub const ADD_METADATA_UPDATED_AT: &str = "ALTER TABLE metadata ADD COLUMN updated_at INTEGER";
     pub const CREATE_SESSIONS_TODAY_DATE_INDEX: &str =
@@ -142,7 +166,62 @@ mod sql {
     pub const DROP_SESSIONS: &str = "DROP TABLE sessions";
     pub const RENAME_SESSIONS_V3: &str = "ALTER TABLE sessions_v3 RENAME TO sessions";
     pub const DELETE_ALL_SESSIONS: &str = "DELETE FROM sessions";
+    pub const DELETE_ALL_USAGE_EVENTS: &str = "DELETE FROM usage_events";
     pub const DELETE_GLOBAL_SUM_CACHE: &str = "DELETE FROM metadata WHERE key LIKE 'global_sum:%'";
+    pub const CREATE_USAGE_EVENTS: &str = "CREATE TABLE IF NOT EXISTS usage_events (
+            event_key TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            transcript_path TEXT NOT NULL,
+            ts INTEGER NOT NULL,
+            today_date TEXT NOT NULL CHECK (length(today_date) = 10),
+            model TEXT,
+            input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
+            output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
+            cache_create_tokens INTEGER NOT NULL CHECK (cache_create_tokens >= 0),
+            cache_read_tokens INTEGER NOT NULL CHECK (cache_read_tokens >= 0),
+            web_search_requests INTEGER NOT NULL CHECK (web_search_requests >= 0),
+            cost REAL NOT NULL CHECK (cost >= 0.0),
+            source TEXT NOT NULL,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+        )";
+    pub const CREATE_USAGE_EVENTS_TODAY_SESSION_INDEX: &str = "CREATE INDEX IF NOT EXISTS idx_usage_events_today_session ON usage_events(today_date, session_id)";
+    pub const CREATE_USAGE_EVENTS_SESSION_DATE_INDEX: &str = "CREATE INDEX IF NOT EXISTS idx_usage_events_session_date ON usage_events(session_id, today_date)";
+    pub const BACKFILL_USAGE_EVENTS_FROM_SESSIONS: &str = "INSERT OR IGNORE INTO usage_events (
+            event_key,
+            session_id,
+            transcript_path,
+            ts,
+            today_date,
+            model,
+            input_tokens,
+            output_tokens,
+            cache_create_tokens,
+            cache_read_tokens,
+            web_search_requests,
+            cost,
+            source,
+            created_at,
+            updated_at
+        )
+        SELECT
+            'session:' || session_id || ':' || today_date,
+            session_id,
+            transcript_path,
+            updated_at,
+            today_date,
+            NULL,
+            0,
+            0,
+            0,
+            0,
+            0,
+            today_cost,
+            'session_summary',
+            created_at,
+            updated_at
+        FROM sessions
+        WHERE session_id != '' AND today_cost >= 0.0";
     pub const GET_METADATA: &str = "SELECT value, updated_at FROM metadata WHERE key = ?1";
     pub const SET_METADATA: &str = "INSERT INTO metadata (key, value, updated_at)
          VALUES (?1, ?2, ?3)
@@ -161,8 +240,50 @@ mod sql {
              updated_at = excluded.updated_at";
     pub const SELECT_CACHED_SESSION: &str = "SELECT transcript_mtime, today_cost, today_date, transcript_path, entry_count, session_key FROM sessions WHERE session_id = ?";
     pub const DELETE_STALE_SESSIONS: &str = "DELETE FROM sessions WHERE today_date != ?";
-    pub const SELECT_GLOBAL_TODAY: &str =
-        "SELECT COALESCE(SUM(today_cost), 0.0), COUNT(*) FROM sessions WHERE today_date = ?";
+    pub const DELETE_STALE_USAGE_EVENTS: &str = "DELETE FROM usage_events WHERE today_date != ?";
+    pub const DELETE_USAGE_EVENTS_FOR_SESSION_DATE: &str =
+        "DELETE FROM usage_events WHERE session_id = ? AND today_date = ?";
+    pub const HAS_USAGE_EVENTS_FOR_SESSION_DATE: &str =
+        "SELECT 1 FROM usage_events WHERE session_id = ? AND today_date = ? LIMIT 1";
+    pub const UPSERT_USAGE_EVENT: &str = "INSERT INTO usage_events (
+            event_key,
+            session_id,
+            transcript_path,
+            ts,
+            today_date,
+            model,
+            input_tokens,
+            output_tokens,
+            cache_create_tokens,
+            cache_read_tokens,
+            web_search_requests,
+            cost,
+            source,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(event_key) DO UPDATE SET
+            session_id = excluded.session_id,
+            transcript_path = excluded.transcript_path,
+            ts = excluded.ts,
+            today_date = excluded.today_date,
+            model = excluded.model,
+            input_tokens = excluded.input_tokens,
+            output_tokens = excluded.output_tokens,
+            cache_create_tokens = excluded.cache_create_tokens,
+            cache_read_tokens = excluded.cache_read_tokens,
+            web_search_requests = excluded.web_search_requests,
+            cost = excluded.cost,
+            source = excluded.source,
+            updated_at = excluded.updated_at";
+    pub const SELECT_GLOBAL_TODAY: &str = "WITH session_totals AS (
+            SELECT session_id, SUM(cost) AS today_cost
+            FROM usage_events
+            WHERE today_date = ?
+            GROUP BY session_id
+        )
+        SELECT COALESCE(SUM(today_cost), 0.0), COUNT(*) FROM session_totals";
     pub const GET_FRESH_API_CACHE: &str =
         "SELECT data FROM api_cache WHERE cache_key = ? AND expires_at > ?";
     pub const GET_STALE_API_CACHE: &str = "SELECT data FROM api_cache WHERE cache_key = ?";
@@ -247,6 +368,23 @@ impl GlobalTodayRow {
             sessions_count: usize::try_from(count).unwrap_or(0),
         })
     }
+}
+
+#[derive(Debug, Clone)]
+struct UsageEvent {
+    event_key: String,
+    session_id: String,
+    transcript_path: String,
+    ts: i64,
+    today_date: String,
+    model: Option<String>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_create_tokens: u64,
+    cache_read_tokens: u64,
+    web_search_requests: u64,
+    cost: f64,
+    source: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -404,6 +542,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
         Some(cache_version) if cache_version.value == USAGE_CACHE_VERSION => {}
         Some(_) => {
             conn.execute(sql::DELETE_ALL_SESSIONS, [])?;
+            conn.execute(sql::DELETE_ALL_USAGE_EVENTS, [])?;
             clear_global_sum_cache(conn)?;
             set_metadata(conn, METADATA_KEY_USAGE_CACHE_VERSION, USAGE_CACHE_VERSION)?;
         }
@@ -444,6 +583,12 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
     }
 
     create_session_indexes(conn)?;
+
+    create_usage_events_schema(conn)?;
+    if user_version < 4 {
+        conn.execute(sql::BACKFILL_USAGE_EVENTS_FROM_SESSIONS, [])?;
+        schema_changed = true;
+    }
 
     let metadata_version = get_metadata(conn, METADATA_KEY_SCHEMA_VERSION)?;
     if metadata_version.as_ref().map(|m| m.value.as_str()) != Some(SCHEMA_VERSION_STR) {
@@ -488,6 +633,13 @@ fn create_session_indexes(conn: &Connection) -> Result<()> {
     conn.execute(sql::CREATE_SESSIONS_TODAY_DATE_INDEX, [])?;
     conn.execute(sql::CREATE_SESSIONS_TRANSCRIPT_PATH_INDEX, [])?;
     conn.execute(sql::CREATE_SESSIONS_TODAY_SESSION_ID_INDEX, [])?;
+    Ok(())
+}
+
+fn create_usage_events_schema(conn: &Connection) -> Result<()> {
+    conn.execute(sql::CREATE_USAGE_EVENTS, [])?;
+    conn.execute(sql::CREATE_USAGE_EVENTS_TODAY_SESSION_INDEX, [])?;
+    conn.execute(sql::CREATE_USAGE_EVENTS_SESSION_DATE_INDEX, [])?;
     Ok(())
 }
 
@@ -626,19 +778,367 @@ fn logical_session_id(session_key: &str) -> &str {
         .map_or(session_key, |(id, _)| id)
 }
 
-/// Parse transcript file to calculate today's cost
-///
-/// This is a simplified parser that reads a single transcript file,
-/// extracts usage blocks, calculates costs, and filters by today's date.
-fn parse_transcript_today_cost(transcript_path: &Path, today: &str) -> Result<(f64, usize)> {
+fn i64_from_u64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn event_hash_key(prefix: &str, material: &str) -> String {
+    use std::fmt::Write;
+
+    let mut hasher = Sha256::new();
+    hasher.update(material.as_bytes());
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(&mut encoded, "{byte:02x}");
+    }
+    format!("{prefix}:{encoded}")
+}
+
+fn event_key(
+    source: &str,
+    session_id: &str,
+    today: &str,
+    identity: &str,
+    fingerprint: &str,
+) -> String {
+    event_hash_key(
+        "usage",
+        &format!("{source}|{session_id}|{today}|{identity}|{fingerprint}"),
+    )
+}
+
+fn synthetic_usage_event(
+    session_id: &str,
+    transcript_path: &str,
+    today: &str,
+    cost: f64,
+    source: &'static str,
+) -> UsageEvent {
+    let now = Utc::now().timestamp();
+    UsageEvent {
+        event_key: event_key(source, session_id, today, source, &cost.to_string()),
+        session_id: session_id.to_string(),
+        transcript_path: transcript_path.to_string(),
+        ts: now,
+        today_date: today.to_string(),
+        model: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_create_tokens: 0,
+        cache_read_tokens: 0,
+        web_search_requests: 0,
+        cost: cost.max(0.0),
+        source,
+    }
+}
+
+fn usage_event_from_entry(
+    session_id: &str,
+    transcript_path: &str,
+    today: &str,
+    entry: &Entry,
+) -> Option<UsageEvent> {
+    if entry.session_id.as_deref() != Some(session_id) {
+        return None;
+    }
+
+    let local_date = entry
+        .ts
+        .with_timezone(&Local)
+        .format("%Y-%m-%d")
+        .to_string();
+    if local_date != today {
+        return None;
+    }
+
+    let identity = if let Some(req_id) = &entry.req_id {
+        format!("R:{req_id}")
+    } else if let Some(msg_id) = &entry.msg_id {
+        format!("M:{msg_id}")
+    } else {
+        format!(
+            "F:{}:{}:{}:{}:{}:{}",
+            entry.ts.to_rfc3339(),
+            entry.model.as_deref().unwrap_or_default(),
+            entry.input,
+            entry.output,
+            entry.cache_create,
+            entry.cache_read
+        )
+    };
+    let fingerprint = format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}",
+        entry.ts.to_rfc3339(),
+        entry.model.as_deref().unwrap_or_default(),
+        entry.input,
+        entry.output,
+        entry.cache_create,
+        entry.cache_read,
+        entry.web_search_requests,
+        entry.agent_id.as_deref().unwrap_or_default()
+    );
+
+    Some(UsageEvent {
+        event_key: event_key("scan_entry", session_id, today, &identity, &fingerprint),
+        session_id: session_id.to_string(),
+        transcript_path: transcript_path.to_string(),
+        ts: entry.ts.timestamp(),
+        today_date: today.to_string(),
+        model: entry.model.clone(),
+        input_tokens: entry.input,
+        output_tokens: entry.output,
+        cache_create_tokens: entry.cache_create,
+        cache_read_tokens: entry.cache_read,
+        web_search_requests: entry.web_search_requests,
+        cost: entry.cost.max(0.0),
+        source: "scan_entry",
+    })
+}
+
+fn events_cost(events: &[UsageEvent]) -> f64 {
+    events.iter().map(|event| event.cost).sum()
+}
+
+fn reconcile_events_with_provided_cost(
+    mut events: Vec<UsageEvent>,
+    session_id: &str,
+    transcript_path: &str,
+    today: &str,
+    provided_cost: Option<f64>,
+) -> Vec<UsageEvent> {
+    let Some(provided_cost) = provided_cost else {
+        return events;
+    };
+
+    let event_cost = events_cost(&events);
+    let diff = provided_cost - event_cost;
+    if diff.abs() <= COST_EPSILON {
+        return events;
+    }
+
+    if events.is_empty() || diff < 0.0 {
+        return vec![synthetic_usage_event(
+            session_id,
+            transcript_path,
+            today,
+            provided_cost,
+            "scan_summary",
+        )];
+    }
+
+    events.push(synthetic_usage_event(
+        session_id,
+        transcript_path,
+        today,
+        diff,
+        "scan_adjustment",
+    ));
+    events
+}
+
+fn usage_events_from_entries(
+    session_id: &str,
+    transcript_path: &str,
+    today: &str,
+    entries: &[Entry],
+) -> Vec<UsageEvent> {
+    entries
+        .iter()
+        .filter_map(|entry| usage_event_from_entry(session_id, transcript_path, today, entry))
+        .collect()
+}
+
+fn summarize_usage_events(events: &[UsageEvent]) -> (f64, usize) {
+    let entry_count = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.source,
+                "scan_entry" | "transcript_cost" | "transcript_usage"
+            )
+        })
+        .count();
+    (events_cost(events), entry_count)
+}
+
+fn has_usage_events_for_session_date(
+    conn: &Connection,
+    session_id: &str,
+    today: &str,
+) -> Result<bool> {
+    let exists = conn
+        .query_row(
+            sql::HAS_USAGE_EVENTS_FOR_SESSION_DATE,
+            params![session_id, today],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    Ok(exists)
+}
+
+#[cfg(test)]
+fn replace_usage_events_for_session_date(
+    conn: &Connection,
+    session_id: &str,
+    today: &str,
+    events: &[UsageEvent],
+) -> Result<()> {
+    run_schema_change(conn, |conn| {
+        replace_usage_events_for_session_date_in_transaction(conn, session_id, today, events)
+    })
+}
+
+fn replace_usage_events_for_session_date_in_transaction(
+    conn: &Connection,
+    session_id: &str,
+    today: &str,
+    events: &[UsageEvent],
+) -> Result<()> {
+    conn.execute(
+        sql::DELETE_USAGE_EVENTS_FOR_SESSION_DATE,
+        params![session_id, today],
+    )?;
+    let now = Utc::now().timestamp();
+    let mut stmt = conn.prepare(sql::UPSERT_USAGE_EVENT)?;
+    for event in events {
+        stmt.execute(params![
+            &event.event_key,
+            &event.session_id,
+            &event.transcript_path,
+            event.ts,
+            &event.today_date,
+            event.model.as_deref(),
+            i64_from_u64(event.input_tokens),
+            i64_from_u64(event.output_tokens),
+            i64_from_u64(event.cache_create_tokens),
+            i64_from_u64(event.cache_read_tokens),
+            i64_from_u64(event.web_search_requests),
+            event.cost,
+            event.source,
+            now,
+            now
+        ])?;
+    }
+    Ok(())
+}
+
+struct SessionUsageUpdate<'a> {
+    session_key: &'a str,
+    transcript_path: &'a Path,
+    mtime: i64,
+    today: &'a str,
+    cost: f64,
+    count: usize,
+    events: &'a [UsageEvent],
+}
+
+fn upsert_session_and_usage_events(
+    conn: &Connection,
+    update: SessionUsageUpdate<'_>,
+) -> Result<()> {
+    run_schema_change(conn, |conn| {
+        replace_usage_events_for_session_date_in_transaction(
+            conn,
+            update.session_key,
+            update.today,
+            update.events,
+        )?;
+        upsert_session(
+            conn,
+            update.session_key,
+            update.transcript_path,
+            update.mtime,
+            update.today,
+            update.cost,
+            update.count,
+        )
+    })
+}
+
+fn transcript_cost_event(
+    session_id: &str,
+    transcript_path: &str,
+    today: &str,
+    agg_key: &str,
+    ts: i64,
+    cost: f64,
+) -> UsageEvent {
+    UsageEvent {
+        event_key: event_key("transcript_cost", session_id, today, agg_key, "cost_usd"),
+        session_id: session_id.to_string(),
+        transcript_path: transcript_path.to_string(),
+        ts,
+        today_date: today.to_string(),
+        model: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_create_tokens: 0,
+        cache_read_tokens: 0,
+        web_search_requests: 0,
+        cost: cost.max(0.0),
+        source: "transcript_cost",
+    }
+}
+
+struct TranscriptUsageEventInput<'a> {
+    session_id: &'a str,
+    transcript_path: &'a str,
+    today: &'a str,
+    agg_key: &'a str,
+    fingerprint: &'a str,
+    ts: i64,
+    model_id: &'a str,
+    input: u64,
+    output: u64,
+    cache_create: u64,
+    cache_read: u64,
+    web_search_requests: u64,
+    cost: f64,
+}
+
+fn transcript_usage_event(input: TranscriptUsageEventInput<'_>) -> UsageEvent {
+    UsageEvent {
+        event_key: event_key(
+            "transcript_usage",
+            input.session_id,
+            input.today,
+            input.agg_key,
+            input.fingerprint,
+        ),
+        session_id: input.session_id.to_string(),
+        transcript_path: input.transcript_path.to_string(),
+        ts: input.ts,
+        today_date: input.today.to_string(),
+        model: Some(input.model_id.to_string()),
+        input_tokens: input.input,
+        output_tokens: input.output,
+        cache_create_tokens: input.cache_create,
+        cache_read_tokens: input.cache_read,
+        web_search_requests: input.web_search_requests,
+        cost: input.cost.max(0.0),
+        source: "transcript_usage",
+    }
+}
+
+/// Parse transcript file into normalized cost events for today's usage.
+fn parse_transcript_today_events(
+    session_id: &str,
+    transcript_path: &Path,
+    today: &str,
+) -> Result<Vec<UsageEvent>> {
     use serde_json::Value;
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
     let file = File::open(transcript_path)?;
     let reader = BufReader::new(file);
+    let transcript_str = transcript_path
+        .to_str()
+        .context("Invalid transcript path")?;
 
-    let mut aggregated_costs: HashMap<String, f64> = HashMap::new();
+    let mut aggregated_events: HashMap<String, UsageEvent> = HashMap::new();
     let mut last_seen_raw: HashMap<String, (u64, u64, u64, u64)> = HashMap::new();
     let mut force_delta_mode: HashMap<String, bool> = HashMap::new();
 
@@ -671,6 +1171,9 @@ fn parse_transcript_today_cost(transcript_path: &Path, today: &str) -> Result<(f
         if timestamp_date != today {
             continue;
         }
+        let ts = chrono::DateTime::parse_from_rfc3339(timestamp_str.unwrap_or_default())
+            .map(|parsed| parsed.with_timezone(&Utc).timestamp())
+            .unwrap_or_else(|_| Utc::now().timestamp());
 
         let message = v.get("message");
         let mid = message
@@ -695,9 +1198,16 @@ fn parse_transcript_today_cost(transcript_path: &Path, today: &str) -> Result<(f
             } else {
                 format!("C:{}|{}", timestamp_str.unwrap_or_default(), cost)
             };
-            let current = aggregated_costs.entry(agg_key).or_insert(cost);
-            if cost > *current {
-                *current = cost;
+            let event =
+                transcript_cost_event(session_id, transcript_str, today, &agg_key, ts, cost);
+            match aggregated_events.get_mut(&agg_key) {
+                Some(current) if cost > current.cost => {
+                    *current = event;
+                }
+                None => {
+                    aggregated_events.insert(agg_key, event);
+                }
+                Some(_) => {}
             }
             continue;
         }
@@ -776,6 +1286,21 @@ fn parse_transcript_today_cost(transcript_path: &Path, today: &str) -> Result<(f
                 } else {
                     format!("F:{}", composite)
                 };
+                let event = transcript_usage_event(TranscriptUsageEventInput {
+                    session_id,
+                    transcript_path: transcript_str,
+                    today,
+                    agg_key: &agg_key,
+                    fingerprint: &composite,
+                    ts,
+                    model_id,
+                    input,
+                    output,
+                    cache_create,
+                    cache_read,
+                    web_search_requests,
+                    cost,
+                });
 
                 let prev_raw = last_seen_raw.get(&agg_key).copied();
                 let mut is_delta = *force_delta_mode.get(&agg_key).unwrap_or(&false);
@@ -804,34 +1329,101 @@ fn parse_transcript_today_cost(transcript_path: &Path, today: &str) -> Result<(f
                             prev_cache_read + cache_read,
                         ),
                     );
-                    *aggregated_costs.entry(agg_key).or_insert(0.0) += cost;
+                    let current = aggregated_events.entry(agg_key).or_insert(event);
+                    current.ts = current.ts.max(ts);
+                    current.input_tokens = current.input_tokens.saturating_add(input);
+                    current.output_tokens = current.output_tokens.saturating_add(output);
+                    current.cache_create_tokens =
+                        current.cache_create_tokens.saturating_add(cache_create);
+                    current.cache_read_tokens =
+                        current.cache_read_tokens.saturating_add(cache_read);
+                    current.web_search_requests = current
+                        .web_search_requests
+                        .saturating_add(web_search_requests);
+                    current.cost += cost;
+                    if current.model.is_none() {
+                        current.model = Some(model_id.to_string());
+                    }
                 } else {
                     last_seen_raw
                         .insert(agg_key.clone(), (input, output, cache_create, cache_read));
-                    let current = aggregated_costs.entry(agg_key).or_insert(cost);
-                    if cost > *current {
-                        *current = cost;
+                    match aggregated_events.get_mut(&agg_key) {
+                        Some(current) if cost > current.cost => {
+                            *current = event;
+                        }
+                        None => {
+                            aggregated_events.insert(agg_key, event);
+                        }
+                        Some(_) => {}
                     }
                 }
             }
         }
     }
 
-    let today_cost = aggregated_costs.values().sum();
-    let entry_count = aggregated_costs.len();
-    Ok((today_cost, entry_count))
+    Ok(aggregated_events.into_values().collect())
 }
 
-fn session_cost_for_today(
+/// Parse transcript file to calculate today's cost.
+///
+/// This wrapper keeps parser assertions focused on the same normalized events
+/// used by the main DB path.
+#[cfg(test)]
+fn parse_transcript_today_cost(transcript_path: &Path, today: &str) -> Result<(f64, usize)> {
+    let events = parse_transcript_today_events("transcript-parser", transcript_path, today)?;
+    Ok(summarize_usage_events(&events))
+}
+
+fn session_usage_for_today(
+    session_id: &str,
     transcript_path: &Path,
     today: &str,
     provided_cost: Option<f64>,
-) -> Result<(f64, usize)> {
-    if let Some(cost) = provided_cost {
-        Ok((cost, 0))
+    session_entries: Option<&[Entry]>,
+) -> Result<(Vec<UsageEvent>, f64, usize)> {
+    let transcript_str = transcript_path
+        .to_str()
+        .context("Invalid transcript path")?;
+    let mut events = if let Some(entries) = session_entries {
+        usage_events_from_entries(session_id, transcript_str, today, entries)
     } else {
-        parse_transcript_today_cost(transcript_path, today)
+        Vec::new()
+    };
+
+    if events.is_empty() {
+        if let Some(cost) = provided_cost {
+            events.push(synthetic_usage_event(
+                session_id,
+                transcript_str,
+                today,
+                cost,
+                "scan_summary",
+            ));
+        } else {
+            events = parse_transcript_today_events(session_id, transcript_path, today)?;
+        }
+    } else {
+        events = reconcile_events_with_provided_cost(
+            events,
+            session_id,
+            transcript_str,
+            today,
+            provided_cost,
+        );
     }
+
+    if events.is_empty() {
+        events.push(synthetic_usage_event(
+            session_id,
+            transcript_str,
+            today,
+            0.0,
+            "transcript_empty",
+        ));
+    }
+
+    let (cost, count) = summarize_usage_events(&events);
+    Ok((events, cost, count))
 }
 
 /// Get global usage across all sessions
@@ -849,6 +1441,7 @@ pub fn get_global_usage(
     _project_dir: &str,
     transcript_path: &Path,
     session_today_cost: Option<f64>,
+    session_entries: Option<&[Entry]>,
 ) -> Result<GlobalUsage> {
     if let Ok(val) = env::var("CLAUDE_DB_CACHE_DISABLE")
         && val == "1"
@@ -883,52 +1476,96 @@ pub fn get_global_usage(
     let current_session_cost = if let Some(cached_session) = cached {
         // Only use cached cost if both mtime and date match (prevents using yesterday's cost after midnight)
         if cached_session.transcript_mtime == current_mtime && cached_session.today_date == today {
+            let events_missing = !has_usage_events_for_session_date(&conn, &session_key, &today)?;
             if cached_session.transcript_path != transcript_str
                 || cached_session.session_key != session_key
+                || events_missing
             {
-                upsert_session(
-                    &conn,
-                    &session_key,
-                    transcript_path,
-                    current_mtime,
-                    &today,
-                    cached_session.today_cost,
-                    cached_session.entry_count,
-                )?;
+                if events_missing || cached_session.transcript_path != transcript_str {
+                    let (events, _, _) = session_usage_for_today(
+                        &session_key,
+                        transcript_path,
+                        &today,
+                        Some(cached_session.today_cost),
+                        session_entries,
+                    )?;
+                    upsert_session_and_usage_events(
+                        &conn,
+                        SessionUsageUpdate {
+                            session_key: &session_key,
+                            transcript_path,
+                            mtime: current_mtime,
+                            today: &today,
+                            cost: cached_session.today_cost,
+                            count: cached_session.entry_count,
+                            events: &events,
+                        },
+                    )?;
+                } else {
+                    upsert_session(
+                        &conn,
+                        &session_key,
+                        transcript_path,
+                        current_mtime,
+                        &today,
+                        cached_session.today_cost,
+                        cached_session.entry_count,
+                    )?;
+                }
                 db_was_modified = true;
             }
             cached_session.today_cost
         } else {
-            let (cost, count) =
-                session_cost_for_today(transcript_path, &today, session_today_cost)?;
-            upsert_session(
-                &conn,
+            let (events, cost, count) = session_usage_for_today(
                 &session_key,
                 transcript_path,
-                current_mtime,
                 &today,
-                cost,
-                count,
+                session_today_cost,
+                session_entries,
+            )?;
+            upsert_session_and_usage_events(
+                &conn,
+                SessionUsageUpdate {
+                    session_key: &session_key,
+                    transcript_path,
+                    mtime: current_mtime,
+                    today: &today,
+                    cost,
+                    count,
+                    events: &events,
+                },
             )?;
             db_was_modified = true;
             cost
         }
     } else {
-        let (cost, count) = session_cost_for_today(transcript_path, &today, session_today_cost)?;
-        upsert_session(
-            &conn,
+        let (events, cost, count) = session_usage_for_today(
             &session_key,
             transcript_path,
-            current_mtime,
             &today,
-            cost,
-            count,
+            session_today_cost,
+            session_entries,
+        )?;
+        upsert_session_and_usage_events(
+            &conn,
+            SessionUsageUpdate {
+                session_key: &session_key,
+                transcript_path,
+                mtime: current_mtime,
+                today: &today,
+                cost,
+                count,
+                events: &events,
+            },
         )?;
         db_was_modified = true;
         cost
     };
 
     if conn.execute(sql::DELETE_STALE_SESSIONS, params![today])? > 0 {
+        db_was_modified = true;
+    }
+    if conn.execute(sql::DELETE_STALE_USAGE_EVENTS, params![today])? > 0 {
         db_was_modified = true;
     }
 
@@ -1079,6 +1716,7 @@ mod tests {
         assert_eq!(sqlite_user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert!(table_has_column(&conn, "sessions", "session_id").unwrap());
         assert!(table_column_is_primary_key(&conn, "sessions", "session_id").unwrap());
+        assert!(table_has_column(&conn, "usage_events", "event_key").unwrap());
         unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
     }
 
@@ -1153,12 +1791,20 @@ mod tests {
             .unwrap()
             .unwrap();
         let metadata_has_updated_at = table_has_column(&conn, "metadata", "updated_at").unwrap();
+        let usage_event_cost: f64 = conn
+            .query_row(
+                "SELECT cost FROM usage_events WHERE session_id = ?",
+                params!["legacy-session"],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         assert_eq!(session_id, "legacy-session");
         assert_eq!(schema_version.value, SCHEMA_VERSION_STR);
         assert_eq!(sqlite_user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert!(metadata_has_updated_at);
         assert!(table_column_is_primary_key(&conn, "sessions", "session_id").unwrap());
+        assert!((usage_event_cost - 1.23).abs() < 1e-10);
         unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
     }
 
@@ -1268,11 +1914,20 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
+        let (event_rows, event_cost): (i64, f64) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(cost), 0.0) FROM usage_events WHERE session_id = ?",
+                params!["dup-session"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
 
         assert_eq!(rows, 1);
         assert_eq!(session_key, "dup-session:/new/project");
         assert_eq!(transcript_path, "/tmp/new.jsonl");
         assert!((cost - 2.34).abs() < 1e-10);
+        assert_eq!(event_rows, 1);
+        assert!((event_cost - 2.34).abs() < 1e-10);
         assert_eq!(sqlite_user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert!(table_column_is_primary_key(&conn, "sessions", "session_id").unwrap());
         unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
@@ -1427,8 +2082,14 @@ mod tests {
         )
         .unwrap();
 
-        let usage =
-            get_global_usage("sess-path-refresh", "/project", &new_transcript_path, None).unwrap();
+        let usage = get_global_usage(
+            "sess-path-refresh",
+            "/project",
+            &new_transcript_path,
+            None,
+            None,
+        )
+        .unwrap();
         let (entry_count, transcript_path): (i64, String) = conn
             .query_row(
                 "SELECT entry_count, transcript_path FROM sessions WHERE session_key = ?",
@@ -1438,6 +2099,7 @@ mod tests {
             .unwrap();
 
         assert!((usage.session_cost - 4.56).abs() < 1e-10);
+        assert!((usage.global_today - 4.56).abs() < 1e-10);
         assert_eq!(entry_count, 7);
         assert_eq!(transcript_path, new_transcript_path.display().to_string());
         unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
@@ -1473,7 +2135,8 @@ mod tests {
         )
         .unwrap();
 
-        let usage = get_global_usage("sess-normalize", "/project", &transcript_path, None).unwrap();
+        let usage =
+            get_global_usage("sess-normalize", "/project", &transcript_path, None, None).unwrap();
         let session_key: String = conn
             .query_row(
                 "SELECT session_key FROM sessions WHERE session_id = ?",
@@ -1483,7 +2146,138 @@ mod tests {
             .unwrap();
 
         assert!((usage.session_cost - 4.56).abs() < 1e-10);
+        assert!((usage.global_today - 4.56).abs() < 1e-10);
         assert_eq!(session_key, "sess-normalize");
+        unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_global_usage_writes_usage_events_from_scan_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("events.db");
+        let transcript_path = temp_dir.path().join("transcript.jsonl");
+        std::fs::write(&transcript_path, "{}\n").unwrap();
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
+
+        let ts = Utc::now();
+        let entries = vec![
+            Entry {
+                ts,
+                input: 100,
+                output: 200,
+                cache_create: 50,
+                cache_read: 25,
+                web_search_requests: 1,
+                speed: None,
+                service_tier: None,
+                cost: 1.0,
+                model: Some("claude-sonnet-4-6".to_string()),
+                session_id: Some("event-session".to_string()),
+                msg_id: Some("msg-1".to_string()),
+                req_id: Some("req-1".to_string()),
+                project: Some("project".to_string()),
+                agent_id: None,
+            },
+            Entry {
+                ts,
+                input: 50,
+                output: 100,
+                cache_create: 25,
+                cache_read: 10,
+                web_search_requests: 2,
+                speed: None,
+                service_tier: None,
+                cost: 0.5,
+                model: Some("claude-sonnet-4-6".to_string()),
+                session_id: Some("event-session".to_string()),
+                msg_id: Some("msg-2".to_string()),
+                req_id: Some("req-2".to_string()),
+                project: Some("project".to_string()),
+                agent_id: Some("agent-1".to_string()),
+            },
+            Entry {
+                ts,
+                input: 1,
+                output: 1,
+                cache_create: 1,
+                cache_read: 1,
+                web_search_requests: 1,
+                speed: None,
+                service_tier: None,
+                cost: 9.0,
+                model: Some("claude-opus-4-6".to_string()),
+                session_id: Some("other-session".to_string()),
+                msg_id: Some("msg-other".to_string()),
+                req_id: Some("req-other".to_string()),
+                project: Some("project".to_string()),
+                agent_id: None,
+            },
+        ];
+
+        let usage = get_global_usage(
+            "event-session",
+            "/project",
+            &transcript_path,
+            Some(1.75),
+            Some(&entries),
+        )
+        .unwrap();
+
+        let conn = open_db().unwrap();
+        let (event_rows, cost, input, output, cache_create, cache_read, searches): (
+            i64,
+            f64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(cost), 0.0),
+                        COALESCE(SUM(input_tokens), 0),
+                        COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(cache_create_tokens), 0),
+                        COALESCE(SUM(cache_read_tokens), 0),
+                        COALESCE(SUM(web_search_requests), 0)
+                 FROM usage_events
+                 WHERE session_id = ?",
+                params!["event-session"],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let adjustment_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_events WHERE session_id = ? AND source = ?",
+                params!["event-session", "scan_adjustment"],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!((usage.session_cost - 1.75).abs() < 1e-10);
+        assert!((usage.global_today - 1.75).abs() < 1e-10);
+        assert_eq!(usage.sessions_count, 1);
+        assert_eq!(event_rows, 3);
+        assert_eq!(adjustment_rows, 1);
+        assert!((cost - 1.75).abs() < 1e-10);
+        assert_eq!(input, 150);
+        assert_eq!(output, 300);
+        assert_eq!(cache_create, 75);
+        assert_eq!(cache_read, 35);
+        assert_eq!(searches, 3);
         unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
     }
 
@@ -1602,6 +2396,7 @@ mod tests {
             "/old/project",
             &old_transcript_path,
             Some(1.23),
+            None,
         )
         .unwrap();
         let second = get_global_usage(
@@ -1609,6 +2404,7 @@ mod tests {
             "/new/project",
             &new_transcript_path,
             Some(1.23),
+            None,
         )
         .unwrap();
 
@@ -1622,7 +2418,11 @@ mod tests {
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
             .unwrap();
+        let event_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(rows, 1);
+        assert_eq!(event_rows, 1);
         let stored_transcript_path: String = conn
             .query_row(
                 "SELECT transcript_path FROM sessions WHERE session_key = ?",
@@ -1670,8 +2470,28 @@ mod tests {
         )
         .unwrap();
 
-        let usage =
-            get_global_usage("current-session", "/current", &transcript_path, Some(3.0)).unwrap();
+        replace_usage_events_for_session_date(
+            &conn,
+            "legacy-session",
+            &today,
+            &[synthetic_usage_event(
+                "legacy-session",
+                transcript_path.to_str().unwrap(),
+                &today,
+                2.0,
+                "session_summary",
+            )],
+        )
+        .unwrap();
+
+        let usage = get_global_usage(
+            "current-session",
+            "/current",
+            &transcript_path,
+            Some(3.0),
+            None,
+        )
+        .unwrap();
 
         assert!((usage.global_today - 5.0).abs() < 1e-10);
         assert_eq!(usage.sessions_count, 2);
@@ -1711,8 +2531,14 @@ mod tests {
         )
         .unwrap();
 
-        let usage =
-            get_global_usage("legacy-session", "/current", &transcript_path, Some(3.0)).unwrap();
+        let usage = get_global_usage(
+            "legacy-session",
+            "/current",
+            &transcript_path,
+            Some(3.0),
+            None,
+        )
+        .unwrap();
 
         assert!((usage.global_today - 3.0).abs() < 1e-10);
         assert_eq!(usage.sessions_count, 1);

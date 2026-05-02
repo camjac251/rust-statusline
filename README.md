@@ -94,7 +94,7 @@ Restart Claude Code. Done.
 | Metric | Description |
 |--------|-------------|
 | **session** | Cost of the current session (includes subagent costs) |
-| **today** | Aggregated cost across all concurrent sessions (via SQLite) |
+| **today** | Aggregated cost across all concurrent sessions (via SQLite usage ledger) |
 | **window** | Cost within the current 5-hour usage window |
 | **usage%** | OAuth-reported utilization and projected usage |
 | **burn** | Tokens per minute and cost per hour |
@@ -334,7 +334,7 @@ src/
 ├── usage_api.rs     # OAuth usage API client with SQLite-cached responses
 ├── pricing.rs       # Model pricing tables (compile-time from pricing.json)
 ├── provenance.rs    # Cost/pricing/context source metadata
-├── db.rs            # SQLite persistent cache (WAL mode, concurrent-safe)
+├── db.rs            # SQLite persistent cache and usage event ledger (WAL mode)
 ├── display.rs       # Text (colorized) and JSON output formatting
 ├── window.rs        # Usage window calculations
 ├── git.rs           # Repository inspection via gix (feature-gated)
