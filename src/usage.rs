@@ -1792,6 +1792,9 @@ mod tests {
 
         let mut file = fs::OpenOptions::new().append(true).open(&transcript)?;
         writeln!(file, "{{}}")?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
 
         let files = find_recent_jsonl_files(&root, cutoff);
 
