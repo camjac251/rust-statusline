@@ -26,7 +26,7 @@ use crate::models::{
     Entry, MessageUsage, PromptCacheBucketInfo, PromptCacheBucketKind, PromptCacheInfo,
     RateLimitInfo, TranscriptLine,
 };
-use crate::pricing::calculate_cost_for_usage;
+use crate::pricing::calculate_cost_for_usage_with_speed;
 use crate::utils::{context_limit_for_model_display, parse_iso_date, system_overhead_tokens};
 
 /// Session-specific state extracted from the session's own transcript file.
@@ -502,9 +502,11 @@ impl Default for MessageComplexity {
     }
 }
 
-/// Efficiently discover JSONL files using walkdir with directory-level mtime filtering.
-/// Skips entire directory trees when the directory mtime is older than cutoff,
-/// dramatically reducing stat() syscalls from O(all_files) to O(recent_dirs).
+/// Discover recent JSONL files.
+///
+/// Apply the cutoff to files only. Appending to a transcript updates the file
+/// mtime, but not reliably the parent directory mtime, so pruning directories
+/// can hide active sessions.
 fn find_recent_jsonl_files(root: &Path, cutoff: SystemTime) -> Vec<PathBuf> {
     WalkDir::new(root)
         .into_iter()
@@ -513,14 +515,9 @@ fn find_recent_jsonl_files(root: &Path, cutoff: SystemTime) -> Vec<PathBuf> {
             if entry.depth() == 0 {
                 return true;
             }
-            // For directories, check mtime - if old, skip entire subtree
+            // Do not prune directories by mtime; active transcript files may
+            // live inside old project directories.
             if entry.file_type().is_dir() {
-                if let Ok(meta) = entry.metadata() {
-                    if let Ok(mtime) = meta.modified() {
-                        return mtime >= cutoff;
-                    }
-                }
-                // If we can't get mtime, include the directory to be safe
                 return true;
             }
             // For files, only include .jsonl files
@@ -1037,10 +1034,21 @@ pub fn scan_usage(
                     .get("output_tokens")
                     .and_then(|n| n.as_u64())
                     .unwrap_or(0);
-                let cache_create = usage
+                let cache_create_reported = usage
                     .get("cache_creation_input_tokens")
                     .and_then(|n| n.as_u64())
                     .unwrap_or(0);
+                let cache_create_1h = usage
+                    .get("cache_creation")
+                    .and_then(|creation| creation.get("ephemeral_1h_input_tokens"))
+                    .and_then(|n| n.as_u64())
+                    .unwrap_or(0);
+                let cache_create_5m = usage
+                    .get("cache_creation")
+                    .and_then(|creation| creation.get("ephemeral_5m_input_tokens"))
+                    .and_then(|n| n.as_u64())
+                    .unwrap_or(0);
+                let cache_create = cache_create_reported.max(cache_create_1h + cache_create_5m);
                 let cache_read = usage
                     .get("cache_read_input_tokens")
                     .and_then(|n| n.as_u64())
@@ -1113,7 +1121,7 @@ pub fn scan_usage(
                     sid_by_rid.insert(r.clone(), s.clone());
                 }
                 if let Some(ref mdl) = model {
-                    cost = calculate_cost_for_usage(mdl, usage);
+                    cost = calculate_cost_for_usage_with_speed(mdl, usage, speed.as_deref());
                 }
                 // Decide whether updates for this key are cumulative totals or per-chunk deltas
                 let key_clone = agg_key.clone();
@@ -1255,6 +1263,8 @@ pub fn scan_usage(
     let mut entries: Vec<Entry> = aggregated.into_values().collect();
     entries.sort_by_key(|e| e.ts);
     let mut session_today_cost = 0.0f64; // This session's cost for today only
+    let mut session_has_entries = false;
+    let mut session_has_non_today_entries = false;
     for e in &entries {
         let ts_s = e.ts.to_rfc3339();
         let is_today = if let Some(d) = parse_iso_date(&ts_s) {
@@ -1264,9 +1274,12 @@ pub fn scan_usage(
         };
 
         if e.session_id.as_deref() == Some(session_id) {
+            session_has_entries = true;
             session_cost += e.cost;
             if is_today {
                 session_today_cost += e.cost; // Track this session's today cost
+            } else {
+                session_has_non_today_entries = true;
             }
         }
 
@@ -1276,6 +1289,10 @@ pub fn scan_usage(
     }
     // Prefer result-derived session cost if present
     if session_cost_via_results > 0.0 {
+        if session_has_entries && !session_has_non_today_entries {
+            today_cost += session_cost_via_results - session_today_cost;
+            session_today_cost = session_cost_via_results;
+        }
         session_cost = session_cost_via_results;
     }
 
@@ -1535,17 +1552,29 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::fs;
+    use std::io::Write;
     use tempfile::tempdir;
 
     fn write_transcript_line(
         session_id: &str,
         line: serde_json::Value,
     ) -> Result<tempfile::TempDir> {
+        write_transcript_lines(session_id, &[line])
+    }
+
+    fn write_transcript_lines(
+        session_id: &str,
+        lines: &[serde_json::Value],
+    ) -> Result<tempfile::TempDir> {
         let dir = tempdir()?;
         let project = dir.path().join("projects").join("project");
         fs::create_dir_all(&project)?;
         let transcript = project.join(format!("{}.jsonl", session_id));
-        fs::write(&transcript, format!("{}\n", line))?;
+        let contents = lines
+            .iter()
+            .map(|line| format!("{}\n", line))
+            .collect::<String>();
+        fs::write(&transcript, contents)?;
         Ok(dir)
     }
 
@@ -1585,6 +1614,188 @@ mod tests {
         assert!((session_cost - 220.52).abs() < 1e-10);
         assert!((session_today_cost - 220.52).abs() < 1e-10);
         assert!((today_cost - 220.52).abs() < 1e-10);
+        Ok(())
+    }
+
+    #[test]
+    fn scan_usage_prices_top_level_fast_speed() -> Result<()> {
+        let session_id = format!(
+            "fast-top-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let line = json!({
+            "type": "assistant",
+            "sessionId": session_id,
+            "timestamp": Local::now().to_rfc3339(),
+            "speed": "fast",
+            "message": {
+                "role": "assistant",
+                "id": "msg-fast-top",
+                "model": "claude-opus-4-6",
+                "usage": {
+                    "input_tokens": 1_000_000,
+                    "output_tokens": 1_000_000,
+                    "cache_creation_input_tokens": 1_000_000,
+                    "cache_read_input_tokens": 1_000_000,
+                    "server_tool_use": { "web_search_requests": 2 }
+                }
+            }
+        });
+        let dir = write_transcript_line(&session_id, line)?;
+        let base = dir.path().to_path_buf();
+
+        let (session_cost, session_today_cost, today_cost, entries, _, _, _) =
+            scan_usage(&[base], &session_id, None, None)?;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].speed.as_deref(), Some("fast"));
+        assert!((entries[0].cost - 220.52).abs() < 1e-10);
+        assert!((session_cost - 220.52).abs() < 1e-10);
+        assert!((session_today_cost - 220.52).abs() < 1e-10);
+        assert!((today_cost - 220.52).abs() < 1e-10);
+        Ok(())
+    }
+
+    #[test]
+    fn scan_usage_prices_nested_only_cache_creation() -> Result<()> {
+        let session_id = format!(
+            "split-cache-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let line = json!({
+            "type": "assistant",
+            "sessionId": session_id,
+            "timestamp": Local::now().to_rfc3339(),
+            "message": {
+                "role": "assistant",
+                "id": "msg-split-cache",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation": {
+                        "ephemeral_1h_input_tokens": 1_000_000
+                    }
+                }
+            }
+        });
+        let dir = write_transcript_line(&session_id, line)?;
+        let base = dir.path().to_path_buf();
+
+        let (session_cost, session_today_cost, today_cost, entries, _, _, _) =
+            scan_usage(&[base], &session_id, None, None)?;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].cache_create, 1_000_000);
+        assert!((entries[0].cost - 6.0).abs() < 1e-10);
+        assert!((session_cost - 6.0).abs() < 1e-10);
+        assert!((session_today_cost - 6.0).abs() < 1e-10);
+        assert!((today_cost - 6.0).abs() < 1e-10);
+        Ok(())
+    }
+
+    #[test]
+    fn scan_usage_uses_result_cost_for_same_day_session_today() -> Result<()> {
+        let session_id = format!(
+            "result-cost-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let usage_line = json!({
+            "type": "assistant",
+            "sessionId": session_id,
+            "timestamp": Local::now().to_rfc3339(),
+            "message": {
+                "role": "assistant",
+                "id": "msg-result-cost",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 1_000,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+        let result_line = json!({
+            "type": "result",
+            "sessionId": session_id,
+            "timestamp": Local::now().to_rfc3339(),
+            "total_cost_usd": 1.0
+        });
+        let dir = write_transcript_lines(&session_id, &[usage_line, result_line])?;
+        let base = dir.path().to_path_buf();
+
+        let (session_cost, session_today_cost, today_cost, _, _, _, _) =
+            scan_usage(&[base], &session_id, None, None)?;
+
+        assert!((session_cost - 1.0).abs() < 1e-10);
+        assert!((session_today_cost - 1.0).abs() < 1e-10);
+        assert!((today_cost - 1.0).abs() < 1e-10);
+        Ok(())
+    }
+
+    #[test]
+    fn scan_usage_does_not_count_all_time_result_cost_as_today_for_cross_day_session() -> Result<()>
+    {
+        let session_id = format!(
+            "cross-day-result-cost-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let yesterday = Local::now() - Duration::days(1);
+        let usage_line = json!({
+            "type": "assistant",
+            "sessionId": session_id,
+            "timestamp": yesterday.to_rfc3339(),
+            "message": {
+                "role": "assistant",
+                "id": "msg-cross-day-result-cost",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 1_000,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+        let result_line = json!({
+            "type": "result",
+            "sessionId": session_id,
+            "timestamp": Local::now().to_rfc3339(),
+            "total_cost_usd": 1.0
+        });
+        let dir = write_transcript_lines(&session_id, &[usage_line, result_line])?;
+        let base = dir.path().to_path_buf();
+
+        let (session_cost, session_today_cost, today_cost, _, _, _, _) =
+            scan_usage(&[base], &session_id, None, None)?;
+
+        assert!((session_cost - 1.0).abs() < 1e-10);
+        assert_eq!(session_today_cost, 0.0);
+        assert_eq!(today_cost, 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn recent_jsonl_discovery_does_not_prune_old_project_directories() -> Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path().join("projects");
+        let project = root.join("project");
+        fs::create_dir_all(&project)?;
+        let transcript = project.join("session.jsonl");
+        fs::write(&transcript, "{}\n")?;
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let cutoff = SystemTime::now();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let mut file = fs::OpenOptions::new().append(true).open(&transcript)?;
+        writeln!(file, "{{}}")?;
+
+        let files = find_recent_jsonl_files(&root, cutoff);
+
+        assert_eq!(files, vec![transcript]);
         Ok(())
     }
 

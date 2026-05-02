@@ -348,8 +348,11 @@ fn usage_nested_u64(usage: &Value, parent: &str, key: &str) -> u64 {
         .unwrap_or(0)
 }
 
-fn usage_speed(usage: &Value) -> Option<&str> {
-    usage.get("speed").and_then(|s| s.as_str())
+fn usage_speed<'a>(usage: &'a Value, speed_override: Option<&'a str>) -> Option<&'a str> {
+    usage
+        .get("speed")
+        .and_then(|s| s.as_str())
+        .or(speed_override)
 }
 
 fn web_search_per_request() -> f64 {
@@ -360,7 +363,7 @@ fn web_search_per_request() -> f64 {
         .unwrap_or(0.01)
 }
 
-fn flat_cost_for_usage(model_id: &str, usage: &Value) -> f64 {
+fn flat_cost_for_usage(model_id: &str, usage: &Value, speed_override: Option<&str>) -> f64 {
     let Some(base_p) = pricing_for_model(model_id) else {
         return 0.0;
     };
@@ -392,7 +395,7 @@ fn flat_cost_for_usage(model_id: &str, usage: &Value) -> f64 {
         + (cache_read as f64) * p.cache_read_per_tok;
     let web_search_cost = (web_search_requests as f64) * web_search_per_request();
 
-    let token_multiplier = if usage_speed(usage) == Some("fast") {
+    let token_multiplier = if usage_speed(usage, speed_override) == Some("fast") {
         fast_mode_multiplier(model_id)
     } else {
         1.0
@@ -408,6 +411,16 @@ fn flat_cost_for_usage(model_id: &str, usage: &Value) -> f64 {
 /// tiers only, web search remains a flat per-request charge, and advisor
 /// iteration usage is charged recursively under its own model.
 pub fn calculate_cost_for_usage(model_id: &str, usage: &Value) -> f64 {
+    calculate_cost_for_usage_with_speed(model_id, usage, None)
+}
+
+/// Calculate cost for usage, using `speed_override` when the transcript stores
+/// speed on the enclosing line instead of inside `message.usage`.
+pub fn calculate_cost_for_usage_with_speed(
+    model_id: &str,
+    usage: &Value,
+    speed_override: Option<&str>,
+) -> f64 {
     let advisor_cost = usage
         .get("iterations")
         .and_then(|v| v.as_array())
@@ -423,7 +436,7 @@ pub fn calculate_cost_for_usage(model_id: &str, usage: &Value) -> f64 {
         })
         .unwrap_or(0.0);
 
-    flat_cost_for_usage(model_id, usage) + advisor_cost
+    flat_cost_for_usage(model_id, usage, speed_override) + advisor_cost
 }
 
 /// Apply tiered pricing multipliers if applicable based on token count

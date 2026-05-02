@@ -273,6 +273,7 @@ fn upsert_session(
         "INSERT INTO sessions (session_key, transcript_path, transcript_mtime, today_date, today_cost, entry_count, last_parsed_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(session_key) DO UPDATE SET
+             transcript_path = excluded.transcript_path,
              transcript_mtime = excluded.transcript_mtime,
              today_date = excluded.today_date,
              today_cost = excluded.today_cost,
@@ -294,6 +295,22 @@ fn upsert_session(
     ])?;
 
     Ok(())
+}
+
+fn stable_session_key(session_id: &str) -> String {
+    session_id.to_string()
+}
+
+fn delete_legacy_project_session_rows(conn: &Connection, session_id: &str) -> Result<usize> {
+    let session_len = session_id.len() as i64;
+    let colon_pos = session_len + 1;
+    let deleted = conn.execute(
+        "DELETE FROM sessions
+         WHERE substr(session_key, 1, ?) = ?
+           AND substr(session_key, ?, 1) = ':'",
+        params![session_len, session_id, colon_pos],
+    )?;
+    Ok(deleted)
 }
 
 /// Parse transcript file to calculate today's cost
@@ -383,7 +400,7 @@ fn parse_transcript_today_cost(transcript_path: &Path, today: &str) -> Result<(f
                 .get("output_tokens")
                 .and_then(|t| t.as_u64())
                 .unwrap_or(0);
-            let cache_create = usage
+            let cache_create_reported = usage
                 .get("cache_creation_input_tokens")
                 .and_then(|t| t.as_u64())
                 .unwrap_or(0);
@@ -391,22 +408,52 @@ fn parse_transcript_today_cost(transcript_path: &Path, today: &str) -> Result<(f
                 .get("cache_read_input_tokens")
                 .and_then(|t| t.as_u64())
                 .unwrap_or(0);
+            let cache_create_1h = usage
+                .get("cache_creation")
+                .and_then(|creation| creation.get("ephemeral_1h_input_tokens"))
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
+            let cache_create_5m = usage
+                .get("cache_creation")
+                .and_then(|creation| creation.get("ephemeral_5m_input_tokens"))
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
+            let cache_create = cache_create_reported.max(cache_create_1h + cache_create_5m);
+            let web_search_requests = usage
+                .get("server_tool_use")
+                .and_then(|o| o.get("web_search_requests"))
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0);
+            let speed = v
+                .get("speed")
+                .and_then(|s| s.as_str())
+                .or_else(|| usage.get("speed").and_then(|s| s.as_str()));
 
-            if input > 0 || output > 0 || cache_create > 0 || cache_read > 0 {
-                let model_id = v
-                    .get("model")
-                    .or_else(|| message.get("model"))
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("claude-sonnet-4");
-                let cost = crate::pricing::calculate_cost_for_usage(model_id, usage);
+            let model_id = v
+                .get("model")
+                .or_else(|| message.get("model"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("claude-sonnet-4");
+            let cost = crate::pricing::calculate_cost_for_usage_with_speed(model_id, usage, speed);
 
+            if cost > 0.0
+                || input > 0
+                || output > 0
+                || cache_create > 0
+                || cache_create_1h > 0
+                || cache_create_5m > 0
+                || cache_read > 0
+                || web_search_requests > 0
+            {
                 let composite = format!(
-                    "{}|{}|{}|{}|{}|{}",
+                    "{}|{}|{}|{}|{}|{}|{}|{}",
                     timestamp_str.unwrap_or_default(),
                     model_id,
                     input,
                     output,
                     cache_create,
+                    cache_create_1h,
+                    cache_create_5m,
                     cache_read
                 );
                 let agg_key = if let Some(ref r) = rid {
@@ -474,7 +521,7 @@ fn parse_transcript_today_cost(transcript_path: &Path, today: &str) -> Result<(f
 /// the transcript file (optimization to avoid double-parsing).
 pub fn get_global_usage(
     session_id: &str,
-    project_dir: &str,
+    _project_dir: &str,
     transcript_path: &Path,
     session_today_cost: Option<f64>,
 ) -> Result<GlobalUsage> {
@@ -485,7 +532,7 @@ pub fn get_global_usage(
     }
 
     let conn = open_db()?;
-    let session_key = format!("{}:{}", session_id, project_dir);
+    let session_key = stable_session_key(session_id);
     let today = Local::now().format("%Y-%m-%d").to_string();
 
     let metadata = fs::metadata(transcript_path)?;
@@ -493,16 +540,20 @@ pub fn get_global_usage(
         .modified()?
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
+    let transcript_str = transcript_path
+        .to_str()
+        .context("Invalid transcript path")?;
 
     let cached = conn
         .query_row(
-            "SELECT transcript_mtime, today_cost, today_date FROM sessions WHERE session_key = ?",
+            "SELECT transcript_mtime, today_cost, today_date, transcript_path FROM sessions WHERE session_key = ?",
             params![session_key],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, f64>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             },
         )
@@ -511,10 +562,42 @@ pub fn get_global_usage(
     // Track whether we modified the DB (to invalidate global sum cache)
     let mut db_was_modified = false;
 
-    let current_session_cost = if let Some((cached_mtime, cached_cost, cached_date)) = cached {
-        // Only use cached cost if both mtime and date match (prevents using yesterday's cost after midnight)
-        if cached_mtime == current_mtime && cached_date == today {
-            cached_cost
+    let current_session_cost =
+        if let Some((cached_mtime, cached_cost, cached_date, cached_transcript_path)) = cached {
+            // Only use cached cost if both mtime and date match (prevents using yesterday's cost after midnight)
+            if cached_mtime == current_mtime && cached_date == today {
+                if cached_transcript_path != transcript_str {
+                    upsert_session(
+                        &conn,
+                        &session_key,
+                        transcript_path,
+                        current_mtime,
+                        &today,
+                        cached_cost,
+                        0,
+                    )?;
+                    db_was_modified = true;
+                }
+                cached_cost
+            } else {
+                // Use provided session_today_cost if available (avoids re-parsing)
+                let (cost, count) = if let Some(provided_cost) = session_today_cost {
+                    (provided_cost, 0) // entry_count not needed when cost is provided
+                } else {
+                    parse_transcript_today_cost(transcript_path, &today)?
+                };
+                upsert_session(
+                    &conn,
+                    &session_key,
+                    transcript_path,
+                    current_mtime,
+                    &today,
+                    cost,
+                    count,
+                )?;
+                db_was_modified = true;
+                cost
+            }
         } else {
             // Use provided session_today_cost if available (avoids re-parsing)
             let (cost, count) = if let Some(provided_cost) = session_today_cost {
@@ -533,26 +616,11 @@ pub fn get_global_usage(
             )?;
             db_was_modified = true;
             cost
-        }
-    } else {
-        // Use provided session_today_cost if available (avoids re-parsing)
-        let (cost, count) = if let Some(provided_cost) = session_today_cost {
-            (provided_cost, 0) // entry_count not needed when cost is provided
-        } else {
-            parse_transcript_today_cost(transcript_path, &today)?
         };
-        upsert_session(
-            &conn,
-            &session_key,
-            transcript_path,
-            current_mtime,
-            &today,
-            cost,
-            count,
-        )?;
+
+    if delete_legacy_project_session_rows(&conn, session_id)? > 0 {
         db_was_modified = true;
-        cost
-    };
+    }
 
     conn.execute("DELETE FROM sessions WHERE today_date != ?", params![today])?;
 
@@ -592,16 +660,26 @@ pub fn get_global_usage(
         (sum, count)
     } else {
         // Cache miss or expired - run the query
-        let global_today: f64 = conn.query_row(
-            "SELECT COALESCE(SUM(today_cost), 0.0) FROM sessions WHERE today_date = ?",
+        let (global_today, sessions_count): (f64, usize) = conn.query_row(
+            "WITH logical_sessions AS (
+                SELECT
+                    CASE
+                        WHEN instr(session_key, ':') > 0
+                        THEN substr(session_key, 1, instr(session_key, ':') - 1)
+                        ELSE session_key
+                    END AS logical_session_key,
+                    MAX(today_cost) AS today_cost
+                FROM sessions
+                WHERE today_date = ?
+                GROUP BY logical_session_key
+            )
+            SELECT COALESCE(SUM(today_cost), 0.0), COUNT(*) FROM logical_sessions",
             params![today],
-            |row| row.get(0),
-        )?;
-
-        let sessions_count: usize = conn.query_row(
-            "SELECT COUNT(*) FROM sessions WHERE today_date = ?",
-            params![today],
-            |row| row.get::<_, i64>(0).map(|n| n as usize),
+            |row| {
+                let sum: f64 = row.get(0)?;
+                let count: i64 = row.get(1)?;
+                Ok((sum, count as usize))
+            },
         )?;
 
         // Cache the result for 5 seconds
@@ -805,6 +883,210 @@ mod tests {
 
         assert_eq!(count, 1);
         assert!((cost - 0.03).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_parse_transcript_today_cost_charges_split_cache_creation() {
+        let temp_dir = TempDir::new().unwrap();
+        let transcript_path = temp_dir.path().join("transcript.jsonl");
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let line = serde_json::json!({
+            "timestamp": Local::now().to_rfc3339(),
+            "message": {
+                "id": "msg-split-cache",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation": {
+                        "ephemeral_1h_input_tokens": 1_000_000
+                    }
+                }
+            }
+        });
+        std::fs::write(&transcript_path, format!("{}\n", line)).unwrap();
+
+        let (cost, count) = parse_transcript_today_cost(&transcript_path, &today).unwrap();
+
+        assert_eq!(count, 1);
+        assert!((cost - 6.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_parse_transcript_today_cost_prices_top_level_fast_speed() {
+        let temp_dir = TempDir::new().unwrap();
+        let transcript_path = temp_dir.path().join("transcript.jsonl");
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let line = serde_json::json!({
+            "timestamp": Local::now().to_rfc3339(),
+            "speed": "fast",
+            "message": {
+                "id": "msg-fast",
+                "model": "claude-opus-4-6",
+                "usage": {
+                    "input_tokens": 1_000_000,
+                    "output_tokens": 1_000_000,
+                    "cache_creation_input_tokens": 1_000_000,
+                    "cache_read_input_tokens": 1_000_000,
+                    "server_tool_use": { "web_search_requests": 2 }
+                }
+            }
+        });
+        std::fs::write(&transcript_path, format!("{}\n", line)).unwrap();
+
+        let (cost, count) = parse_transcript_today_cost(&transcript_path, &today).unwrap();
+
+        assert_eq!(count, 1);
+        assert!((cost - 220.52).abs() < 1e-10);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_global_usage_deduplicates_project_move() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let old_transcript_path = temp_dir.path().join("old-transcript.jsonl");
+        let new_transcript_path = temp_dir.path().join("new-transcript.jsonl");
+        std::fs::write(&old_transcript_path, "{}\n").unwrap();
+        std::fs::write(&new_transcript_path, "{}\n").unwrap();
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
+
+        let first = get_global_usage(
+            "sess-moved",
+            "/old/project",
+            &old_transcript_path,
+            Some(1.23),
+        )
+        .unwrap();
+        let second = get_global_usage(
+            "sess-moved",
+            "/new/project",
+            &new_transcript_path,
+            Some(1.23),
+        )
+        .unwrap();
+
+        assert!((first.global_today - 1.23).abs() < 1e-10);
+        assert_eq!(first.sessions_count, 1);
+        assert!((second.session_cost - 1.23).abs() < 1e-10);
+        assert!((second.global_today - 1.23).abs() < 1e-10);
+        assert_eq!(second.sessions_count, 1);
+
+        let conn = open_db().unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+        let stored_transcript_path: String = conn
+            .query_row(
+                "SELECT transcript_path FROM sessions WHERE session_key = ?",
+                params!["sess-moved"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored_transcript_path,
+            new_transcript_path.display().to_string()
+        );
+        unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_global_usage_deduplicates_legacy_project_keys() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let transcript_path = temp_dir.path().join("transcript.jsonl");
+        std::fs::write(&transcript_path, "{}\n").unwrap();
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
+
+        let conn = open_db().unwrap();
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        upsert_session(
+            &conn,
+            "legacy-session:/old/project",
+            &transcript_path,
+            1,
+            &today,
+            1.0,
+            0,
+        )
+        .unwrap();
+        upsert_session(
+            &conn,
+            "legacy-session:/new/project",
+            &transcript_path,
+            1,
+            &today,
+            2.0,
+            0,
+        )
+        .unwrap();
+
+        let usage =
+            get_global_usage("current-session", "/current", &transcript_path, Some(3.0)).unwrap();
+
+        assert!((usage.global_today - 5.0).abs() < 1e-10);
+        assert_eq!(usage.sessions_count, 2);
+        unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_global_usage_removes_legacy_rows_for_active_session() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let transcript_path = temp_dir.path().join("transcript.jsonl");
+        std::fs::write(&transcript_path, "{}\n").unwrap();
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
+
+        let conn = open_db().unwrap();
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        upsert_session(
+            &conn,
+            "legacy-session:/old/project",
+            &transcript_path,
+            1,
+            &today,
+            1.0,
+            0,
+        )
+        .unwrap();
+        upsert_session(
+            &conn,
+            "legacy-session:/new/project",
+            &transcript_path,
+            1,
+            &today,
+            2.0,
+            0,
+        )
+        .unwrap();
+
+        let usage =
+            get_global_usage("legacy-session", "/current", &transcript_path, Some(3.0)).unwrap();
+
+        assert!((usage.global_today - 3.0).abs() < 1e-10);
+        assert_eq!(usage.sessions_count, 1);
+        let legacy_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions
+                 WHERE substr(session_key, 1, ?) = ?
+                   AND substr(session_key, ?, 1) = ':'",
+                params![
+                    "legacy-session".len() as i64,
+                    "legacy-session",
+                    "legacy-session".len() as i64 + 1
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_rows, 0);
+        unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
     }
 
     #[test]
