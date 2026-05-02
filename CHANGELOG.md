@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## [1.5.2](https://github.com/camjac251/rust-statusline/compare/v1.5.1...v1.5.2) - 2026-05-02
+
+### Other
+
+- *(db)* add usage event ledger
+- *(db)* make session id the cache key
+- *(usage)* remove process-local scan cache
+- *(db)* tighten session cache schema
+
 ## [1.5.1](https://github.com/camjac251/rust-statusline/compare/v1.5.0...v1.5.1) - 2026-05-02
 
 ### Fixed
