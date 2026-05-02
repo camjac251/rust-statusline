@@ -166,6 +166,7 @@ fn prompt_cache_json(info: Option<&PromptCacheInfo>) -> serde_json::Value {
             "read_age_seconds": info.read_age_seconds(),
             "remaining_seconds": info.remaining_seconds(),
             "percent_remaining": (info.percent_remaining() * 10.0).round() / 10.0,
+            "cache_write_input_tokens": info.cache_write_input_tokens,
             "cache_read_input_tokens": info.cache_read_input_tokens,
             "buckets": buckets,
         })
@@ -173,41 +174,15 @@ fn prompt_cache_json(info: Option<&PromptCacheInfo>) -> serde_json::Value {
     .unwrap_or(serde_json::Value::Null)
 }
 
-fn format_duration_compact(seconds: i64) -> String {
-    let seconds = seconds.max(0);
-    if seconds >= 3600 {
-        let hours = seconds / 3600;
-        let mins = (seconds % 3600) / 60;
-        if mins == 0 {
-            format!("{}h", hours)
-        } else {
-            format!("{}h{}m", hours, mins)
-        }
-    } else if seconds >= 60 {
-        format!("{}m", seconds / 60)
-    } else {
-        format!("{}s", seconds)
-    }
-}
-
 fn render_prompt_cache_segment(info: &PromptCacheInfo, tc: bool) -> String {
     let mut parts: Vec<String> = info
         .buckets
         .iter()
         .filter(|bucket| bucket.remaining_seconds_at(info.now) > 0)
-        .map(|bucket| {
-            let remaining = format_duration_compact(bucket.remaining_seconds_at(info.now));
-            match bucket.kind {
-                PromptCacheBucketKind::FiveMinute => {
-                    format!("5m={remaining}")
-                }
-                PromptCacheBucketKind::OneHour => {
-                    format!("1h={remaining}")
-                }
-                PromptCacheBucketKind::Unknown => {
-                    format!("~{remaining}")
-                }
-            }
+        .map(|bucket| match bucket.kind {
+            PromptCacheBucketKind::FiveMinute => "5m".to_string(),
+            PromptCacheBucketKind::OneHour => "1h".to_string(),
+            PromptCacheBucketKind::Unknown => "?".to_string(),
         })
         .collect();
     if parts.is_empty() && info.cache_read_input_tokens > 0 {
@@ -224,17 +199,25 @@ fn render_prompt_cache_segment(info: &PromptCacheInfo, tc: bool) -> String {
         tokens::PRIMARY_DIM
     };
 
-    let mut activity_parts = Vec::new();
-    if let Some(write_age) = info.write_age_seconds() {
-        activity_parts.push(format!("made:{}", format_duration_compact(write_age)));
-    }
-    let show_hit_age = match (info.last_cache_write_at, info.last_cache_read_at) {
-        (_, None) => false,
-        (None, Some(_)) => true,
-        (Some(write), Some(read)) => read >= write,
+    let mut token_parts = Vec::new();
+    let show_read_tokens = match (info.last_cache_read_at, info.last_cache_write_at) {
+        (Some(read), Some(write)) => read >= write,
+        (Some(_), None) => true,
+        (None, _) => false,
     };
-    if show_hit_age && let Some(read_age) = info.read_age_seconds() {
-        activity_parts.push(format!("hit:{}", format_duration_compact(read_age)));
+    let show_write_tokens = match (info.last_cache_write_at, info.last_cache_read_at) {
+        (Some(write), Some(read)) => write >= read,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+    if show_read_tokens && info.cache_read_input_tokens > 0 {
+        token_parts.push(format!("r:{}", format_tokens(info.cache_read_input_tokens)));
+    }
+    if show_write_tokens && info.cache_write_input_tokens > 0 {
+        token_parts.push(format!(
+            "w:{}",
+            format_tokens(info.cache_write_input_tokens)
+        ));
     }
 
     let mut segment = format!(
@@ -242,11 +225,11 @@ fn render_prompt_cache_segment(info: &PromptCacheInfo, tc: bool) -> String {
         muted_label("cache:", tc),
         token.paint(&parts.join(" "), tc)
     );
-    if !activity_parts.is_empty() {
+    if !token_parts.is_empty() {
         let _ = write!(
             segment,
             " {}",
-            tokens::PRIMARY_DIM.paint(&activity_parts.join(" "), tc)
+            tokens::PRIMARY_DIM.paint(&token_parts.join(" "), tc)
         );
     }
     segment
@@ -1705,7 +1688,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_cache_segment_labels_write_age_as_made() {
+    fn prompt_cache_segment_shows_read_write_tokens_for_same_turn_activity() {
         let write_ts = chrono::Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap();
         let info = PromptCacheInfo {
             buckets: vec![PromptCacheBucketInfo {
@@ -1716,20 +1699,24 @@ mod tests {
             }],
             last_cache_write_at: Some(write_ts),
             last_cache_read_at: Some(write_ts),
+            cache_write_input_tokens: 2000,
             cache_read_input_tokens: 1800,
             now: chrono::Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 42).unwrap(),
         };
 
         let segment = render_prompt_cache_segment(&info, false);
 
-        assert!(segment.contains("1h=59m"));
-        assert!(segment.contains("made:42s"));
-        assert!(segment.contains("hit:42s"));
+        assert!(segment.contains("1h"));
+        assert!(segment.contains("r:1.8K"));
+        assert!(segment.contains("w:2K"));
+        assert!(!segment.contains("59m"));
+        assert!(!segment.contains("made:"));
+        assert!(!segment.contains("hit:"));
         assert!(!segment.contains("age:"));
     }
 
     #[test]
-    fn prompt_cache_segment_shows_hit_age_for_later_reads() {
+    fn prompt_cache_segment_shows_latest_read_tokens_for_later_reads() {
         let write_ts = chrono::Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap();
         let read_ts = chrono::Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 30).unwrap();
         let info = PromptCacheInfo {
@@ -1741,15 +1728,19 @@ mod tests {
             }],
             last_cache_write_at: Some(write_ts),
             last_cache_read_at: Some(read_ts),
+            cache_write_input_tokens: 2000,
             cache_read_input_tokens: 1800,
             now: chrono::Utc.with_ymd_and_hms(2026, 5, 1, 12, 1, 0).unwrap(),
         };
 
         let segment = render_prompt_cache_segment(&info, false);
 
-        assert!(segment.contains("1h=59m"));
-        assert!(segment.contains("made:1m"));
-        assert!(segment.contains("hit:30s"));
+        assert!(segment.contains("1h"));
+        assert!(segment.contains("r:1.8K"));
+        assert!(!segment.contains("w:2K"));
+        assert!(!segment.contains("59m"));
+        assert!(!segment.contains("made:"));
+        assert!(!segment.contains("hit:"));
         assert!(!segment.contains("age:"));
     }
 }

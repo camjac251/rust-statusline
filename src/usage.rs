@@ -56,6 +56,7 @@ pub fn parse_session_state(transcript_path: &Path) -> SessionState {
     let mut cache_unknown_bucket: Option<PromptCacheBucketInfo> = None;
     let mut last_cache_write_at: Option<DateTime<Utc>> = None;
     let mut last_cache_read_at: Option<DateTime<Utc>> = None;
+    let mut last_cache_write_tokens = 0;
     let mut last_cache_read_tokens = 0;
 
     let file = match File::open(transcript_path) {
@@ -214,6 +215,7 @@ pub fn parse_session_state(transcript_path: &Path) -> SessionState {
             }
             if cache_create_known > 0 || cache_create_unknown > 0 {
                 last_cache_write_at = Some(ts);
+                last_cache_write_tokens = cache_create_known + cache_create_unknown;
             }
             if cache_read > 0 {
                 last_cache_read_at = Some(ts);
@@ -237,6 +239,7 @@ pub fn parse_session_state(transcript_path: &Path) -> SessionState {
             buckets,
             last_cache_write_at,
             last_cache_read_at,
+            cache_write_input_tokens: last_cache_write_tokens,
             cache_read_input_tokens: last_cache_read_tokens,
             now: Utc::now(),
         });
@@ -1661,6 +1664,7 @@ mod tests {
         assert_eq!(prompt_cache.last_cache_write_at, Some(ts));
         assert_eq!(prompt_cache.last_cache_read_at, Some(ts));
         assert_eq!(prompt_cache.last_activity_at(), Some(ts));
+        assert_eq!(prompt_cache.cache_write_input_tokens, 3000);
         assert_eq!(prompt_cache.cache_read_input_tokens, 4000);
         assert_eq!(prompt_cache.buckets.len(), 2);
         assert!(prompt_cache.buckets.iter().any(|bucket| {
@@ -1708,6 +1712,7 @@ mod tests {
         assert_eq!(prompt_cache.last_cache_write_at, Some(ts));
         assert_eq!(prompt_cache.last_cache_read_at, None);
         assert_eq!(prompt_cache.last_activity_at(), Some(ts));
+        assert_eq!(prompt_cache.cache_write_input_tokens, 3000);
         assert_eq!(prompt_cache.buckets.len(), 2);
         assert!(
             prompt_cache
@@ -1753,6 +1758,7 @@ mod tests {
         let state = parse_session_state(&transcript);
         let prompt_cache = state.prompt_cache.expect("prompt cache activity");
 
+        assert_eq!(prompt_cache.cache_write_input_tokens, 3500);
         assert_eq!(prompt_cache.buckets.len(), 3);
         assert!(prompt_cache.buckets.iter().any(|bucket| {
             bucket.kind == PromptCacheBucketKind::Unknown && bucket.input_tokens == 500
@@ -1807,6 +1813,7 @@ mod tests {
         assert_eq!(prompt_cache.last_cache_write_at, Some(write_ts));
         assert_eq!(prompt_cache.last_cache_read_at, Some(read_ts));
         assert_eq!(prompt_cache.last_activity_at(), Some(read_ts));
+        assert_eq!(prompt_cache.cache_write_input_tokens, 2000);
         assert_eq!(prompt_cache.cache_read_input_tokens, 1800);
         assert_eq!(
             prompt_cache

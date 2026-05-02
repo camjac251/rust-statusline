@@ -54,6 +54,7 @@ pub struct PromptCacheInfo {
     pub buckets: Vec<PromptCacheBucketInfo>,
     pub last_cache_write_at: Option<DateTime<Utc>>,
     pub last_cache_read_at: Option<DateTime<Utc>>,
+    pub cache_write_input_tokens: u64,
     pub cache_read_input_tokens: u64,
     pub now: DateTime<Utc>,
 }
