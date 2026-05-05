@@ -6,6 +6,14 @@
     "description": "Pricing configuration for Claude models. All prices are in USD per token. Source: https://platform.claude.com/docs/en/about-claude/pricing"
   },
   "models": {
+    "claude-opus-4-7": {
+      "name": "Claude Opus 4.7",
+      "input": 5e-6,
+      "output": 2.5e-5,
+      "cache_create": 6.25e-6,
+      "cache_create_1h": 1e-5,
+      "cache_read": 5e-7
+    },
     "claude-opus-4-6": {
       "name": "Claude Opus 4.6",
       "input": 5e-6,

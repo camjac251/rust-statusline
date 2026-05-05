@@ -110,7 +110,10 @@ pub fn parse_iso_date(s: &str) -> Option<NaiveDate> {
 
 pub(crate) fn static_context_limit_lookup(model_id: &str) -> Option<u64> {
     let m = model_id.to_lowercase();
-    // Known variants – currently all 200k; structure allows easy updates later
+    // Known variants; newer 1M-capable models must be listed before family fallbacks.
+    if m.contains("opus-4-7") || m.contains("opus-4-6") {
+        return Some(1_000_000);
+    }
     if m.contains("opus-4-1") {
         return Some(200_000);
     }
@@ -229,7 +232,7 @@ pub fn max_output_capability(model_id: &str) -> u64 {
     let lower = model_id.to_lowercase();
     if lower.contains("4") {
         if lower.contains("opus") {
-            if lower.contains("opus-4-6") {
+            if lower.contains("opus-4-7") || lower.contains("opus-4-6") {
                 MAX_OUTPUT_OPUS_128K
             } else if lower.contains("opus-4-5") {
                 MAX_OUTPUT_SONNET_4 // 64K
@@ -362,6 +365,10 @@ mod tests {
             context_limit_for_model_display("claude-3.5-sonnet", "Claude 3.5 Sonnet [1m]"),
             1_000_000
         );
+        assert_eq!(
+            context_limit_for_model_display("claude-opus-4-7", "Opus 4.7"),
+            1_000_000
+        );
 
         // SAFETY: Test runs serially, no concurrent env access
         unsafe { env::set_var("CLAUDE_CONTEXT_LIMIT", "123456") };
@@ -445,6 +452,10 @@ mod tests {
     #[test]
     fn test_friendly_model_name_current_format() {
         // Current naming: claude-{family}-{major}-{minor}
+        assert_eq!(
+            friendly_model_name("claude-opus-4-7", "claude-opus-4-7"),
+            "Opus 4.7"
+        );
         assert_eq!(
             friendly_model_name("claude-opus-4-6", "claude-opus-4-6"),
             "Opus 4.6"

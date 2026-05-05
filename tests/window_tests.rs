@@ -74,24 +74,32 @@ fn test_window_metrics_calculation() {
 #[test]
 fn test_window_scope_project_filtering() {
     let now = Utc::now();
-    let mut entries = vec![create_test_entry(
-        now - chrono::Duration::hours(2),
-        1000,
-        500,
-        0.1,
-        "session1",
-    )];
+    let mut first_project =
+        create_test_entry(now - chrono::Duration::hours(3), 1000, 500, 1.0, "session1");
+    first_project.web_search_requests = 1;
+    let mut entries = vec![first_project];
 
     // Add entry with different project
     let mut other_entry = create_test_entry(
-        now - chrono::Duration::hours(1),
+        now - chrono::Duration::hours(2),
         2000,
         1000,
-        0.2,
+        99.0,
         "session1",
     );
     other_entry.project = Some("other-project".to_string());
+    other_entry.web_search_requests = 7;
     entries.push(other_entry);
+
+    let mut second_project = create_test_entry(
+        now - chrono::Duration::hours(1),
+        3000,
+        1500,
+        3.0,
+        "session1",
+    );
+    second_project.web_search_requests = 2;
+    entries.push(second_project);
 
     let metrics = calculate_window_metrics(
         &entries,
@@ -103,9 +111,12 @@ fn test_window_scope_project_filtering() {
         BurnScope::Session,
     );
 
-    // Should only include first entry
-    assert_eq!(metrics.tokens_input, 1000);
-    assert_eq!(metrics.tokens_output, 500);
+    // Should only include test-project entries for scoped totals and rates.
+    assert_eq!(metrics.tokens_input, 4000);
+    assert_eq!(metrics.tokens_output, 2000);
+    assert_eq!(metrics.web_search_requests, 3);
+    assert_eq!(metrics.total_cost, 4.0);
+    assert_eq!(metrics.cost_per_hour, 2.0);
 }
 
 #[test]

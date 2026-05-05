@@ -176,9 +176,7 @@ pub fn calculate_window_metrics(
         }
     }
 
-    // Aggregate global metrics for block usage (account-wide)
-    let web_search_requests: u64 = global_entries.iter().map(|e| e.web_search_requests).sum();
-    let service_tier: Option<String> = global_entries
+    let service_tier: Option<String> = window_entries
         .iter()
         .rev()
         .find_map(|e| e.service_tier.clone());
@@ -209,6 +207,7 @@ pub fn calculate_window_metrics(
     let total_tokens =
         (tokens_input + tokens_output + tokens_cache_create + tokens_cache_read) as f64;
     let noncache_tokens = (tokens_input + tokens_output) as f64;
+    let web_search_requests: u64 = window_entries.iter().map(|e| e.web_search_requests).sum();
 
     // Calculate session-specific burn rate
     let mut session_input: u64 = 0;
@@ -230,9 +229,10 @@ pub fn calculate_window_metrics(
     }
 
     // Calculate duration and rates
-    // Global duration/burn (account-wide)
-    let duration_minutes_global = if global_entries.len() >= 2 {
-        match (global_entries.first(), global_entries.last()) {
+    // Duration and burn rates use the same effective entry set as the totals:
+    // account-wide for global scope, project-filtered for project scope.
+    let duration_minutes_window = if window_entries.len() >= 2 {
+        match (window_entries.first(), window_entries.last()) {
             (Some(first), Some(last)) => ((last.ts - first.ts).num_seconds().max(60) as f64) / 60.0,
             _ => 0.0,
         }
@@ -245,14 +245,14 @@ pub fn calculate_window_metrics(
         _ => 0.0,
     };
 
-    let tpm = if duration_minutes_global > 0.0 {
-        total_tokens / duration_minutes_global
+    let tpm = if duration_minutes_window > 0.0 {
+        total_tokens / duration_minutes_window
     } else {
         0.0
     };
 
-    let global_nc_tpm = if duration_minutes_global > 0.0 {
-        noncache_tokens / duration_minutes_global
+    let global_nc_tpm = if duration_minutes_window > 0.0 {
+        noncache_tokens / duration_minutes_window
     } else {
         0.0
     };
@@ -324,8 +324,8 @@ pub fn calculate_window_metrics(
         global_nc_tpm
     };
 
-    let cost_per_hour = if duration_minutes_global > 0.0 {
-        (total_cost / duration_minutes_global) * 60.0
+    let cost_per_hour = if duration_minutes_window > 0.0 {
+        (total_cost / duration_minutes_window) * 60.0
     } else {
         0.0
     };
