@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## [1.5.3](https://github.com/camjac251/rust-statusline/compare/v1.5.2...v1.5.3) - 2026-05-05
+
+### Fixed
+
+- *(statusline)* align live usage reporting
+- *(cost)* correct Opus 4.7 accounting
+
 ## [1.5.2](https://github.com/camjac251/rust-statusline/compare/v1.5.1...v1.5.2) - 2026-05-02
 
 ### Other
