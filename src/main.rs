@@ -2,7 +2,7 @@
 #![allow(clippy::collapsible_if)]
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{Local, Utc};
 #[cfg(feature = "colors")]
 use owo_colors::OwoColorize;
 use std::path::Path;
@@ -13,7 +13,7 @@ use claude_statusline::cli::{Args, BurnScopeArg, WindowAnchorArg, WindowScopeArg
 use claude_statusline::display::color_shim::ColorizeShim;
 use claude_statusline::display::{print_header, print_json_output, print_text_output};
 use claude_statusline::gastown::get_gastown_info;
-use claude_statusline::models::HookJson;
+use claude_statusline::models::{Entry, HookJson};
 use claude_statusline::provenance::{CostProvenance, SessionCostSource, TodayCostSource};
 use claude_statusline::usage::{
     calc_context_from_entries, calc_context_from_transcript, parse_session_state, scan_usage,
@@ -21,6 +21,32 @@ use claude_statusline::usage::{
 use claude_statusline::usage_api::{UsageSummary, get_usage_summary};
 use claude_statusline::utils::{claude_paths, friendly_model_name, read_stdin};
 use claude_statusline::window::{BurnScope, WindowScope, calculate_window_metrics};
+
+fn session_today_cost_for_db(
+    session_id: &str,
+    scan_session_today_cost: f64,
+    transcript_session_cost: Option<f64>,
+    hook_session_cost: Option<f64>,
+    entries: &[Entry],
+) -> f64 {
+    if scan_session_today_cost > 0.0 {
+        return scan_session_today_cost;
+    }
+
+    let today = Local::now().date_naive();
+    let has_non_today_session_entries = entries.iter().any(|entry| {
+        entry.session_id.as_deref() == Some(session_id)
+            && entry.ts.with_timezone(&Local).date_naive() != today
+    });
+    if has_non_today_session_entries {
+        return scan_session_today_cost;
+    }
+
+    transcript_session_cost
+        .filter(|cost| *cost > 0.0)
+        .or_else(|| hook_session_cost.filter(|cost| *cost > 0.0))
+        .unwrap_or(scan_session_today_cost)
+}
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -86,10 +112,20 @@ fn main() -> Result<()> {
         }
     }
 
-    let is_fast_mode = session_state.speed.as_deref() == Some("fast");
+    let is_fast_mode = hook
+        .fast_mode
+        .unwrap_or_else(|| session_state.speed.as_deref() == Some("fast"));
+    let db_session_today_cost = session_today_cost_for_db(
+        &hook.session_id,
+        session_today_cost,
+        session_state.session_cost,
+        hook.cost.as_ref().and_then(|cost| cost.total_cost_usd),
+        &entries,
+    );
 
-    // Global usage tracking: SQLite-based aggregation across all sessions
-    // Pass session_today_cost (this session only) for proper aggregation
+    // Global usage tracking: SQLite-based aggregation across all sessions.
+    // Pass the best current-session today cost available so DB totals don't
+    // lag behind Claude Code's live hook when transcript usage is sparse.
     let mut sessions_count = 1;
     let mut today_cost_source = TodayCostSource::ScanFallback;
     if let Some(ref project_dir) = hook.workspace.project_dir {
@@ -99,7 +135,7 @@ fn main() -> Result<()> {
                 &hook.session_id,
                 project_dir,
                 Path::new(&hook.transcript_path),
-                Some(session_today_cost),
+                Some(db_session_today_cost),
                 Some(&entries),
             ) {
                 Ok(global_usage) => {
@@ -282,16 +318,6 @@ fn main() -> Result<()> {
         BurnScopeArg::Global => BurnScope::Global,
     };
 
-    let metrics = calculate_window_metrics(
-        &entries,
-        &hook.session_id,
-        hook.workspace.project_dir.as_deref(),
-        now_utc,
-        latest_reset,
-        window_scope,
-        burn_scope,
-    );
-
     // Usage + reset data priority:
     //   1. Hook rate_limits (from subscribers, no network call)
     //   2. OAuth API (cached, with negative cache on 429s)
@@ -299,27 +325,30 @@ fn main() -> Result<()> {
     let mut usage_summary: Option<UsageSummary> = None;
     let mut usage_percent_display = None;
     let projected_percent_display = None;
-    let mut remaining_minutes_display = metrics.remaining_minutes;
+    let mut authoritative_remaining_minutes = None;
     // Start with None -- only fall back to scan heuristic if nothing authoritative
-    let mut latest_reset_effective: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut reset_at_display: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut window_anchor: Option<chrono::DateTime<chrono::Utc>> = None;
 
     /// Apply reset time from an authoritative source (hook or API)
     fn apply_reset(
         reset_dt: chrono::DateTime<chrono::Utc>,
         now: chrono::DateTime<chrono::Utc>,
-        latest_reset_out: &mut Option<chrono::DateTime<chrono::Utc>>,
-        remaining_minutes_out: &mut f64,
+        reset_at_out: &mut Option<chrono::DateTime<chrono::Utc>>,
+        window_anchor_out: &mut Option<chrono::DateTime<chrono::Utc>>,
+        remaining_minutes_out: &mut Option<f64>,
     ) {
         let normalized = claude_statusline::usage::normalize_reset_time(reset_dt);
-        *latest_reset_out = Some(
+        *reset_at_out = Some(normalized);
+        *window_anchor_out = Some(
             normalized - chrono::TimeDelta::hours(claude_statusline::utils::WINDOW_DURATION_HOURS),
         );
         let remaining_secs = (normalized - now).num_seconds();
-        *remaining_minutes_out = if remaining_secs > 0 {
+        *remaining_minutes_out = Some(if remaining_secs > 0 {
             remaining_secs as f64 / 60.0
         } else {
             0.0
-        };
+        });
     }
 
     // Priority 1: Hook-provided rate_limits (from subscribers, no network call)
@@ -333,8 +362,9 @@ fn main() -> Result<()> {
                         apply_reset(
                             reset,
                             now_utc,
-                            &mut latest_reset_effective,
-                            &mut remaining_minutes_display,
+                            &mut reset_at_display,
+                            &mut window_anchor,
+                            &mut authoritative_remaining_minutes,
                         );
                     }
                 }
@@ -370,8 +400,9 @@ fn main() -> Result<()> {
                 apply_reset(
                     reset,
                     now_utc,
-                    &mut latest_reset_effective,
-                    &mut remaining_minutes_display,
+                    &mut reset_at_display,
+                    &mut window_anchor,
+                    &mut authoritative_remaining_minutes,
                 );
             }
         }
@@ -391,9 +422,38 @@ fn main() -> Result<()> {
     }
 
     // Priority 3: Transcript heuristic (only if nothing authoritative above)
-    if latest_reset_effective.is_none() {
-        latest_reset_effective = latest_reset;
+    if reset_at_display.is_none() {
+        if let Some(reset) = latest_reset {
+            let normalized = claude_statusline::usage::normalize_reset_time(reset);
+            reset_at_display = Some(normalized);
+            window_anchor = Some(
+                normalized
+                    - chrono::TimeDelta::hours(claude_statusline::utils::WINDOW_DURATION_HOURS),
+            );
+        }
     }
+
+    let metrics = calculate_window_metrics(
+        &entries,
+        &hook.session_id,
+        hook.workspace.project_dir.as_deref(),
+        now_utc,
+        window_anchor,
+        window_scope,
+        burn_scope,
+    );
+    let remaining_minutes_display =
+        authoritative_remaining_minutes.unwrap_or(metrics.remaining_minutes);
+    let active_block = claude_statusline::models::Block {
+        start: metrics.start,
+        end: metrics.end,
+        actual_end: metrics.end,
+        is_active: true,
+        is_gap: false,
+        entries: Vec::new(),
+        tokens: claude_statusline::models::TokenCounts::default(),
+        cost: metrics.total_cost,
+    };
 
     // Fallback context from entries if transcript lacked usage
     if context.is_none() {
@@ -413,20 +473,6 @@ fn main() -> Result<()> {
 
     if args.json {
         // Machine-readable output for statusline consumption
-        // Construct an active block descriptor for JSON start/end fields
-        let (wb_start, wb_end) =
-            claude_statusline::window::window_bounds(now_utc, latest_reset_effective);
-        let active_block = claude_statusline::models::Block {
-            start: wb_start,
-            end: wb_end,
-            actual_end: wb_end,
-            is_active: true,
-            is_gap: false,
-            entries: Vec::new(),
-            tokens: claude_statusline::models::TokenCounts::default(),
-            cost: metrics.total_cost,
-        };
-
         // Compute per-subagent cost breakdown for this session
         let subagent_breakdown = {
             let mut by_agent: std::collections::HashMap<String, (f64, u64, u64)> =
@@ -481,7 +527,7 @@ fn main() -> Result<()> {
             projected_percent_display,
             remaining_minutes_display,
             Some(&active_block),
-            latest_reset_effective,
+            reset_at_display,
             metrics.tpm,
             metrics.tpm_indicator,
             metrics.session_nc_tpm,
@@ -534,8 +580,8 @@ fn main() -> Result<()> {
             usage_percent_display,
             projected_percent_display,
             remaining_minutes_display,
-            None,
-            latest_reset_effective,
+            Some(&active_block),
+            window_anchor,
             metrics.tpm,
             metrics.tpm_indicator,
             metrics.cost_per_hour,
@@ -579,16 +625,10 @@ fn main() -> Result<()> {
             eprintln!(
                 "Window: ${:.2} (reset: {:?}, window_entries: {})",
                 metrics.total_cost,
-                latest_reset_effective.map(|r| r.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+                reset_at_display.map(|r| r.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
                 entries
                     .iter()
-                    .filter(|e| {
-                        let (start, end) = claude_statusline::window::window_bounds(
-                            now_utc,
-                            latest_reset_effective,
-                        );
-                        e.ts >= start && e.ts < end
-                    })
+                    .filter(|e| e.ts >= metrics.start && e.ts < metrics.end)
                     .count()
             );
             if let Some(ctx) = context {
@@ -624,4 +664,53 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_entry(session_id: &str, ts: chrono::DateTime<Utc>) -> Entry {
+        Entry {
+            ts,
+            input: 0,
+            output: 0,
+            cache_create: 0,
+            cache_read: 0,
+            web_search_requests: 0,
+            speed: None,
+            service_tier: None,
+            cost: 0.0,
+            model: None,
+            session_id: Some(session_id.to_string()),
+            msg_id: None,
+            req_id: None,
+            project: None,
+            agent_id: None,
+        }
+    }
+
+    #[test]
+    fn db_today_cost_prefers_scanned_today_cost() {
+        let cost = session_today_cost_for_db("session-1", 1.25, Some(2.0), Some(3.0), &[]);
+
+        assert_eq!(cost, 1.25);
+    }
+
+    #[test]
+    fn db_today_cost_uses_live_cost_when_scan_has_no_current_cost() {
+        let cost = session_today_cost_for_db("session-1", 0.0, None, Some(3.0), &[]);
+
+        assert_eq!(cost, 3.0);
+    }
+
+    #[test]
+    fn db_today_cost_does_not_treat_cross_day_total_as_today_cost() {
+        let yesterday = Utc::now() - chrono::TimeDelta::days(1);
+        let entries = vec![test_entry("session-1", yesterday)];
+
+        let cost = session_today_cost_for_db("session-1", 0.0, Some(2.0), Some(3.0), &entries);
+
+        assert_eq!(cost, 0.0);
+    }
 }

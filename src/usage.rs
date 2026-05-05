@@ -13,7 +13,7 @@ use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Timelike, Utc};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -248,6 +248,16 @@ pub fn parse_session_state(transcript_path: &Path) -> SessionState {
     state
 }
 
+fn json_number_as_u64(value: Option<&Value>) -> u64 {
+    value
+        .and_then(|n| n.as_u64().or_else(|| n.as_f64().map(|v| v.max(0.0) as u64)))
+        .unwrap_or(0)
+}
+
+fn json_number_as_f64(value: Option<&Value>) -> f64 {
+    value.and_then(|n| n.as_f64()).unwrap_or(0.0)
+}
+
 // Helper: detect reset time from assistant text like "... limit reached ... resets 5am" with DST correction
 static ASSISTANT_LIMIT_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)limit\s+reached.*resets\s+(\d{1,2})\s*(am|pm)").unwrap());
@@ -357,7 +367,8 @@ pub fn calc_context_from_transcript(
     model_display_name: &str,
 ) -> Option<(u64, u32)> {
     // Stream the file line-by-line to avoid loading entire transcripts into memory.
-    // Keep the last assistant message with usage; sum input + output + cache* to mirror Claude CLI totals.
+    // Keep the last assistant message with usage; context uses input-side tokens
+    // only, matching Claude Code's statusLine hook calculation.
     let file = File::open(transcript_path).ok()?;
     let reader = BufReader::new(file);
     let mut last_total_in: Option<u64> = None;
@@ -407,9 +418,7 @@ pub fn calc_context_from_transcript(
                             cache_creation: None,
                         });
                     let inp = usage.input_tokens.unwrap_or(0);
-                    let out = usage.output_tokens.unwrap_or(0);
                     let total_in = inp
-                        + out
                         + usage.cache_creation_input_tokens.unwrap_or(0)
                         + usage.cache_read_input_tokens.unwrap_or(0);
                     if total_in > 0 {
@@ -458,7 +467,7 @@ pub fn calc_context_from_entries(
     }
     filtered.sort_by_key(|e| e.ts);
     let last = filtered.last()?;
-    let total_in = last.input + last.output + last.cache_create + last.cache_read;
+    let total_in = last.input + last.cache_create + last.cache_read;
     let overhead = system_overhead_tokens();
     let adjusted = total_in.saturating_add(overhead);
     let limit = context_limit_for_model_display(model_id, model_display_name);
@@ -578,6 +587,8 @@ pub fn scan_usage(
     // Track compact summaries (when conversations get auto-compacted)
     let mut _compact_summary_count = 0u32;
     let mut _last_compact_time: Option<DateTime<Utc>> = None;
+    // SDK/result transcripts can carry aggregate modelUsage without assistant usage lines.
+    let mut result_usage_by_session_model: HashMap<String, Entry> = HashMap::new();
 
     // Optimization: Skip files older than 48 hours by default
     let cutoff_time = if let Ok(hours_str) = env::var("CLAUDE_SCAN_LOOKBACK_HOURS") {
@@ -767,6 +778,70 @@ pub fn scan_usage(
                     Ok(v) => v,
                     Err(_) => continue,
                 };
+
+                if v.get("type").and_then(|s| s.as_str()) == Some("result") {
+                    let sid = v
+                        .get("sessionId")
+                        .or_else(|| v.get("session_id"))
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string());
+                    let tsd = v
+                        .get("timestamp")
+                        .and_then(|s| s.as_str())
+                        .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+                        .map(|d| d.with_timezone(&Utc));
+                    if let (Some(sid), Some(tsd), Some(model_usage)) =
+                        (sid, tsd, v.get("modelUsage").and_then(|m| m.as_object()))
+                    {
+                        for (model_name, usage) in model_usage {
+                            let input = json_number_as_u64(usage.get("inputTokens"));
+                            let output = json_number_as_u64(usage.get("outputTokens"));
+                            let cache_create =
+                                json_number_as_u64(usage.get("cacheCreationInputTokens"));
+                            let cache_read = json_number_as_u64(usage.get("cacheReadInputTokens"));
+                            let web_search_requests =
+                                json_number_as_u64(usage.get("webSearchRequests"));
+                            let cost = json_number_as_f64(usage.get("costUSD"));
+                            if input == 0
+                                && output == 0
+                                && cache_create == 0
+                                && cache_read == 0
+                                && web_search_requests == 0
+                                && cost == 0.0
+                            {
+                                continue;
+                            }
+                            let key = format!("{}|{}", sid, model_name);
+                            let candidate = Entry {
+                                ts: tsd,
+                                input,
+                                output,
+                                cache_create,
+                                cache_read,
+                                web_search_requests,
+                                speed: None,
+                                service_tier: None,
+                                cost,
+                                model: Some(model_name.clone()),
+                                session_id: Some(sid.clone()),
+                                msg_id: None,
+                                req_id: v
+                                    .get("uuid")
+                                    .and_then(|s| s.as_str())
+                                    .map(|s| s.to_string()),
+                                project: proj_name.clone(),
+                                agent_id: None,
+                            };
+                            match result_usage_by_session_model.get(&key) {
+                                Some(existing) if existing.ts > candidate.ts => {}
+                                _ => {
+                                    result_usage_by_session_model.insert(key, candidate);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // detect init system apiKeySource
                 if api_key_source.is_none()
                     && v.get("type").and_then(|s| s.as_str()) == Some("system")
@@ -1222,6 +1297,17 @@ pub fn scan_usage(
     }
     // Finalize aggregated entries and compute totals
     let mut entries: Vec<Entry> = aggregated.into_values().collect();
+    let sessions_with_assistant_usage: HashSet<String> = entries
+        .iter()
+        .filter_map(|entry| entry.session_id.clone())
+        .collect();
+    for result_entry in result_usage_by_session_model.into_values() {
+        if let Some(ref sid) = result_entry.session_id {
+            if !sessions_with_assistant_usage.contains(sid) {
+                entries.push(result_entry);
+            }
+        }
+    }
     entries.sort_by_key(|e| e.ts);
     let mut session_today_cost = 0.0f64; // This session's cost for today only
     let mut session_has_entries = false;
@@ -1530,6 +1616,81 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn calc_context_from_transcript_uses_input_side_tokens() -> Result<()> {
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe {
+            env::set_var("CLAUDE_CONTEXT_LIMIT", "200000");
+            env::set_var("CLAUDE_SYSTEM_OVERHEAD", "0");
+        }
+        let dir = tempdir()?;
+        let transcript = dir.path().join("context.jsonl");
+        let line = json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "usage": {
+                    "input_tokens": 1000,
+                    "output_tokens": 9000,
+                    "cache_creation_input_tokens": 2000,
+                    "cache_read_input_tokens": 3000
+                }
+            }
+        });
+        fs::write(&transcript, format!("{}\n", line))?;
+
+        let context =
+            calc_context_from_transcript(&transcript, "claude-3-5-sonnet", "Claude 3.5 Sonnet");
+
+        assert_eq!(context, Some((6000, 3)));
+        unsafe {
+            env::remove_var("CLAUDE_CONTEXT_LIMIT");
+            env::remove_var("CLAUDE_SYSTEM_OVERHEAD");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn calc_context_from_entries_uses_input_side_tokens() {
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe {
+            env::set_var("CLAUDE_CONTEXT_LIMIT", "200000");
+            env::set_var("CLAUDE_SYSTEM_OVERHEAD", "0");
+        }
+        let entry = Entry {
+            ts: Utc::now(),
+            input: 1000,
+            output: 9000,
+            cache_create: 2000,
+            cache_read: 3000,
+            web_search_requests: 0,
+            speed: None,
+            service_tier: None,
+            cost: 0.0,
+            model: Some("claude-3-5-sonnet".to_string()),
+            session_id: Some("session-context".to_string()),
+            msg_id: None,
+            req_id: None,
+            project: None,
+            agent_id: None,
+        };
+
+        let context = calc_context_from_entries(
+            &[entry],
+            "session-context",
+            "claude-3-5-sonnet",
+            "Claude 3.5 Sonnet",
+        );
+
+        assert_eq!(context, Some((6000, 3)));
+        unsafe {
+            env::remove_var("CLAUDE_CONTEXT_LIMIT");
+            env::remove_var("CLAUDE_SYSTEM_OVERHEAD");
+        }
+    }
+
+    #[test]
     fn scan_usage_reads_nested_fast_speed_and_keeps_web_search_flat() -> Result<()> {
         let session_id = format!(
             "fast-{}",
@@ -1639,10 +1800,10 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].cache_create, 1_000_000);
-        assert!((entries[0].cost - 6.0).abs() < 1e-10);
-        assert!((session_cost - 6.0).abs() < 1e-10);
-        assert!((session_today_cost - 6.0).abs() < 1e-10);
-        assert!((today_cost - 6.0).abs() < 1e-10);
+        assert!((entries[0].cost - 3.75).abs() < 1e-10);
+        assert!((session_cost - 3.75).abs() < 1e-10);
+        assert!((session_today_cost - 3.75).abs() < 1e-10);
+        assert!((today_cost - 3.75).abs() < 1e-10);
         Ok(())
     }
 
@@ -1683,6 +1844,103 @@ mod tests {
         assert!((session_cost - 1.0).abs() < 1e-10);
         assert!((session_today_cost - 1.0).abs() < 1e-10);
         assert!((today_cost - 1.0).abs() < 1e-10);
+        Ok(())
+    }
+
+    #[test]
+    fn scan_usage_uses_result_model_usage_when_assistant_usage_is_absent() -> Result<()> {
+        let session_id = format!(
+            "result-model-usage-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let result_line = json!({
+            "type": "result",
+            "session_id": session_id,
+            "timestamp": Local::now().to_rfc3339(),
+            "total_cost_usd": 1.5,
+            "modelUsage": {
+                "claude-sonnet-4-6": {
+                    "inputTokens": 1000,
+                    "outputTokens": 200,
+                    "cacheReadInputTokens": 300,
+                    "cacheCreationInputTokens": 400,
+                    "webSearchRequests": 2,
+                    "costUSD": 1.5,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 64000
+                }
+            }
+        });
+        let dir = write_transcript_lines(&session_id, &[result_line])?;
+        let base = dir.path().to_path_buf();
+
+        let (session_cost, session_today_cost, today_cost, entries, _, _, _) =
+            scan_usage(&[base], &session_id, None, None)?;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].input, 1000);
+        assert_eq!(entries[0].output, 200);
+        assert_eq!(entries[0].cache_read, 300);
+        assert_eq!(entries[0].cache_create, 400);
+        assert_eq!(entries[0].web_search_requests, 2);
+        assert_eq!(entries[0].model.as_deref(), Some("claude-sonnet-4-6"));
+        assert!((session_cost - 1.5).abs() < 1e-10);
+        assert!((session_today_cost - 1.5).abs() < 1e-10);
+        assert!((today_cost - 1.5).abs() < 1e-10);
+        Ok(())
+    }
+
+    #[test]
+    fn scan_usage_does_not_double_count_result_model_usage_when_assistant_usage_exists()
+    -> Result<()> {
+        let session_id = format!(
+            "result-model-usage-dedupe-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let usage_line = json!({
+            "type": "assistant",
+            "sessionId": session_id,
+            "timestamp": Local::now().to_rfc3339(),
+            "message": {
+                "role": "assistant",
+                "id": "msg-result-model-dedupe",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 20,
+                    "cache_creation_input_tokens": 30,
+                    "cache_read_input_tokens": 40
+                }
+            }
+        });
+        let result_line = json!({
+            "type": "result",
+            "session_id": session_id,
+            "timestamp": Local::now().to_rfc3339(),
+            "total_cost_usd": 1.5,
+            "modelUsage": {
+                "claude-sonnet-4-6": {
+                    "inputTokens": 1000,
+                    "outputTokens": 2000,
+                    "cacheReadInputTokens": 3000,
+                    "cacheCreationInputTokens": 4000,
+                    "webSearchRequests": 2,
+                    "costUSD": 1.5,
+                    "contextWindow": 200000,
+                    "maxOutputTokens": 64000
+                }
+            }
+        });
+        let dir = write_transcript_lines(&session_id, &[usage_line, result_line])?;
+        let base = dir.path().to_path_buf();
+
+        let (_, _, _, entries, _, _, _) = scan_usage(&[base], &session_id, None, None)?;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].input, 10);
+        assert_eq!(entries[0].output, 20);
+        assert_eq!(entries[0].cache_create, 30);
+        assert_eq!(entries[0].cache_read, 40);
         Ok(())
     }
 

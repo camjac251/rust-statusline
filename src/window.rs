@@ -95,6 +95,8 @@ pub fn calculate_previous_reset(now: DateTime<Utc>) -> DateTime<Utc> {
 /// Metrics calculated for a window period
 #[derive(Debug, Clone)]
 pub struct WindowMetrics {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
     pub total_cost: f64,
     pub total_tokens: f64,
     pub noncache_tokens: f64,
@@ -338,6 +340,8 @@ pub fn calculate_window_metrics(
     };
 
     WindowMetrics {
+        start,
+        end,
         total_cost,
         total_tokens,
         noncache_tokens,

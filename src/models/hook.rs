@@ -70,6 +70,18 @@ pub struct HookRateLimits {
     pub seven_day: Option<HookRateLimit>,
 }
 
+/// Reasoning effort information provided by Claude Code
+#[derive(Deserialize, Debug, Clone)]
+pub struct HookEffort {
+    pub level: String,
+}
+
+/// Extended thinking state provided by Claude Code
+#[derive(Deserialize, Debug, Clone)]
+pub struct HookThinking {
+    pub enabled: bool,
+}
+
 /// Vim mode information
 #[derive(Deserialize, Debug, Clone)]
 pub struct HookVim {
@@ -117,6 +129,13 @@ pub struct HookJson {
     /// Whether tokens exceed 200k (long-context pricing threshold for Sonnet 4/4.5)
     #[serde(default)]
     pub exceeds_200k_tokens: Option<bool>,
+    /// Whether Claude Code fast mode is currently enabled
+    #[serde(default)]
+    pub fast_mode: Option<bool>,
+    /// Live reasoning effort level, when supported by the current model
+    pub effort: Option<HookEffort>,
+    /// Live extended-thinking state for this session
+    pub thinking: Option<HookThinking>,
     /// Subscription rate limits (internal field, not in public docs)
     pub rate_limits: Option<HookRateLimits>,
     /// Human-readable session name from /rename

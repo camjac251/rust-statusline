@@ -22,7 +22,7 @@ use std::time::Duration;
 
 const SCHEMA_VERSION: i64 = 4;
 const SCHEMA_VERSION_STR: &str = "4";
-const USAGE_CACHE_VERSION: &str = "2";
+const USAGE_CACHE_VERSION: &str = "3";
 const METADATA_KEY_SCHEMA_VERSION: &str = "schema_version";
 const METADATA_KEY_USAGE_CACHE_VERSION: &str = "usage_cache_version";
 const GLOBAL_SUM_CACHE_PREFIX: &str = "global_sum:";
@@ -1744,7 +1744,7 @@ mod tests {
                     value TEXT NOT NULL
                 );
                 INSERT INTO metadata (key, value) VALUES ('schema_version', '1');
-                INSERT INTO metadata (key, value) VALUES ('usage_cache_version', '2');",
+                INSERT INTO metadata (key, value) VALUES ('usage_cache_version', '3');",
             )
             .unwrap();
         legacy_conn
@@ -1836,7 +1836,7 @@ mod tests {
                 INSERT INTO metadata (key, value, updated_at)
                 VALUES ('schema_version', '2', 1);
                 INSERT INTO metadata (key, value, updated_at)
-                VALUES ('usage_cache_version', '2', 1);",
+                VALUES ('usage_cache_version', '3', 1);",
             )
             .unwrap();
         legacy_conn.pragma_update(None, "user_version", 2).unwrap();
@@ -2005,6 +2005,102 @@ mod tests {
             .unwrap();
 
         assert_eq!(sessions_count, 1);
+        assert_eq!(usage_cache_version.value, USAGE_CACHE_VERSION);
+        unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_stale_usage_cache_version_deletes_cached_usage_totals() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("stale-cache-version.db");
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
+
+        {
+            let conn = open_db().unwrap();
+            conn.execute(
+                "INSERT INTO sessions (
+                    session_id,
+                    session_key,
+                    transcript_path,
+                    transcript_mtime,
+                    today_date,
+                    today_cost,
+                    entry_count,
+                    last_parsed_at,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    "stale-session",
+                    "stale-session:/tmp/project",
+                    "/tmp/transcript.jsonl",
+                    1,
+                    "2025-10-18",
+                    1.23,
+                    1,
+                    1,
+                    1,
+                    1
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO usage_events (
+                    event_key,
+                    session_id,
+                    transcript_path,
+                    ts,
+                    today_date,
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    cache_create_tokens,
+                    cache_read_tokens,
+                    web_search_requests,
+                    cost,
+                    source,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    "stale-event",
+                    "stale-session",
+                    "/tmp/transcript.jsonl",
+                    1,
+                    "2025-10-18",
+                    "claude-sonnet-4-6",
+                    1,
+                    1,
+                    1,
+                    1,
+                    0,
+                    1.23,
+                    "scan_entry",
+                    1,
+                    1
+                ],
+            )
+            .unwrap();
+            set_metadata(&conn, METADATA_KEY_USAGE_CACHE_VERSION, "2").unwrap();
+        }
+
+        let conn = open_db().unwrap();
+        let sessions_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        let events_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))
+            .unwrap();
+        let usage_cache_version = get_metadata(&conn, METADATA_KEY_USAGE_CACHE_VERSION)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(sessions_count, 0);
+        assert_eq!(events_count, 0);
         assert_eq!(usage_cache_version.value, USAGE_CACHE_VERSION);
         unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
     }
@@ -2348,7 +2444,7 @@ mod tests {
         let (cost, count) = parse_transcript_today_cost(&transcript_path, &today).unwrap();
 
         assert_eq!(count, 1);
-        assert!((cost - 6.0).abs() < 1e-10);
+        assert!((cost - 3.75).abs() < 1e-10);
     }
 
     #[test]

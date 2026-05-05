@@ -171,16 +171,13 @@ pub fn context_limit_for_model_display(model_id: &str, display_name: &str) -> u6
     200_000
 }
 
-const DEFAULT_OUTPUT_RESERVE: u64 = 32_000;
-const SMALL_MODEL_OUTPUT_RESERVE: u64 = 8_192;
-const MAX_OUTPUT_CAP: u64 = 32_000;
+const MIN_CONFIGURED_OUTPUT_TOKENS: u64 = 4_096;
+const OUTPUT_4K: u64 = 4_096;
+const OUTPUT_8K: u64 = 8_192;
+const OUTPUT_32K: u64 = 32_000;
+const OUTPUT_64K: u64 = 64_000;
+const OUTPUT_128K: u64 = 128_000;
 const DEFAULT_AUTOCOMPACT_HEADROOM: u64 = 13_000;
-
-const MAX_OUTPUT_SONNET_4: u64 = 64_000;
-const MAX_OUTPUT_OPUS_32K: u64 = 32_000; // Opus 4, 4.1
-const MAX_OUTPUT_OPUS_128K: u64 = 128_000; // Opus 4.6+
-const MAX_OUTPUT_HAIKU_4: u64 = 64_000;
-const MAX_OUTPUT_LEGACY: u64 = 8_192;
 
 fn parse_bool_env(var: &str) -> bool {
     if let Ok(val) = env::var(var) {
@@ -198,17 +195,13 @@ fn parse_u64_env(var: &str) -> Option<u64> {
 }
 
 pub fn reserved_output_tokens_for_model(model_id: &str) -> u64 {
-    let lower = model_id.to_lowercase();
-    if lower.contains("3-5") || lower.contains("haiku") {
-        if let Some(val) = parse_u64_env("CLAUDE_CODE_MAX_OUTPUT_TOKENS") {
-            return val.min(SMALL_MODEL_OUTPUT_RESERVE);
-        }
-        return SMALL_MODEL_OUTPUT_RESERVE;
+    let default = default_output_tokens_for_model(model_id);
+    if let Some(val) = parse_u64_env("CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+        && val >= MIN_CONFIGURED_OUTPUT_TOKENS
+    {
+        return default.min(val);
     }
-    if let Some(val) = parse_u64_env("CLAUDE_CODE_MAX_OUTPUT_TOKENS") {
-        return val.min(MAX_OUTPUT_CAP);
-    }
-    DEFAULT_OUTPUT_RESERVE
+    default
 }
 
 pub fn auto_compact_enabled() -> bool {
@@ -229,24 +222,62 @@ pub fn system_overhead_tokens() -> u64 {
 }
 
 pub fn max_output_capability(model_id: &str) -> u64 {
+    upper_output_tokens_for_model(model_id)
+}
+
+fn default_output_tokens_for_model(model_id: &str) -> u64 {
     let lower = model_id.to_lowercase();
-    if lower.contains("4") {
-        if lower.contains("opus") {
-            if lower.contains("opus-4-7") || lower.contains("opus-4-6") {
-                MAX_OUTPUT_OPUS_128K
-            } else if lower.contains("opus-4-5") {
-                MAX_OUTPUT_SONNET_4 // 64K
-            } else {
-                MAX_OUTPUT_OPUS_32K
-            }
-        } else if lower.contains("haiku") {
-            MAX_OUTPUT_HAIKU_4
-        } else {
-            MAX_OUTPUT_SONNET_4
-        }
-    } else {
-        MAX_OUTPUT_LEGACY
+    if lower.contains("opus-4-7") || lower.contains("opus-4-6") {
+        return OUTPUT_64K;
     }
+    if lower.contains("sonnet-4-6")
+        || lower.contains("opus-4")
+        || lower.contains("sonnet-4")
+        || lower.contains("haiku-4")
+        || lower.contains("3-7-sonnet")
+    {
+        return OUTPUT_32K;
+    }
+    if lower.contains("3-5-sonnet") || lower.contains("3-5-haiku") {
+        return OUTPUT_8K;
+    }
+    if lower.contains("3-opus") || lower.contains("3-haiku") {
+        return OUTPUT_4K;
+    }
+    if lower.contains("3-sonnet") {
+        return OUTPUT_8K;
+    }
+    OUTPUT_32K
+}
+
+fn upper_output_tokens_for_model(model_id: &str) -> u64 {
+    let lower = model_id.to_lowercase();
+    if lower.contains("opus-4-7") || lower.contains("opus-4-6") || lower.contains("sonnet-4-6") {
+        return OUTPUT_128K;
+    }
+    if lower.contains("opus-4-5")
+        || lower.contains("claude-4-5")
+        || lower.contains("sonnet-4")
+        || lower.contains("4-sonnet")
+        || lower.contains("haiku-4")
+        || lower.contains("4-haiku")
+        || lower.contains("3-7-sonnet")
+    {
+        return OUTPUT_64K;
+    }
+    if lower.contains("opus-4") || lower.contains("4-opus") {
+        return OUTPUT_32K;
+    }
+    if lower.contains("3-5-sonnet") || lower.contains("3-5-haiku") {
+        return OUTPUT_8K;
+    }
+    if lower.contains("3-opus") || lower.contains("3-haiku") {
+        return OUTPUT_4K;
+    }
+    if lower.contains("3-sonnet") {
+        return OUTPUT_8K;
+    }
+    OUTPUT_128K
 }
 
 pub fn usable_context_limit(model_id: &str, display_name: &str) -> u64 {
@@ -382,11 +413,17 @@ mod tests {
     #[test]
     #[serial]
     fn test_reserved_output_tokens_for_model() {
-        // Test 3-5/haiku models get 8192 reserve
+        // Defaults mirror Claude Code's model-specific max_tokens defaults.
+        assert_eq!(reserved_output_tokens_for_model("claude-opus-4-7"), 64_000);
+        assert_eq!(reserved_output_tokens_for_model("claude-opus-4-6"), 64_000);
+        assert_eq!(
+            reserved_output_tokens_for_model("claude-sonnet-4-6"),
+            32_000
+        );
+        assert_eq!(reserved_output_tokens_for_model("claude-haiku-4-5"), 32_000);
         assert_eq!(reserved_output_tokens_for_model("claude-3-5-sonnet"), 8_192);
         assert_eq!(reserved_output_tokens_for_model("claude-3-5-haiku"), 8_192);
-
-        // Test Sonnet 4.5 gets 32000 reserve
+        assert_eq!(reserved_output_tokens_for_model("claude-3-haiku"), 4_096);
         assert_eq!(
             reserved_output_tokens_for_model("claude-sonnet-4-5"),
             32_000
@@ -400,21 +437,35 @@ mod tests {
             16_000
         );
 
-        // Test env override exceeding cap
+        // Test env override exceeding the model default
         unsafe { env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000") };
         assert_eq!(
             reserved_output_tokens_for_model("claude-sonnet-4-5"),
             32_000
         );
+        assert_eq!(reserved_output_tokens_for_model("claude-opus-4-7"), 64_000);
 
-        // Test env override for 3-5 model (capped at 8192)
+        // Test env override below Claude Code's minimum is ignored
         unsafe { env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4000") };
-        assert_eq!(reserved_output_tokens_for_model("claude-3-5-sonnet"), 4_000);
-
-        unsafe { env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "16000") };
         assert_eq!(reserved_output_tokens_for_model("claude-3-5-sonnet"), 8_192);
 
+        unsafe { env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4096") };
+        assert_eq!(reserved_output_tokens_for_model("claude-3-5-sonnet"), 4_096);
+
         unsafe { env::remove_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS") };
+    }
+
+    #[test]
+    fn test_max_output_capability_for_current_models() {
+        assert_eq!(max_output_capability("claude-opus-4-7"), 128_000);
+        assert_eq!(max_output_capability("claude-opus-4-6"), 128_000);
+        assert_eq!(max_output_capability("claude-sonnet-4-6"), 128_000);
+        assert_eq!(max_output_capability("claude-4-5"), 64_000);
+        assert_eq!(max_output_capability("claude-sonnet-4-5"), 64_000);
+        assert_eq!(max_output_capability("claude-4-sonnet"), 64_000);
+        assert_eq!(max_output_capability("claude-haiku-4-5"), 64_000);
+        assert_eq!(max_output_capability("claude-4-opus"), 32_000);
+        assert_eq!(max_output_capability("claude-3-haiku"), 4_096);
     }
 
     #[test]
@@ -436,6 +487,10 @@ mod tests {
         assert_eq!(
             usable_context_limit("claude-sonnet-4-5", "Claude Sonnet 4.5 [1m]"),
             968_000
+        );
+        assert_eq!(
+            usable_context_limit("claude-opus-4-7", "Claude Opus 4.7"),
+            936_000
         );
 
         // Test with env override

@@ -135,6 +135,25 @@ fn usage_limit_json(limit: &UsageLimit) -> serde_json::Value {
     })
 }
 
+fn active_effort_level(hook: &HookJson) -> Option<String> {
+    hook.effort
+        .as_ref()
+        .map(|effort| effort.level.trim().to_lowercase())
+        .filter(|effort| !effort.is_empty())
+        .or_else(|| {
+            env::var("CLAUDE_CODE_EFFORT_LEVEL")
+                .ok()
+                .and_then(|effort| {
+                    let effort = effort.trim().to_lowercase();
+                    if effort.is_empty() || effort == "unset" {
+                        None
+                    } else {
+                        Some(effort)
+                    }
+                })
+        })
+}
+
 fn prompt_cache_json(info: Option<&PromptCacheInfo>) -> serde_json::Value {
     info.map(|info| {
         let primary = info.primary_bucket();
@@ -885,26 +904,24 @@ fn render_header_line(
         }
     }
 
-    // Effort level segment (from env var, skip default "medium")
-    if let Ok(effort) = env::var("CLAUDE_CODE_EFFORT_LEVEL") {
-        let effort_lower = effort.to_lowercase();
-        if effort_lower != "unset" && !effort_lower.is_empty() {
-            let label = match profile.width {
-                TerminalWidth::Narrow => "eff:",
-                _ => "effort:",
-            };
-            let effort_colored = match effort_lower.as_str() {
-                "low" => tokens::EFFORT_LOW.paint(&effort_lower, tc),
-                "medium" => tokens::EFFORT_MEDIUM.paint(&effort_lower, tc),
-                "high" => tokens::EFFORT_HIGH.paint(&effort_lower, tc),
-                "max" => tokens::EFFORT_MAX.bold(&effort_lower, tc),
-                other => tokens::EFFORT_MEDIUM.paint(other, tc),
-            };
-            header_parts.push(wrap_header_segment(
-                format!("{}{}", muted_label(label, tc), effort_colored),
-                tc,
-            ));
-        }
+    // Effort level segment (prefer live hook data, fall back to env var)
+    if let Some(effort_lower) = active_effort_level(hook) {
+        let label = match profile.width {
+            TerminalWidth::Narrow => "eff:",
+            _ => "effort:",
+        };
+        let effort_colored = match effort_lower.as_str() {
+            "low" => tokens::EFFORT_LOW.paint(&effort_lower, tc),
+            "medium" => tokens::EFFORT_MEDIUM.paint(&effort_lower, tc),
+            "high" => tokens::EFFORT_HIGH.paint(&effort_lower, tc),
+            "xhigh" => tokens::EFFORT_MAX.paint(&effort_lower, tc),
+            "max" => tokens::EFFORT_MAX.bold(&effort_lower, tc),
+            other => tokens::EFFORT_MEDIUM.paint(other, tc),
+        };
+        header_parts.push(wrap_header_segment(
+            format!("{}{}", muted_label(label, tc), effort_colored),
+            tc,
+        ));
     }
 
     // Optional provider hints grouped (only when --show-provider is set)
@@ -1486,6 +1503,9 @@ mod tests {
             cost: None,
             context_window: None,
             exceeds_200k_tokens: None,
+            fast_mode: None,
+            effort: None,
+            thinking: None,
             rate_limits: None,
             session_name: None,
             vim: None,
@@ -1809,6 +1829,8 @@ pub fn build_json_output(
         .unwrap_or_else(|| deduce_provider_from_model(&hook.model.id).to_string());
 
     let reset_iso = latest_reset.map(|d| d.to_rfc3339());
+    let fast_mode = hook.fast_mode.unwrap_or(is_fast_mode);
+    let effort = active_effort_level(hook);
     let (ctx_tokens, ctx_pct) = context
         .map(|(t, p)| (Some(t), Some(p)))
         .unwrap_or((None, None));
@@ -1816,7 +1838,11 @@ pub fn build_json_output(
     let ctx_limit = context_limit_override.unwrap_or_else(|| {
         context_limit_for_model_display(&hook.model.id, &hook.model.display_name)
     });
-    let overhead_value = system_overhead_tokens();
+    let overhead_value = if context_source == Some("hook") {
+        0
+    } else {
+        system_overhead_tokens()
+    };
     let overhead_display = if ctx_tokens.is_some() && overhead_value > 0 {
         Some(overhead_value)
     } else {
@@ -1883,7 +1909,7 @@ pub fn build_json_output(
         "start": active_block.map(|b| b.start.to_rfc3339()),
         "end": active_block.map(|b| b.end.to_rfc3339()),
         "end_epoch": active_block.map(|b| b.end.timestamp()),
-        "reset_anchor_epoch": latest_reset.map(|d| d.timestamp()),
+        "reset_anchor_epoch": active_block.map(|b| b.start.timestamp()),
         "remaining_minutes": (remaining_minutes as i64).max(0),
         "usage_percent": usage_percent.map(|v| (v * 10.0).round()/10.0),
         "usage_percent_left": usage_percent.map(|v| ((100.0 - v).max(0.0) * 10.0).round()/10.0),
@@ -1940,8 +1966,9 @@ pub fn build_json_output(
         "model": {
             "id": hook.model.id.clone(),
             "display_name": hook.model.display_name.clone(),
-            "fast_mode": is_fast_mode,
+            "fast_mode": fast_mode,
         },
+        "fast_mode": fast_mode,
         "cwd": hook.workspace.current_dir.clone(),
         "project_dir": hook.workspace.project_dir.clone(),
         "workspace": {
@@ -1952,10 +1979,10 @@ pub fn build_json_output(
         },
         "version": hook.version.clone(),
         "output_style": hook.output_style.as_ref().map(|s| serde_json::json!({"name": s.name.clone()})),
-        "effort": env::var("CLAUDE_CODE_EFFORT_LEVEL").ok().and_then(|e| {
-            let lower = e.to_lowercase();
-            if lower == "unset" { None } else { Some(lower) }
-        }),
+        "effort": effort,
+        "thinking": hook.thinking.as_ref().map(|thinking| serde_json::json!({
+            "enabled": thinking.enabled
+        })),
         "provider": {"apiKeySource": api_key_source, "env": provider_final},
         "oauth_profile": {
             "organization_type": oauth_org_type,
@@ -1996,7 +2023,7 @@ pub fn build_json_output(
             "usable_percent": ctx_usable_percent,
             "auto_compact_buffer_tokens": auto_compact_buffer,
             "output_reserve": reserved_output_tokens_for_model(&hook.model.id),
-            "output_reserve_used": ctx_tokens.map(|t| t.saturating_sub(ctx_limit)),
+            "output_reserve_used": ctx_tokens.map(|t| t.saturating_sub(ctx_usable_limit)),
             "source": context_source,
             "headroom_tokens": context_headroom,
             "eta_minutes": context_eta_minutes

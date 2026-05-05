@@ -1,8 +1,11 @@
 use serde_json::Value;
+use std::env;
 
 use chrono::{TimeZone, Utc};
 use claude_statusline::display::build_json_output;
-use claude_statusline::models::hook::{HookJson, HookModel, HookRemote, HookWorkspace};
+use claude_statusline::models::hook::{
+    HookEffort, HookJson, HookModel, HookRemote, HookThinking, HookWorkspace,
+};
 use claude_statusline::models::{PromptCacheBucketInfo, PromptCacheBucketKind, PromptCacheInfo};
 use claude_statusline::provenance::{
     CostProvenance, PricingSource, SessionCostSource, TodayCostSource,
@@ -29,6 +32,11 @@ fn json_output_shape_minimal() {
         cost: None,
         context_window: None,
         exceeds_200k_tokens: None,
+        fast_mode: Some(true),
+        effort: Some(HookEffort {
+            level: "high".to_string(),
+        }),
+        thinking: Some(HookThinking { enabled: false }),
         rate_limits: None,
         session_name: None,
         vim: None,
@@ -106,6 +114,10 @@ fn json_output_shape_minimal() {
     // Model sub-keys
     assert_eq!(json["model"]["id"], "claude-3.5-sonnet");
     assert_eq!(json["model"]["display_name"], "Claude 3.5 Sonnet");
+    assert_eq!(json["model"]["fast_mode"], true);
+    assert_eq!(json["fast_mode"], true);
+    assert_eq!(json["effort"], "high");
+    assert_eq!(json["thinking"]["enabled"], false);
     assert_eq!(json["cwd"], "/tmp/project");
     assert_eq!(json["project_dir"], "/tmp/project");
     assert_eq!(json["workspace"]["current_dir"], "/tmp/project");
@@ -157,6 +169,9 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         cost: None,
         context_window: None,
         exceeds_200k_tokens: None,
+        fast_mode: None,
+        effort: None,
+        thinking: None,
         rate_limits: None,
         session_name: None,
         vim: None,
@@ -236,6 +251,9 @@ fn json_output_context_limit_override_from_hook() {
         cost: None,
         context_window: None,
         exceeds_200k_tokens: None,
+        fast_mode: None,
+        effort: None,
+        thinking: None,
         rate_limits: None,
         session_name: None,
         vim: None,
@@ -341,6 +359,100 @@ fn json_output_context_limit_override_from_hook() {
 }
 
 #[test]
+#[serial_test::serial]
+fn json_output_reports_output_reserve_used_after_usable_limit() {
+    // SAFETY: Test runs serially, no concurrent env access
+    unsafe {
+        env::set_var("CLAUDE_SYSTEM_OVERHEAD", "1234");
+    }
+    let hook = HookJson {
+        session_id: "s1".to_string(),
+        transcript_path: "/tmp/transcript.jsonl".to_string(),
+        cwd: None,
+        model: HookModel {
+            id: "claude-sonnet-4-5".to_string(),
+            display_name: "Claude Sonnet 4.5".to_string(),
+        },
+        workspace: HookWorkspace {
+            current_dir: "/tmp/project".to_string(),
+            project_dir: Some("/tmp/project".to_string()),
+            added_dirs: Vec::new(),
+            git_worktree: None,
+        },
+        version: Some("test".to_string()),
+        output_style: None,
+        cost: None,
+        context_window: None,
+        exceeds_200k_tokens: None,
+        fast_mode: None,
+        effort: None,
+        thinking: None,
+        rate_limits: None,
+        session_name: None,
+        vim: None,
+        agent: None,
+        worktree: None,
+        remote: None,
+    };
+
+    let json: Value = build_json_output(
+        &hook,
+        0.0,
+        0.0,
+        0,
+        0.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        None,
+        None,
+        None,
+        0.0,
+        None,
+        None,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        Some((170_000, 85)),
+        Some("hook"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+
+    assert_eq!(json["context"]["limit"], 200_000);
+    assert_eq!(json["context"]["output_reserve"], 32_000);
+    assert_eq!(json["context"]["usable_limit"], 168_000);
+    assert_eq!(json["context"]["output_reserve_used"], 2_000);
+    assert_eq!(json["context"]["tokens_raw"], 170_000);
+    assert!(json["context"]["system_overhead_tokens"].is_null());
+    // SAFETY: Test runs serially, no concurrent env access
+    unsafe {
+        env::remove_var("CLAUDE_SYSTEM_OVERHEAD");
+    }
+}
+
+#[test]
 fn json_output_includes_provenance_and_prompt_cache() {
     let hook = HookJson {
         session_id: "s1".to_string(),
@@ -361,6 +473,9 @@ fn json_output_includes_provenance_and_prompt_cache() {
         cost: None,
         context_window: None,
         exceeds_200k_tokens: None,
+        fast_mode: None,
+        effort: None,
+        thinking: None,
         rate_limits: None,
         session_name: None,
         vim: None,

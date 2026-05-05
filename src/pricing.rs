@@ -7,7 +7,7 @@
 //! Each model has pricing for:
 //! - Input tokens
 //! - Output tokens
-//! - Cache creation (typically 1.25x input price, with 5m/1h tiers)
+//! - Cache creation (Claude Code prices the aggregate cache write tokens)
 //! - Cache reads (typically 0.1x input price)
 //!
 //! ## Pricing Resolution Order
@@ -376,11 +376,10 @@ fn flat_cost_for_usage(model_id: &str, usage: &Value, speed_override: Option<&st
     let input = usage_u64(usage, "input_tokens");
     let output = usage_u64(usage, "output_tokens");
     let cache_create = usage_u64(usage, "cache_creation_input_tokens");
-    let cache_create_1h = usage_nested_u64(usage, "cache_creation", "ephemeral_1h_input_tokens");
-    let cache_create_5m = usage_nested_u64(usage, "cache_creation", "ephemeral_5m_input_tokens");
-    let cache_create_nested = cache_create_1h + cache_create_5m;
+    let cache_create_nested =
+        usage_nested_u64(usage, "cache_creation", "ephemeral_1h_input_tokens")
+            + usage_nested_u64(usage, "cache_creation", "ephemeral_5m_input_tokens");
     let cache_create_effective = cache_create.max(cache_create_nested);
-    let cache_create_unknown = cache_create_effective.saturating_sub(cache_create_nested);
     let cache_read = usage_u64(usage, "cache_read_input_tokens");
     let web_search_requests = usage
         .get("server_tool_use")
@@ -395,8 +394,7 @@ fn flat_cost_for_usage(model_id: &str, usage: &Value, speed_override: Option<&st
     );
     let token_cost = (input as f64) * p.in_per_tok
         + (output as f64) * p.out_per_tok
-        + ((cache_create_5m + cache_create_unknown) as f64) * p.cache_create_per_tok
-        + (cache_create_1h as f64) * p.cache_create_1h_per_tok
+        + (cache_create_effective as f64) * p.cache_create_per_tok
         + (cache_read as f64) * p.cache_read_per_tok;
     let web_search_cost = (web_search_requests as f64) * web_search_per_request();
 
@@ -412,9 +410,10 @@ fn flat_cost_for_usage(model_id: &str, usage: &Value, speed_override: Option<&st
 /// Calculate Claude Code-compatible cost for a usage object.
 ///
 /// Mirrors `calculateUSDCost` plus `addToTotalSessionCost` in Claude Code:
-/// token/cache costs are model-priced, Opus 4.6 fast mode affects token/cache
-/// tiers only, web search remains a flat per-request charge, and advisor
-/// iteration usage is charged recursively under its own model.
+/// token/cache costs are model-priced, cache creation is charged from aggregate
+/// `cache_creation_input_tokens`, Opus 4.6 fast mode affects token/cache costs
+/// only, web search remains a flat per-request charge, and advisor iteration
+/// usage is charged recursively under its own model.
 pub fn calculate_cost_for_usage(model_id: &str, usage: &Value) -> f64 {
     calculate_cost_for_usage_with_speed(model_id, usage, None)
 }
@@ -594,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_creation_1h_uses_1h_price_when_reported() {
+    fn test_cache_creation_1h_uses_cli_cache_write_price() {
         let usage = serde_json::json!({
             "input_tokens": 0,
             "output_tokens": 0,
@@ -607,7 +606,7 @@ mod tests {
         });
 
         let cost = calculate_cost_for_usage("claude-sonnet-4-6", &usage);
-        assert!((cost - 9.75).abs() < 1e-10);
+        assert!((cost - 7.5).abs() < 1e-10);
     }
 
     #[test]
