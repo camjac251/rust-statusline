@@ -12,7 +12,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cli::{
-    Args, BurnScopeArg, GitArg, LabelsArg, TimeFormatArg, WindowAnchorArg, WindowScopeArg,
+    Args, BurnScopeArg, GitArg, LabelsArg, PresetArg, TimeFormatArg, WindowAnchorArg,
+    WindowScopeArg,
 };
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -21,19 +22,84 @@ pub struct FileConfig {
     pub labels: Option<LabelsArg>,
     pub git: Option<GitArg>,
     pub time_fmt: Option<TimeFormatArg>,
-    pub show_provider: Option<bool>,
-    pub show_provenance: Option<bool>,
-    pub show_breakdown: Option<bool>,
     pub truecolor: Option<bool>,
-    pub hints: Option<bool>,
-    pub prompt_cache: Option<bool>,
     pub prompt_cache_ttl_seconds: Option<u64>,
     pub burn_scope: Option<BurnScopeArg>,
     pub window_scope: Option<WindowScopeArg>,
     pub window_anchor: Option<WindowAnchorArg>,
-    pub no_db_cache: Option<bool>,
-    pub no_beads: Option<bool>,
-    pub no_gastown: Option<bool>,
+    pub preset: Option<PresetArg>,
+    pub subsystems: SubsystemFileConfig,
+    pub display: DisplayFileConfig,
+    pub json_settings: JsonFileConfig,
+}
+
+/// JSON-only opt-out toggles. Positive semantics in TOML: `true` keeps the
+/// field, `false` omits it. Args use negative semantics (`no_json_*`).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct JsonFileConfig {
+    pub subagents: Option<bool>,
+    pub tokens_breakdown: Option<bool>,
+    pub duration: Option<bool>,
+    pub rate_limit: Option<bool>,
+    pub usage_limits: Option<bool>,
+    pub compat_aliases: Option<bool>,
+}
+
+/// Display.* atomic toggles. All values use positive semantics:
+/// `Some(true)` means the token is shown, `Some(false)` means it is hidden.
+/// Args use negative semantics (`no_<section>_<element>`), so apply_config
+/// inverts to set the args bool.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct DisplayFileConfig {
+    // cost.*
+    pub cost_session: Option<bool>,
+    pub cost_today: Option<bool>,
+    pub cost_window: Option<bool>,
+    pub cost_breakdown: Option<bool>,
+    pub cost_provenance: Option<bool>,
+    pub cost_lines_delta: Option<bool>,
+    // usage.*
+    pub usage_five_hour: Option<bool>,
+    pub usage_weekly: Option<bool>,
+    pub usage_opus: Option<bool>,
+    pub usage_sonnet: Option<bool>,
+    pub usage_extra: Option<bool>,
+    // context.*
+    pub context_tokens: Option<bool>,
+    pub context_percent: Option<bool>,
+    pub context_compact_hint: Option<bool>,
+    // git.*
+    pub git_branch: Option<bool>,
+    pub git_dirty: Option<bool>,
+    pub git_ahead_behind: Option<bool>,
+    pub git_worktree: Option<bool>,
+    // workspace.*
+    pub workspace_cwd: Option<bool>,
+    pub workspace_added_dirs: Option<bool>,
+    pub workspace_model: Option<bool>,
+    pub workspace_fast_mode_indicator: Option<bool>,
+    pub workspace_agent: Option<bool>,
+    pub workspace_output_style: Option<bool>,
+    pub workspace_effort: Option<bool>,
+    // integrations.*
+    pub integrations_beads: Option<bool>,
+    pub integrations_beads_alerts: Option<bool>,
+    pub integrations_gastown: Option<bool>,
+    pub integrations_prompt_cache: Option<bool>,
+    // provider.*
+    pub provider_key_source: Option<bool>,
+    pub provider_name: Option<bool>,
+}
+
+/// Subsystem on/off toggles. `true` keeps the subsystem enabled (default).
+/// `false` short-circuits the work for that subsystem entirely.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct SubsystemFileConfig {
+    pub git: Option<bool>,
+    pub beads: Option<bool>,
+    pub gastown: Option<bool>,
+    pub db_cache: Option<bool>,
+    pub usage_api: Option<bool>,
 }
 
 pub fn parse_effective_args<I, T>(itr: I) -> Args
@@ -44,19 +110,36 @@ where
     let matches = Args::command().get_matches_from(itr);
     let mut args = Args::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
 
-    if args.no_config {
-        return args;
+    let loaded_config = if args.no_config {
+        None
+    } else {
+        match load_config(args.config.as_deref()) {
+            Ok(Some((path, config))) => {
+                args.config_loaded = Some(path);
+                Some(config)
+            }
+            Ok(None) => None,
+            Err(err) => {
+                args.config_error = Some(err.to_string());
+                None
+            }
+        }
+    };
+
+    // Resolve effective preset: CLI/env > config > none. Apply it first so that
+    // TOML / env / CLI atomic toggles still override the preset values.
+    let effective_preset = args
+        .preset
+        .or_else(|| loaded_config.as_ref().and_then(|c| c.preset));
+    if let Some(preset) = effective_preset {
+        if args.preset.is_none() {
+            args.preset = Some(preset);
+        }
+        apply_preset(&mut args, &matches, preset);
     }
 
-    match load_config(args.config.as_deref()) {
-        Ok(Some((path, config))) => {
-            apply_config(&mut args, &matches, &config);
-            args.config_loaded = Some(path);
-        }
-        Ok(None) => {}
-        Err(err) => {
-            args.config_error = Some(err.to_string());
-        }
+    if let Some(config) = loaded_config {
+        apply_config(&mut args, &matches, &config);
     }
 
     args
@@ -120,52 +203,9 @@ fn apply_config(args: &mut Args, matches: &clap::ArgMatches, config: &FileConfig
             args.time_fmt = value;
         }
     }
-    if !arg_was_user_set(matches, "show_provider") {
-        if let Some(value) = config.show_provider {
-            args.show_provider = value;
-        }
-    }
-    if !arg_was_user_set(matches, "show_provenance") {
-        if let Some(value) = config.show_provenance {
-            args.show_provenance = value;
-        }
-    }
-    if !arg_was_user_set(matches, "show_breakdown") {
-        if let Some(value) = config.show_breakdown {
-            args.show_breakdown = value;
-        }
-    }
     if !arg_was_user_set(matches, "truecolor") && std::env::var("CLAUDE_TRUECOLOR").is_err() {
         if let Some(value) = config.truecolor {
             args.truecolor = value;
-        }
-    }
-    if !arg_was_user_set(matches, "hints")
-        && !arg_was_user_set(matches, "no_hints")
-        && std::env::var("CLAUDE_STATUS_HINTS").is_err()
-    {
-        if let Some(value) = config.hints {
-            if value {
-                args.hints = true;
-                args.no_hints = false;
-            } else {
-                args.hints = false;
-                args.no_hints = true;
-            }
-        }
-    }
-    if !arg_was_user_set(matches, "prompt_cache")
-        && !arg_was_user_set(matches, "no_prompt_cache")
-        && std::env::var("CLAUDE_PROMPT_CACHE").is_err()
-    {
-        if let Some(value) = config.prompt_cache {
-            if value {
-                args.prompt_cache = true;
-                args.no_prompt_cache = false;
-            } else {
-                args.prompt_cache = false;
-                args.no_prompt_cache = true;
-            }
         }
     }
     if !arg_was_user_set(matches, "prompt_cache_ttl_seconds") {
@@ -173,6 +213,239 @@ fn apply_config(args: &mut Args, matches: &clap::ArgMatches, config: &FileConfig
             args.prompt_cache_ttl_seconds = Some(value);
         }
     }
+
+    // display.* atomic toggles. TOML positive (true = visible),
+    // Args negative (no_<section>_<element>: true = hidden).
+    apply_display_toggle(
+        matches,
+        "no_cost_session",
+        config.display.cost_session,
+        &mut args.no_cost_session,
+    );
+    apply_display_toggle(
+        matches,
+        "no_cost_today",
+        config.display.cost_today,
+        &mut args.no_cost_today,
+    );
+    apply_display_toggle(
+        matches,
+        "no_cost_window",
+        config.display.cost_window,
+        &mut args.no_cost_window,
+    );
+    apply_display_toggle(
+        matches,
+        "no_cost_lines_delta",
+        config.display.cost_lines_delta,
+        &mut args.no_cost_lines_delta,
+    );
+    apply_display_opt_in(
+        matches,
+        "cost_breakdown",
+        config.display.cost_breakdown,
+        &mut args.cost_breakdown,
+    );
+    apply_display_opt_in(
+        matches,
+        "cost_provenance",
+        config.display.cost_provenance,
+        &mut args.cost_provenance,
+    );
+
+    apply_display_toggle(
+        matches,
+        "no_usage_five_hour",
+        config.display.usage_five_hour,
+        &mut args.no_usage_five_hour,
+    );
+    apply_display_toggle(
+        matches,
+        "no_usage_weekly",
+        config.display.usage_weekly,
+        &mut args.no_usage_weekly,
+    );
+    apply_display_toggle(
+        matches,
+        "no_usage_opus",
+        config.display.usage_opus,
+        &mut args.no_usage_opus,
+    );
+    apply_display_toggle(
+        matches,
+        "no_usage_sonnet",
+        config.display.usage_sonnet,
+        &mut args.no_usage_sonnet,
+    );
+    apply_display_toggle(
+        matches,
+        "no_usage_extra",
+        config.display.usage_extra,
+        &mut args.no_usage_extra,
+    );
+
+    apply_display_toggle(
+        matches,
+        "no_context_tokens",
+        config.display.context_tokens,
+        &mut args.no_context_tokens,
+    );
+    apply_display_toggle(
+        matches,
+        "no_context_percent",
+        config.display.context_percent,
+        &mut args.no_context_percent,
+    );
+    apply_display_toggle(
+        matches,
+        "no_context_compact_hint",
+        config.display.context_compact_hint,
+        &mut args.no_context_compact_hint,
+    );
+
+    apply_display_toggle(
+        matches,
+        "no_git_branch",
+        config.display.git_branch,
+        &mut args.no_git_branch,
+    );
+    apply_display_toggle(
+        matches,
+        "no_git_dirty",
+        config.display.git_dirty,
+        &mut args.no_git_dirty,
+    );
+    apply_display_toggle(
+        matches,
+        "no_git_ahead_behind",
+        config.display.git_ahead_behind,
+        &mut args.no_git_ahead_behind,
+    );
+    apply_display_toggle(
+        matches,
+        "no_git_worktree",
+        config.display.git_worktree,
+        &mut args.no_git_worktree,
+    );
+
+    apply_display_toggle(
+        matches,
+        "no_workspace_cwd",
+        config.display.workspace_cwd,
+        &mut args.no_workspace_cwd,
+    );
+    apply_display_toggle(
+        matches,
+        "no_workspace_added_dirs",
+        config.display.workspace_added_dirs,
+        &mut args.no_workspace_added_dirs,
+    );
+    apply_display_toggle(
+        matches,
+        "no_workspace_model",
+        config.display.workspace_model,
+        &mut args.no_workspace_model,
+    );
+    apply_display_toggle(
+        matches,
+        "no_workspace_fast_mode_indicator",
+        config.display.workspace_fast_mode_indicator,
+        &mut args.no_workspace_fast_mode_indicator,
+    );
+    apply_display_toggle(
+        matches,
+        "no_workspace_agent",
+        config.display.workspace_agent,
+        &mut args.no_workspace_agent,
+    );
+    apply_display_toggle(
+        matches,
+        "no_workspace_output_style",
+        config.display.workspace_output_style,
+        &mut args.no_workspace_output_style,
+    );
+    apply_display_toggle(
+        matches,
+        "no_workspace_effort",
+        config.display.workspace_effort,
+        &mut args.no_workspace_effort,
+    );
+
+    apply_display_toggle(
+        matches,
+        "no_integrations_beads",
+        config.display.integrations_beads,
+        &mut args.no_integrations_beads,
+    );
+    apply_display_toggle(
+        matches,
+        "no_integrations_beads_alerts",
+        config.display.integrations_beads_alerts,
+        &mut args.no_integrations_beads_alerts,
+    );
+    apply_display_toggle(
+        matches,
+        "no_integrations_gastown",
+        config.display.integrations_gastown,
+        &mut args.no_integrations_gastown,
+    );
+    apply_display_toggle(
+        matches,
+        "no_integrations_prompt_cache",
+        config.display.integrations_prompt_cache,
+        &mut args.no_integrations_prompt_cache,
+    );
+
+    apply_display_opt_in(
+        matches,
+        "provider_key_source",
+        config.display.provider_key_source,
+        &mut args.provider_key_source,
+    );
+    apply_display_opt_in(
+        matches,
+        "provider_name",
+        config.display.provider_name,
+        &mut args.provider_name,
+    );
+
+    // json.* opt-outs (TOML positive, args negative)
+    apply_display_toggle(
+        matches,
+        "no_json_subagents",
+        config.json_settings.subagents,
+        &mut args.no_json_subagents,
+    );
+    apply_display_toggle(
+        matches,
+        "no_json_tokens_breakdown",
+        config.json_settings.tokens_breakdown,
+        &mut args.no_json_tokens_breakdown,
+    );
+    apply_display_toggle(
+        matches,
+        "no_json_duration",
+        config.json_settings.duration,
+        &mut args.no_json_duration,
+    );
+    apply_display_toggle(
+        matches,
+        "no_json_rate_limit",
+        config.json_settings.rate_limit,
+        &mut args.no_json_rate_limit,
+    );
+    apply_display_toggle(
+        matches,
+        "no_json_usage_limits",
+        config.json_settings.usage_limits,
+        &mut args.no_json_usage_limits,
+    );
+    apply_display_toggle(
+        matches,
+        "no_json_compat_aliases",
+        config.json_settings.compat_aliases,
+        &mut args.no_json_compat_aliases,
+    );
     if !arg_was_user_set(matches, "burn_scope") {
         if let Some(value) = config.burn_scope {
             args.burn_scope = value;
@@ -188,19 +461,199 @@ fn apply_config(args: &mut Args, matches: &clap::ArgMatches, config: &FileConfig
             args.window_anchor = value;
         }
     }
-    if !arg_was_user_set(matches, "no_db_cache") {
-        if let Some(value) = config.no_db_cache {
-            args.no_db_cache = value;
+    // Subsystem toggles. TOML positive semantics (git = true means enabled);
+    // Args negative semantics (no_subsystem_git = true means disabled).
+    if !arg_was_user_set(matches, "no_subsystem_git") {
+        if let Some(enabled) = config.subsystems.git {
+            args.no_subsystem_git = !enabled;
         }
     }
-    if !arg_was_user_set(matches, "no_beads") {
-        if let Some(value) = config.no_beads {
-            args.no_beads = value;
+    if !arg_was_user_set(matches, "no_subsystem_beads") {
+        if let Some(enabled) = config.subsystems.beads {
+            args.no_subsystem_beads = !enabled;
         }
     }
-    if !arg_was_user_set(matches, "no_gastown") {
-        if let Some(value) = config.no_gastown {
-            args.no_gastown = value;
+    if !arg_was_user_set(matches, "no_subsystem_gastown") {
+        if let Some(enabled) = config.subsystems.gastown {
+            args.no_subsystem_gastown = !enabled;
+        }
+    }
+    if !arg_was_user_set(matches, "no_subsystem_db_cache") {
+        if let Some(enabled) = config.subsystems.db_cache {
+            args.no_subsystem_db_cache = !enabled;
+        }
+    }
+    if !arg_was_user_set(matches, "no_subsystem_usage_api") {
+        if let Some(enabled) = config.subsystems.usage_api {
+            args.no_subsystem_usage_api = !enabled;
+        }
+    }
+}
+
+/// Apply a preset's display.* + subsystems.* defaults, respecting CLI/env wins.
+fn apply_preset(args: &mut Args, matches: &clap::ArgMatches, preset: PresetArg) {
+    match preset {
+        PresetArg::Default => {}
+        PresetArg::Minimal => apply_preset_minimal(args, matches),
+        PresetArg::Full => apply_preset_full(args, matches),
+    }
+}
+
+fn set_if_unset_neg(matches: &clap::ArgMatches, id: &str, target: &mut bool, hide: bool) {
+    if !arg_was_user_set(matches, id) {
+        *target = hide;
+    }
+}
+
+fn set_if_unset_pos(matches: &clap::ArgMatches, id: &str, target: &mut bool, show: bool) {
+    if !arg_was_user_set(matches, id) {
+        *target = show;
+    }
+}
+
+fn apply_preset_minimal(args: &mut Args, matches: &clap::ArgMatches) {
+    // Cost: keep session, hide the rest
+    set_if_unset_neg(matches, "no_cost_today", &mut args.no_cost_today, true);
+    set_if_unset_neg(matches, "no_cost_window", &mut args.no_cost_window, true);
+    set_if_unset_neg(
+        matches,
+        "no_cost_lines_delta",
+        &mut args.no_cost_lines_delta,
+        true,
+    );
+    // Usage: keep five_hour, hide the rest
+    set_if_unset_neg(matches, "no_usage_weekly", &mut args.no_usage_weekly, true);
+    set_if_unset_neg(matches, "no_usage_opus", &mut args.no_usage_opus, true);
+    set_if_unset_neg(matches, "no_usage_sonnet", &mut args.no_usage_sonnet, true);
+    set_if_unset_neg(matches, "no_usage_extra", &mut args.no_usage_extra, true);
+    // Context: keep percent, hide tokens + compact hint
+    set_if_unset_neg(
+        matches,
+        "no_context_tokens",
+        &mut args.no_context_tokens,
+        true,
+    );
+    set_if_unset_neg(
+        matches,
+        "no_context_compact_hint",
+        &mut args.no_context_compact_hint,
+        true,
+    );
+    // Git: keep branch + dirty, hide rest
+    set_if_unset_neg(
+        matches,
+        "no_git_ahead_behind",
+        &mut args.no_git_ahead_behind,
+        true,
+    );
+    set_if_unset_neg(matches, "no_git_worktree", &mut args.no_git_worktree, true);
+    // Workspace: keep cwd + model + fast_mode_indicator, hide rest
+    set_if_unset_neg(
+        matches,
+        "no_workspace_added_dirs",
+        &mut args.no_workspace_added_dirs,
+        true,
+    );
+    set_if_unset_neg(
+        matches,
+        "no_workspace_agent",
+        &mut args.no_workspace_agent,
+        true,
+    );
+    set_if_unset_neg(
+        matches,
+        "no_workspace_output_style",
+        &mut args.no_workspace_output_style,
+        true,
+    );
+    set_if_unset_neg(
+        matches,
+        "no_workspace_effort",
+        &mut args.no_workspace_effort,
+        true,
+    );
+    // Integrations: hide all
+    set_if_unset_neg(
+        matches,
+        "no_integrations_beads",
+        &mut args.no_integrations_beads,
+        true,
+    );
+    set_if_unset_neg(
+        matches,
+        "no_integrations_beads_alerts",
+        &mut args.no_integrations_beads_alerts,
+        true,
+    );
+    set_if_unset_neg(
+        matches,
+        "no_integrations_gastown",
+        &mut args.no_integrations_gastown,
+        true,
+    );
+    set_if_unset_neg(
+        matches,
+        "no_integrations_prompt_cache",
+        &mut args.no_integrations_prompt_cache,
+        true,
+    );
+    // Subsystems: skip the expensive ones not needed for minimal
+    set_if_unset_neg(
+        matches,
+        "no_subsystem_beads",
+        &mut args.no_subsystem_beads,
+        true,
+    );
+    set_if_unset_neg(
+        matches,
+        "no_subsystem_gastown",
+        &mut args.no_subsystem_gastown,
+        true,
+    );
+    set_if_unset_neg(
+        matches,
+        "no_subsystem_usage_api",
+        &mut args.no_subsystem_usage_api,
+        true,
+    );
+}
+
+fn apply_preset_full(args: &mut Args, matches: &clap::ArgMatches) {
+    set_if_unset_pos(matches, "cost_breakdown", &mut args.cost_breakdown, true);
+    set_if_unset_pos(matches, "cost_provenance", &mut args.cost_provenance, true);
+    set_if_unset_pos(
+        matches,
+        "provider_key_source",
+        &mut args.provider_key_source,
+        true,
+    );
+    set_if_unset_pos(matches, "provider_name", &mut args.provider_name, true);
+}
+
+/// For default-on toggles (`no_<section>_<element>`): TOML true keeps it visible (args.no_* = false).
+fn apply_display_toggle(
+    matches: &clap::ArgMatches,
+    arg_id: &str,
+    enabled: Option<bool>,
+    target: &mut bool,
+) {
+    if !arg_was_user_set(matches, arg_id) {
+        if let Some(visible) = enabled {
+            *target = !visible;
+        }
+    }
+}
+
+/// For default-off opt-in toggles (positive name, e.g. `cost_breakdown`): TOML true shows it.
+fn apply_display_opt_in(
+    matches: &clap::ArgMatches,
+    arg_id: &str,
+    enabled: Option<bool>,
+    target: &mut bool,
+) {
+    if !arg_was_user_set(matches, arg_id) {
+        if let Some(visible) = enabled {
+            *target = visible;
         }
     }
 }
@@ -236,22 +689,82 @@ fn parse_config_str(input: &str) -> Result<FileConfig> {
 
         match key.as_str() {
             "json" => config.json = Some(parse_bool(value)?),
+            "preset" => config.preset = Some(parse_preset(value)?),
             "labels" => config.labels = Some(parse_labels(value)?),
             "git" => config.git = Some(parse_git(value)?),
+            "git.verbosity" => config.git = Some(parse_git(value)?),
             "time" | "time_fmt" => config.time_fmt = Some(parse_time(value)?),
-            "show_provider" => config.show_provider = Some(parse_bool(value)?),
-            "show_provenance" => config.show_provenance = Some(parse_bool(value)?),
-            "show_breakdown" => config.show_breakdown = Some(parse_bool(value)?),
             "truecolor" => config.truecolor = Some(parse_bool(value)?),
-            "hints" => config.hints = Some(parse_bool(value)?),
-            "prompt_cache" => config.prompt_cache = Some(parse_bool(value)?),
             "prompt_cache_ttl_seconds" => config.prompt_cache_ttl_seconds = Some(parse_u64(value)?),
             "burn_scope" => config.burn_scope = Some(parse_burn_scope(value)?),
             "window_scope" => config.window_scope = Some(parse_window_scope(value)?),
             "window_anchor" => config.window_anchor = Some(parse_window_anchor(value)?),
-            "no_db_cache" => config.no_db_cache = Some(parse_bool(value)?),
-            "no_beads" => config.no_beads = Some(parse_bool(value)?),
-            "no_gastown" => config.no_gastown = Some(parse_bool(value)?),
+            "subsystems.git" => config.subsystems.git = Some(parse_bool(value)?),
+            "subsystems.beads" => config.subsystems.beads = Some(parse_bool(value)?),
+            "subsystems.gastown" => config.subsystems.gastown = Some(parse_bool(value)?),
+            "subsystems.db_cache" => config.subsystems.db_cache = Some(parse_bool(value)?),
+            "subsystems.usage_api" => config.subsystems.usage_api = Some(parse_bool(value)?),
+            // display.cost.*
+            "cost.session" => config.display.cost_session = Some(parse_bool(value)?),
+            "cost.today" => config.display.cost_today = Some(parse_bool(value)?),
+            "cost.window" => config.display.cost_window = Some(parse_bool(value)?),
+            "cost.breakdown" => config.display.cost_breakdown = Some(parse_bool(value)?),
+            "cost.provenance" => config.display.cost_provenance = Some(parse_bool(value)?),
+            "cost.lines_delta" => config.display.cost_lines_delta = Some(parse_bool(value)?),
+            // display.usage.*
+            "usage.five_hour" => config.display.usage_five_hour = Some(parse_bool(value)?),
+            "usage.weekly" => config.display.usage_weekly = Some(parse_bool(value)?),
+            "usage.opus" => config.display.usage_opus = Some(parse_bool(value)?),
+            "usage.sonnet" => config.display.usage_sonnet = Some(parse_bool(value)?),
+            "usage.extra" => config.display.usage_extra = Some(parse_bool(value)?),
+            // display.context.*
+            "context.tokens" => config.display.context_tokens = Some(parse_bool(value)?),
+            "context.percent" => config.display.context_percent = Some(parse_bool(value)?),
+            "context.compact_hint" => {
+                config.display.context_compact_hint = Some(parse_bool(value)?)
+            }
+            // display.git.* (git.verbosity handled above as a mode selector)
+            "git.branch" => config.display.git_branch = Some(parse_bool(value)?),
+            "git.dirty" => config.display.git_dirty = Some(parse_bool(value)?),
+            "git.ahead_behind" => config.display.git_ahead_behind = Some(parse_bool(value)?),
+            "git.worktree" => config.display.git_worktree = Some(parse_bool(value)?),
+            // display.workspace.*
+            "workspace.cwd" => config.display.workspace_cwd = Some(parse_bool(value)?),
+            "workspace.added_dirs" => {
+                config.display.workspace_added_dirs = Some(parse_bool(value)?)
+            }
+            "workspace.model" => config.display.workspace_model = Some(parse_bool(value)?),
+            "workspace.fast_mode_indicator" => {
+                config.display.workspace_fast_mode_indicator = Some(parse_bool(value)?)
+            }
+            "workspace.agent" => config.display.workspace_agent = Some(parse_bool(value)?),
+            "workspace.output_style" => {
+                config.display.workspace_output_style = Some(parse_bool(value)?)
+            }
+            "workspace.effort" => config.display.workspace_effort = Some(parse_bool(value)?),
+            // display.integrations.*
+            "integrations.beads" => config.display.integrations_beads = Some(parse_bool(value)?),
+            "integrations.beads_alerts" => {
+                config.display.integrations_beads_alerts = Some(parse_bool(value)?)
+            }
+            "integrations.gastown" => {
+                config.display.integrations_gastown = Some(parse_bool(value)?)
+            }
+            "integrations.prompt_cache" => {
+                config.display.integrations_prompt_cache = Some(parse_bool(value)?)
+            }
+            // display.provider.*
+            "provider.key_source" => config.display.provider_key_source = Some(parse_bool(value)?),
+            "provider.name" => config.display.provider_name = Some(parse_bool(value)?),
+            // json.*
+            "json.subagents" => config.json_settings.subagents = Some(parse_bool(value)?),
+            "json.tokens_breakdown" => {
+                config.json_settings.tokens_breakdown = Some(parse_bool(value)?)
+            }
+            "json.duration" => config.json_settings.duration = Some(parse_bool(value)?),
+            "json.rate_limit" => config.json_settings.rate_limit = Some(parse_bool(value)?),
+            "json.usage_limits" => config.json_settings.usage_limits = Some(parse_bool(value)?),
+            "json.compat_aliases" => config.json_settings.compat_aliases = Some(parse_bool(value)?),
             _ => {}
         }
     }
@@ -265,6 +778,9 @@ fn normalize_key(section: &str, key: &str) -> String {
         normalized
     } else {
         let with_section = format!("{}.{}", section, normalized);
+        // Strip [display] and [statusline] section prefixes for backwards-compat
+        // (those sections were previously flat). Sections that carry meaning
+        // (e.g. [subsystems]) keep their dotted prefix.
         with_section
             .strip_prefix("display.")
             .or_else(|| with_section.strip_prefix("statusline."))
@@ -368,6 +884,15 @@ fn parse_window_scope(value: &str) -> Result<WindowScopeArg> {
     }
 }
 
+fn parse_preset(value: &str) -> Result<PresetArg> {
+    match parse_string(value)?.trim().to_ascii_lowercase().as_str() {
+        "minimal" => Ok(PresetArg::Minimal),
+        "default" => Ok(PresetArg::Default),
+        "full" => Ok(PresetArg::Full),
+        other => Err(anyhow!("invalid preset value: {other}")),
+    }
+}
+
 fn parse_window_anchor(value: &str) -> Result<WindowAnchorArg> {
     match parse_string(value)?.trim().to_ascii_lowercase().as_str() {
         "provider" => Ok(WindowAnchorArg::Provider),
@@ -387,17 +912,23 @@ mod tests {
             [display]
             labels = "long"
             git = "verbose"
-            show_provenance = true
-            prompt_cache = false
             prompt_cache_ttl_seconds = 3600
+
+            [display.cost]
+            provenance = true
+            today = false
+
+            [display.integrations]
+            prompt_cache = false
             "#,
         )
         .expect("config should parse");
 
         assert_eq!(config.labels, Some(LabelsArg::Long));
         assert_eq!(config.git, Some(GitArg::Verbose));
-        assert_eq!(config.show_provenance, Some(true));
-        assert_eq!(config.prompt_cache, Some(false));
         assert_eq!(config.prompt_cache_ttl_seconds, Some(3600));
+        assert_eq!(config.display.cost_provenance, Some(true));
+        assert_eq!(config.display.cost_today, Some(false));
+        assert_eq!(config.display.integrations_prompt_cache, Some(false));
     }
 }

@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use claude_statusline::models::Entry;
-use claude_statusline::window::{BurnScope, WindowScope, calculate_window_metrics};
+use claude_statusline::window::{BurnScope, WindowAnchor, WindowScope, calculate_window_metrics};
 
 fn create_test_entry(
     ts: DateTime<Utc>,
@@ -64,6 +64,7 @@ fn test_window_metrics_calculation() {
         None,
         WindowScope::Global,
         BurnScope::Session,
+        WindowAnchor::Provider,
     );
 
     assert_eq!(metrics.tokens_input, 7500);
@@ -109,6 +110,7 @@ fn test_window_scope_project_filtering() {
         None,
         WindowScope::Project,
         BurnScope::Session,
+        WindowAnchor::Provider,
     );
 
     // Should only include test-project entries for scoped totals and rates.
@@ -148,6 +150,7 @@ fn test_burn_scope_session_vs_global() {
         None,
         WindowScope::Global,
         BurnScope::Session,
+        WindowAnchor::Provider,
     );
 
     let global_metrics = calculate_window_metrics(
@@ -158,6 +161,7 @@ fn test_burn_scope_session_vs_global() {
         None,
         WindowScope::Global,
         BurnScope::Global,
+        WindowAnchor::Provider,
     );
 
     // Session burn should be different from global burn
@@ -190,6 +194,7 @@ fn test_reset_anchor_window_calculation() {
         Some(reset),
         WindowScope::Global,
         BurnScope::Session,
+        WindowAnchor::Provider,
     );
 
     // Only the second entry should be included (after reset)
@@ -210,6 +215,7 @@ fn test_empty_entries() {
         None,
         WindowScope::Global,
         BurnScope::Session,
+        WindowAnchor::Provider,
     );
 
     assert_eq!(metrics.total_cost, 0.0);

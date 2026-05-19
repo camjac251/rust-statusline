@@ -95,7 +95,7 @@ fn main() -> Result<()> {
     // - fast mode status (speed field from most recent API call)
     // - session cost (from SDK result messages)
     let session_state = parse_session_state(Path::new(&hook.transcript_path));
-    let prompt_cache_info = if args.prompt_cache {
+    let prompt_cache_info = if !args.no_integrations_prompt_cache {
         session_state.prompt_cache.clone().map(|mut info| {
             info.now = Utc::now();
             info.set_unknown_ttl_seconds(args.prompt_cache_ttl_seconds.unwrap_or(300));
@@ -129,8 +129,8 @@ fn main() -> Result<()> {
     let mut sessions_count = 1;
     let mut today_cost_source = TodayCostSource::ScanFallback;
     if let Some(ref project_dir) = hook.workspace.project_dir {
-        // Skip DB cache if --no-db-cache flag is set
-        if !args.no_db_cache {
+        // Skip DB cache when --no-subsystem-db-cache is set
+        if !args.no_subsystem_db_cache {
             match claude_statusline::db::get_global_usage(
                 &hook.session_id,
                 project_dir,
@@ -218,16 +218,20 @@ fn main() -> Result<()> {
         }
     }
 
-    // Git info from project_dir or current_dir (feature-gated)
+    // Git info from project_dir or current_dir (feature-gated + runtime toggle)
     let git_info = {
         #[cfg(feature = "git")]
         {
-            let git_dir = hook
-                .workspace
-                .project_dir
-                .as_deref()
-                .unwrap_or(&hook.workspace.current_dir);
-            claude_statusline::git::read_git_info(Path::new(git_dir))
+            if args.no_subsystem_git {
+                None
+            } else {
+                let git_dir = hook
+                    .workspace
+                    .project_dir
+                    .as_deref()
+                    .unwrap_or(&hook.workspace.current_dir);
+                claude_statusline::git::read_git_info(Path::new(git_dir))
+            }
         }
         #[cfg(not(feature = "git"))]
         {
@@ -235,8 +239,8 @@ fn main() -> Result<()> {
         }
     };
 
-    // Beads issue tracker info (unless --no-beads is set)
-    let beads_info = if args.no_beads {
+    // Beads issue tracker info (unless --no-subsystem-beads is set)
+    let beads_info = if args.no_subsystem_beads {
         None
     } else {
         let beads_dir = hook
@@ -247,8 +251,8 @@ fn main() -> Result<()> {
         get_beads_info(Path::new(beads_dir))
     };
 
-    // Gas Town multi-agent info (unless --no-gastown is set)
-    let gastown_info = if args.no_gastown {
+    // Gas Town multi-agent info (unless --no-subsystem-gastown is set)
+    let gastown_info = if args.no_subsystem_gastown {
         None
     } else {
         let gt_dir = hook
@@ -301,14 +305,6 @@ fn main() -> Result<()> {
 
     // Calculate window metrics
     let now_utc = Utc::now();
-    // Honor window anchor preference: set env consumed by window.rs
-    // SAFETY: We're in single-threaded startup code before any concurrent access
-    match args.window_anchor {
-        WindowAnchorArg::Provider => unsafe {
-            std::env::set_var("CLAUDE_WINDOW_ANCHOR", "provider")
-        },
-        WindowAnchorArg::Log => unsafe { std::env::set_var("CLAUDE_WINDOW_ANCHOR", "log") },
-    }
     let window_scope = match args.window_scope {
         WindowScopeArg::Global => WindowScope::Global,
         WindowScopeArg::Project => WindowScope::Project,
@@ -316,6 +312,10 @@ fn main() -> Result<()> {
     let burn_scope = match args.burn_scope {
         BurnScopeArg::Session => BurnScope::Session,
         BurnScopeArg::Global => BurnScope::Global,
+    };
+    let anchor_strategy = match args.window_anchor {
+        WindowAnchorArg::Provider => claude_statusline::window::WindowAnchor::Provider,
+        WindowAnchorArg::Log => claude_statusline::window::WindowAnchor::Log,
     };
 
     // Usage + reset data priority:
@@ -441,6 +441,7 @@ fn main() -> Result<()> {
         window_anchor,
         window_scope,
         burn_scope,
+        anchor_strategy,
     );
     let remaining_minutes_display =
         authoritative_remaining_minutes.unwrap_or(metrics.remaining_minutes);
@@ -506,6 +507,7 @@ fn main() -> Result<()> {
         };
 
         print_json_output(
+            &args,
             &hook,
             session_cost,
             today_cost,

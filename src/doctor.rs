@@ -38,6 +38,40 @@ struct PricingHealth {
 }
 
 #[derive(Debug, Serialize)]
+struct SubsystemHealth {
+    git: bool,
+    beads: bool,
+    gastown: bool,
+    db_cache: bool,
+    usage_api: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct PresetHealth {
+    selected: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct DisplayToggleHealth {
+    cost_breakdown: bool,
+    cost_provenance: bool,
+    provider_key_source: bool,
+    provider_name: bool,
+    context_compact_hint_enabled: bool,
+    integrations_prompt_cache_enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonToggleHealth {
+    subagents: bool,
+    tokens_breakdown: bool,
+    duration: bool,
+    rate_limit: bool,
+    usage_limits: bool,
+    compat_aliases: bool,
+}
+
+#[derive(Debug, Serialize)]
 struct DoctorReport {
     ok: bool,
     warnings: Vec<String>,
@@ -47,6 +81,10 @@ struct DoctorReport {
     db: crate::db::DbHealth,
     usage_api: crate::usage_api::UsageApiHealth,
     pricing: PricingHealth,
+    subsystems: SubsystemHealth,
+    preset: PresetHealth,
+    display_opt_in: DisplayToggleHealth,
+    json_settings: JsonToggleHealth,
 }
 
 pub fn run_command(args: &Args, command: &Command) -> Result<()> {
@@ -107,6 +145,40 @@ fn build_report(args: &Args) -> Result<DoctorReport> {
         warnings.push("pricing lookup failed for probe model".to_string());
     }
 
+    let subsystems = SubsystemHealth {
+        git: !args.no_subsystem_git,
+        beads: !args.no_subsystem_beads,
+        gastown: !args.no_subsystem_gastown,
+        db_cache: !args.no_subsystem_db_cache,
+        usage_api: !args.no_subsystem_usage_api,
+    };
+
+    let preset = PresetHealth {
+        selected: args.preset.map(|p| match p {
+            crate::cli::PresetArg::Minimal => "minimal",
+            crate::cli::PresetArg::Default => "default",
+            crate::cli::PresetArg::Full => "full",
+        }),
+    };
+
+    let display_opt_in = DisplayToggleHealth {
+        cost_breakdown: args.cost_breakdown,
+        cost_provenance: args.cost_provenance,
+        provider_key_source: args.provider_key_source,
+        provider_name: args.provider_name,
+        context_compact_hint_enabled: !args.no_context_compact_hint,
+        integrations_prompt_cache_enabled: !args.no_integrations_prompt_cache,
+    };
+
+    let json_settings = JsonToggleHealth {
+        subagents: !args.no_json_subagents,
+        tokens_breakdown: !args.no_json_tokens_breakdown,
+        duration: !args.no_json_duration,
+        rate_limit: !args.no_json_rate_limit,
+        usage_limits: !args.no_json_usage_limits,
+        compat_aliases: !args.no_json_compat_aliases,
+    };
+
     Ok(DoctorReport {
         ok: warnings.is_empty(),
         warnings,
@@ -122,6 +194,10 @@ fn build_report(args: &Args) -> Result<DoctorReport> {
         db,
         usage_api,
         pricing,
+        subsystems,
+        preset,
+        display_opt_in,
+        json_settings,
     })
 }
 
@@ -177,8 +253,7 @@ fn print_report(report: &DoctorReport) {
             .unwrap_or("unknown")
     );
     println!(
-        "usage_api: fetch_enabled={} direct={} token={} cache={} stale_cache={} negative_cache={}",
-        report.usage_api.fetch_enabled,
+        "usage_api: direct={} token={} cache={} stale_cache={} negative_cache={}",
         report.usage_api.direct_claude_api,
         report.usage_api.oauth_token_present,
         report.usage_api.fresh_cache_present,
@@ -189,6 +264,33 @@ fn print_report(report: &DoctorReport) {
         "pricing: model={} source={}",
         report.pricing.probe_model,
         report.pricing.source.as_str()
+    );
+    println!(
+        "subsystems: git={} beads={} gastown={} db_cache={} usage_api={}",
+        report.subsystems.git,
+        report.subsystems.beads,
+        report.subsystems.gastown,
+        report.subsystems.db_cache,
+        report.subsystems.usage_api
+    );
+    println!("preset: {}", report.preset.selected.unwrap_or("(none)"));
+    println!(
+        "display opt-ins: breakdown={} provenance={} provider_key={} provider_name={} compact_hint={} prompt_cache={}",
+        report.display_opt_in.cost_breakdown,
+        report.display_opt_in.cost_provenance,
+        report.display_opt_in.provider_key_source,
+        report.display_opt_in.provider_name,
+        report.display_opt_in.context_compact_hint_enabled,
+        report.display_opt_in.integrations_prompt_cache_enabled
+    );
+    println!(
+        "json: subagents={} tokens_breakdown={} duration={} rate_limit={} usage_limits={} compat_aliases={}",
+        report.json_settings.subagents,
+        report.json_settings.tokens_breakdown,
+        report.json_settings.duration,
+        report.json_settings.rate_limit,
+        report.json_settings.usage_limits,
+        report.json_settings.compat_aliases
     );
 }
 

@@ -1443,12 +1443,8 @@ pub fn get_global_usage(
     session_today_cost: Option<f64>,
     session_entries: Option<&[Entry]>,
 ) -> Result<GlobalUsage> {
-    if let Ok(val) = env::var("CLAUDE_DB_CACHE_DISABLE")
-        && val == "1"
-    {
-        return Err(anyhow::anyhow!("DB cache disabled via env var"));
-    }
-
+    // DB cache enable/disable is gated by the caller (subsystems.db_cache).
+    // No env-var check here; the caller is the single point of truth.
     let conn = open_db()?;
     let session_key = stable_session_key(session_id);
     let today = Local::now().format("%Y-%m-%d").to_string();

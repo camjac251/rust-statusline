@@ -785,28 +785,35 @@ fn render_header_line(
     {
         header_parts.push(wrap_header_segment(git_seg, tc));
     }
-    if should_show_header_worktree(hook)
+    if !args.no_git_worktree
+        && should_show_header_worktree(hook)
         && let Some(wt_seg) = worktree_segment(hook, git_info, tc, profile.width)
     {
         header_parts.push(wrap_header_segment(wt_seg, tc));
     }
-    if let Some(dirs_seg) = added_dirs_segment(hook, tc) {
+    if !args.no_workspace_added_dirs
+        && let Some(dirs_seg) = added_dirs_segment(hook, tc)
+    {
         header_parts.push(wrap_header_segment(dirs_seg, tc));
     }
 
     // Model segment (with fast mode indicator)
-    let model_seg = render_model_segment(
-        &hook.model.id,
-        &hook.model.display_name,
-        context_limit_override,
-        args,
-        is_fast_mode,
-        None,
-    );
-    header_parts.push(wrap_header_segment(model_seg, tc));
+    if !args.no_workspace_model {
+        let model_seg = render_model_segment(
+            &hook.model.id,
+            &hook.model.display_name,
+            context_limit_override,
+            args,
+            is_fast_mode,
+            None,
+        );
+        header_parts.push(wrap_header_segment(model_seg, tc));
+    }
 
     // Beads current work segment (if available)
-    if let Some(beads) = beads_info {
+    if !args.no_integrations_beads
+        && let Some(beads) = beads_info
+    {
         if let Some(ref work) = beads.current_work {
             // Max display length depends on terminal width
             let max_len = match profile.width {
@@ -838,29 +845,30 @@ fn render_header_line(
                 tc,
             ));
         }
+    }
 
-        // Show alerts for blocked and P0 issues (separate segment)
+    // Beads alert segment (P0 + blocked); independently gated from the work segment.
+    if !args.no_integrations_beads_alerts
+        && let Some(beads) = beads_info
+    {
         let mut alerts: Vec<String> = Vec::new();
-
-        // P0 critical issues alert
         if beads.priorities.p0_critical > 0 {
             let p0_text = format!("🔴{}", beads.priorities.p0_critical);
             alerts.push(tokens::ERROR.bold(&p0_text, tc));
         }
-
-        // Blocked issues alert
         if beads.counts.blocked > 0 {
             let blocked_text = format!("⚠{}", beads.counts.blocked);
             alerts.push(tokens::WARNING.paint(&blocked_text, tc));
         }
-
         if !alerts.is_empty() {
             header_parts.push(wrap_header_segment(alerts.join(" "), tc));
         }
     }
 
     // Gas Town segment (if in a Gas Town workspace)
-    if let Some(gt) = gastown_info {
+    if !args.no_integrations_gastown
+        && let Some(gt) = gastown_info
+    {
         let max_len = match profile.width {
             TerminalWidth::Narrow => 30,
             TerminalWidth::Medium => 45,
@@ -884,7 +892,9 @@ fn render_header_line(
     }
 
     // Agent segment (if running as a subagent via --agent)
-    if let Some(ref agent) = hook.agent {
+    if !args.no_workspace_agent
+        && let Some(ref agent) = hook.agent
+    {
         let agent_colored = tokens::ACCENT.paint(&agent.name, tc);
         header_parts.push(wrap_header_segment(
             format!("{}{}", muted_label("agent:", tc), agent_colored),
@@ -893,7 +903,9 @@ fn render_header_line(
     }
 
     // Output style segment (if present, skip "default")
-    if let Some(ref output_style) = hook.output_style {
+    if !args.no_workspace_output_style
+        && let Some(ref output_style) = hook.output_style
+    {
         let name_lower = output_style.name.to_lowercase();
         if name_lower != "default" {
             let style_colored = tokens::ACCENT.paint(&output_style.name, tc);
@@ -905,7 +917,9 @@ fn render_header_line(
     }
 
     // Effort level segment (prefer live hook data, fall back to env var)
-    if let Some(effort_lower) = active_effort_level(hook) {
+    if !args.no_workspace_effort
+        && let Some(effort_lower) = active_effort_level(hook)
+    {
         let label = match profile.width {
             TerminalWidth::Narrow => "eff:",
             _ => "effort:",
@@ -924,36 +938,42 @@ fn render_header_line(
         ));
     }
 
-    // Optional provider hints grouped (only when --show-provider is set)
-    if args.show_provider {
+    // Optional provider hints; each sub-element gated independently.
+    if args.provider_key_source || args.provider_name {
         let mut prov_hint_parts: Vec<String> = Vec::new();
-        if let Some(src) = api_key_source {
+        if args.provider_key_source {
+            if let Some(src) = api_key_source {
+                prov_hint_parts.push(format!(
+                    "{}{}",
+                    muted_label("key:", tc),
+                    tokens::PRIMARY_DIM.paint(src, tc)
+                ));
+            }
+        }
+        if args.provider_name {
+            let prov_disp = if let Ok(provider_env) = env::var("CLAUDE_PROVIDER") {
+                match provider_env.to_lowercase().as_str() {
+                    "firstparty" => "anthropic".to_string(),
+                    other => other.to_string(),
+                }
+            } else {
+                deduce_provider_from_model(&hook.model.id).to_string()
+            };
             prov_hint_parts.push(format!(
                 "{}{}",
-                muted_label("key:", tc),
-                tokens::PRIMARY_DIM.paint(src, tc)
+                muted_label("prov:", tc),
+                tokens::PRIMARY_DIM.paint(&prov_disp, tc)
             ));
         }
-        // Provider hint from env or deduced from model id
-        let prov_disp = if let Ok(provider_env) = env::var("CLAUDE_PROVIDER") {
-            match provider_env.to_lowercase().as_str() {
-                "firstparty" => "anthropic".to_string(),
-                other => other.to_string(),
-            }
-        } else {
-            deduce_provider_from_model(&hook.model.id).to_string()
-        };
-        prov_hint_parts.push(format!(
-            "{}{}",
-            muted_label("prov:", tc),
-            tokens::PRIMARY_DIM.paint(&prov_disp, tc)
-        ));
         if !prov_hint_parts.is_empty() {
             header_parts.push(wrap_header_segment(prov_hint_parts.join(" "), tc));
         }
     }
 
     // Print header line: cwd then segments
+    if args.no_workspace_cwd {
+        return Some(header_parts.join(" "));
+    }
     let dir_colored = tokens::ACCENT.paint(&dir_fmt, tc);
     Some(format!("{} {}", dir_colored, header_parts.join(" ")))
 }
@@ -1010,55 +1030,67 @@ fn render_compact_text_output(
     {
         segments.push(git_seg);
     }
-    if let Some(wt_seg) = worktree_segment(hook, git_info, tc, profile.width) {
+    if !args.no_git_worktree
+        && let Some(wt_seg) = worktree_segment(hook, git_info, tc, profile.width)
+    {
         segments.push(wt_seg);
     }
-    if let Some(dirs_seg) = added_dirs_segment(hook, tc) {
+    if !args.no_workspace_added_dirs
+        && let Some(dirs_seg) = added_dirs_segment(hook, tc)
+    {
         segments.push(dirs_seg);
     }
 
-    let model_max = match profile.width {
-        TerminalWidth::Narrow => 16,
-        TerminalWidth::Medium => 22,
-        TerminalWidth::Wide => 28,
-    };
-    segments.push(render_model_segment(
-        &hook.model.id,
-        &hook.model.display_name,
-        context_limit_override,
-        args,
-        is_fast_mode,
-        Some(model_max),
-    ));
+    if !args.no_workspace_model {
+        let model_max = match profile.width {
+            TerminalWidth::Narrow => 16,
+            TerminalWidth::Medium => 22,
+            TerminalWidth::Wide => 28,
+        };
+        segments.push(render_model_segment(
+            &hook.model.id,
+            &hook.model.display_name,
+            context_limit_override,
+            args,
+            is_fast_mode,
+            Some(model_max),
+        ));
+    }
 
-    let session_cost_str = format_currency(session_cost);
-    segments.push(format!(
-        "{}{}{}",
-        muted_label("s:", tc),
-        tokens::MUTED.paint(SYM_DOLLAR, tc),
-        tokens::PRIMARY.bold(&session_cost_str, tc)
-    ));
+    if !args.no_cost_session {
+        let session_cost_str = format_currency(session_cost);
+        segments.push(format!(
+            "{}{}{}",
+            muted_label("s:", tc),
+            tokens::MUTED.paint(SYM_DOLLAR, tc),
+            tokens::PRIMARY.bold(&session_cost_str, tc)
+        ));
+    }
 
-    if let Some(usage_seg) = render_usage_compact_segment(
-        &hook.model.id,
-        args,
-        usage_percent,
-        remaining_minutes,
-        active_block,
-        latest_reset,
-        usage_limits,
-    ) {
+    if !args.no_usage_five_hour
+        && let Some(usage_seg) = render_usage_compact_segment(
+            &hook.model.id,
+            args,
+            usage_percent,
+            remaining_minutes,
+            active_block,
+            latest_reset,
+            usage_limits,
+        )
+    {
         segments.push(usage_seg);
     }
 
-    segments.push(render_context_compact_segment(
-        &hook.model.id,
-        &hook.model.display_name,
-        context,
-        context_limit_override,
-        tc,
-        profile.width,
-    ));
+    if !args.no_context_tokens || !args.no_context_percent {
+        segments.push(render_context_compact_segment(
+            &hook.model.id,
+            &hook.model.display_name,
+            context,
+            context_limit_override,
+            tc,
+            profile.width,
+        ));
+    }
 
     format!("{} {}", prompt, segments.join(&separator(tc, true)))
 }
@@ -1095,32 +1127,36 @@ fn render_rich_text_output(
     let use_12h = use_12h_time(args);
     let mut segments: Vec<String> = Vec::new();
 
-    let session_label = match term_width {
-        TerminalWidth::Narrow => "s:",
-        TerminalWidth::Medium => "sess:",
-        TerminalWidth::Wide => "session:",
-    };
-    let session_cost_str = format_currency(session_cost);
-    segments.push(format!(
-        "{}{}{}",
-        muted_label(session_label, tc),
-        tokens::MUTED.paint(SYM_DOLLAR, tc),
-        tokens::PRIMARY.bold(&session_cost_str, tc)
-    ));
+    if !args.no_cost_session {
+        let session_label = match term_width {
+            TerminalWidth::Narrow => "s:",
+            TerminalWidth::Medium => "sess:",
+            TerminalWidth::Wide => "session:",
+        };
+        let session_cost_str = format_currency(session_cost);
+        segments.push(format!(
+            "{}{}{}",
+            muted_label(session_label, tc),
+            tokens::MUTED.paint(SYM_DOLLAR, tc),
+            tokens::PRIMARY.bold(&session_cost_str, tc)
+        ));
+    }
 
-    let today_label = match term_width {
-        TerminalWidth::Narrow => "t:",
-        _ => "today:",
-    };
-    let today_cost_str = format_currency(today_cost);
-    segments.push(format!(
-        "{}{}{}",
-        muted_label(today_label, tc),
-        tokens::MUTED.paint(SYM_DOLLAR, tc),
-        tokens::gradient(today_cost, 10.0).paint(&today_cost_str, tc)
-    ));
+    if !args.no_cost_today {
+        let today_label = match term_width {
+            TerminalWidth::Narrow => "t:",
+            _ => "today:",
+        };
+        let today_cost_str = format_currency(today_cost);
+        segments.push(format!(
+            "{}{}{}",
+            muted_label(today_label, tc),
+            tokens::MUTED.paint(SYM_DOLLAR, tc),
+            tokens::gradient(today_cost, 10.0).paint(&today_cost_str, tc)
+        ));
+    }
 
-    if is_claude {
+    if is_claude && !args.no_cost_window {
         let window_label = match term_width {
             TerminalWidth::Narrow => "w:",
             TerminalWidth::Medium => "win:",
@@ -1136,7 +1172,10 @@ fn render_rich_text_output(
         ));
     }
 
-    if is_claude && let Some(usage_value) = usage_percent {
+    if is_claude
+        && !args.no_usage_five_hour
+        && let Some(usage_value) = usage_percent
+    {
         let usage_label = match (
             term_width,
             usage_limits.is_some_and(|summary| summary.stale),
@@ -1169,7 +1208,9 @@ fn render_rich_text_output(
         segments.push(usage_segment);
 
         if let Some(summary) = usage_limits {
-            if let Some(pct) = summary.seven_day.utilization {
+            if !args.no_usage_weekly
+                && let Some(pct) = summary.seven_day.utilization
+            {
                 let label = if long_labels { "weekly:" } else { "7d:" };
                 let mut text = format!("{}{}", muted_label(label, tc), colorize_percent(pct, args));
                 if let Some(reset) = summary.seven_day.resets_at {
@@ -1195,14 +1236,18 @@ fn render_rich_text_output(
                 }
                 segments.push(text);
             }
-            if let Some(pct) = summary.seven_day_opus.utilization {
+            if !args.no_usage_opus
+                && let Some(pct) = summary.seven_day_opus.utilization
+            {
                 segments.push(format!(
                     "{}{}",
                     muted_label("opus:", tc),
                     colorize_percent(pct, args)
                 ));
             }
-            if let Some(pct) = summary.seven_day_sonnet.utilization {
+            if !args.no_usage_sonnet
+                && let Some(pct) = summary.seven_day_sonnet.utilization
+            {
                 segments.push(format!(
                     "{}{}",
                     muted_label("sonnet:", tc),
@@ -1210,7 +1255,8 @@ fn render_rich_text_output(
                 ));
             }
 
-            if let Some(ref extra) = summary.extra_usage
+            if !args.no_usage_extra
+                && let Some(ref extra) = summary.extra_usage
                 && extra.is_enabled
             {
                 let label = if long_labels { "extra:" } else { "ex:" };
@@ -1242,7 +1288,7 @@ fn render_rich_text_output(
         }
     }
 
-    if args.show_breakdown {
+    if args.cost_breakdown {
         let ti = format_tokens(tokens_input);
         let to = format_tokens(tokens_output);
         let tcc = format_tokens(tokens_cache_create);
@@ -1258,7 +1304,9 @@ fn render_rich_text_output(
         ));
     }
 
-    if let Some(info) = prompt_cache {
+    if !args.no_integrations_prompt_cache
+        && let Some(info) = prompt_cache
+    {
         segments.push(render_prompt_cache_segment(info, tc));
     }
 
@@ -1320,7 +1368,7 @@ fn render_rich_text_output(
             );
         }
 
-        if args.hints && pct >= 40 && crate::utils::auto_compact_enabled() {
+        if !args.no_context_compact_hint && pct >= 40 && crate::utils::auto_compact_enabled() {
             let usable = ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
             let cushion = crate::utils::auto_compact_headroom_tokens();
             let compact_trigger = usable.saturating_sub(cushion) as f64;
@@ -1444,7 +1492,7 @@ pub fn print_text_output(
         )
     };
 
-    if args.show_provenance
+    if args.cost_provenance
         && let Some(provenance) = cost_provenance
     {
         let tc = is_truecolor_enabled(args);
@@ -2155,8 +2203,56 @@ pub fn build_json_output(
 
     json
 }
+
+/// Remove JSON fields gated by `--no-json-*` toggles. Runs after `build_json_output`
+/// so the omission policy is enforced in one place.
+fn apply_json_toggles(json: &mut serde_json::Value, args: &Args) {
+    let Some(obj) = json.as_object_mut() else {
+        return;
+    };
+    if args.no_json_compat_aliases {
+        obj.remove("cwd");
+        obj.remove("project_dir");
+        obj.remove("fast_mode");
+        obj.remove("block");
+    }
+    if args.no_json_rate_limit {
+        obj.remove("rate_limit");
+    }
+    if args.no_json_usage_limits {
+        obj.remove("usage_limits");
+    }
+    if args.no_json_subagents {
+        if let Some(session) = obj.get_mut("session").and_then(|v| v.as_object_mut()) {
+            session.remove("subagents");
+        }
+    }
+    if args.no_json_duration {
+        if let Some(session) = obj.get_mut("session").and_then(|v| v.as_object_mut()) {
+            session.remove("duration_ms");
+            session.remove("api_duration_ms");
+            session.remove("cost_per_hour");
+            session.remove("lines_added");
+            session.remove("lines_removed");
+        }
+    }
+    if args.no_json_tokens_breakdown {
+        if let Some(session) = obj.get_mut("session").and_then(|v| v.as_object_mut()) {
+            session.remove("tokens");
+        }
+        for key in ["window", "block"] {
+            if let Some(target) = obj.get_mut(key).and_then(|v| v.as_object_mut()) {
+                target.remove("input_tokens");
+                target.remove("output_tokens");
+                target.remove("cache_creation_input_tokens");
+                target.remove("cache_read_input_tokens");
+            }
+        }
+    }
+}
 #[allow(clippy::too_many_arguments)]
 pub fn print_json_output(
+    args: &Args,
     hook: &HookJson,
     session_cost: f64,
     today_cost: f64,
@@ -2201,7 +2297,7 @@ pub fn print_json_output(
     cost_provenance: Option<&CostProvenance>,
     prompt_cache: Option<&PromptCacheInfo>,
 ) -> anyhow::Result<()> {
-    let json = build_json_output(
+    let mut json = build_json_output(
         hook,
         session_cost,
         today_cost,
@@ -2245,6 +2341,7 @@ pub fn print_json_output(
         cost_provenance,
         prompt_cache,
     );
+    apply_json_toggles(&mut json, args);
     println!("{}", serde_json::to_string(&json)?);
     Ok(())
 }

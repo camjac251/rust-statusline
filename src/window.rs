@@ -133,6 +133,18 @@ pub enum BurnScope {
     Global,
 }
 
+/// Anchor strategy for the 5-hour window.
+///
+/// `Provider` honors the provider-reported reset anchor when available.
+/// `Log` ignores the anchor and uses log-derived heuristic bounds, which
+/// matches the monitor-style behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowAnchor {
+    #[default]
+    Provider,
+    Log,
+}
+
 /// Calculate window metrics for the current 5-hour window
 #[allow(clippy::too_many_arguments)]
 pub fn calculate_window_metrics(
@@ -143,15 +155,9 @@ pub fn calculate_window_metrics(
     latest_reset: Option<DateTime<Utc>>,
     window_scope: WindowScope,
     burn_scope: BurnScope,
+    window_anchor: WindowAnchor,
 ) -> WindowMetrics {
-    // Calculate window start and end: prefer provider reset anchor; otherwise use
-    let ignore_anchor = match std::env::var("CLAUDE_WINDOW_ANCHOR") {
-        Ok(v) => {
-            let v = v.to_lowercase();
-            v == "log" || v == "heuristic" || v == "none"
-        }
-        Err(_) => false,
-    };
+    let ignore_anchor = matches!(window_anchor, WindowAnchor::Log);
 
     let (start, end) = if latest_reset.is_some() && !ignore_anchor {
         window_bounds(now_utc, latest_reset)

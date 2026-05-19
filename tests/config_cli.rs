@@ -9,9 +9,13 @@ fn config_file_fills_unset_cli_options() {
         r#"
         [display]
         labels = "long"
-        show_provenance = true
-        prompt_cache = false
         prompt_cache_ttl_seconds = 3600
+
+        [display.cost]
+        provenance = true
+
+        [display.integrations]
+        prompt_cache = false
         "#,
     )
     .expect("write config");
@@ -23,8 +27,8 @@ fn config_file_fills_unset_cli_options() {
     ]);
 
     assert_eq!(args.labels, LabelsArg::Long);
-    assert!(args.show_provenance);
-    assert!(!args.prompt_cache);
+    assert!(args.cost_provenance);
+    assert!(args.no_integrations_prompt_cache);
     assert_eq!(args.prompt_cache_ttl_seconds, Some(3600));
     assert_eq!(args.config_loaded.as_deref(), Some(config_path.as_path()));
 }

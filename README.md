@@ -142,24 +142,101 @@ claude_statusline doctor [OPTIONS]
 claude_statusline init [OPTIONS]
 ```
 
+**Mode selectors**
+
 | Flag | Description |
 |------|-------------|
 | `--json` | Emit structured JSON instead of colorized text |
 | `--config <PATH>` | Load a config file |
 | `--no-config` | Disable config file loading |
-| `--no-hints` | Disable status hints (on by default) |
-| `--no-prompt-cache` | Disable prompt-cache countdown |
+| `--preset <minimal\|default\|full>` | Apply a built-in preset (atomic flags still win) |
 | `--prompt-cache-ttl-seconds <N>` | Fallback TTL when transcripts only expose aggregate cache creation (default: 300) |
 | `--labels <short\|long>` | Label verbosity (default: short) |
 | `--time <auto\|12h\|24h>` | Time format (default: auto-detect from locale) |
 | `--window-anchor <provider\|log>` | Window alignment (default: provider) |
 | `--window-scope <global\|project>` | Window cost scope (default: global) |
 | `--burn-scope <session\|global>` | Burn rate scope (default: session) |
-| `--show-provider` | Show provider/key source in header |
-| `--show-provenance` | Show cost/pricing source details in text output |
-| `--show-breakdown` | Show per-token-type breakdown and web search count |
-| `--no-gastown` | Disable Gas Town multi-agent display |
+| `--git <minimal\|verbose>` | Git header verbosity (default: minimal) |
+| `--truecolor` | Force truecolor accents |
+| `--debug` | Show detailed calculation info to stderr |
 | `--claude-config-dir <PATHS>` | Override Claude data roots (comma-separated) |
+
+**Subsystem toggles** (skip the work entirely; affects text + JSON)
+
+| Flag | Description |
+|------|-------------|
+| `--no-subsystem-git` | Skip gix repository inspection |
+| `--no-subsystem-beads` | Skip beads issue tracker integration |
+| `--no-subsystem-gastown` | Skip Gas Town multi-agent integration |
+| `--no-subsystem-db-cache` | Skip SQLite global usage cache (falls back to per-session scan) |
+| `--no-subsystem-usage-api` | Skip OAuth usage API calls |
+
+**Display toggles** (text rendering only; JSON shape unchanged). Default-on tokens use `--no-<section>-<element>`; default-off opt-ins use `--<section>-<element>`.
+
+| Group | Flag | Default | Controls |
+|-------|------|---------|----------|
+| cost | `--no-cost-session` | on | `session:$X` token |
+| cost | `--no-cost-today` | on | `today:$X` token |
+| cost | `--no-cost-window` | on | `window:$X` token (Claude direct only) |
+| cost | `--cost-breakdown` | off | `tok:I/O cache:C/R ws:N` segment |
+| cost | `--cost-provenance` | off | `src:/today:/price:` suffix |
+| cost | `--no-cost-lines-delta` | on | `+a -b` lines token in header |
+| usage | `--no-usage-five-hour` | on | `usage:X%` + reset inline |
+| usage | `--no-usage-weekly` | on | `weekly:X%` / `7d:X%` token |
+| usage | `--no-usage-opus` | on | `opus:X%` token |
+| usage | `--no-usage-sonnet` | on | `sonnet:X%` token |
+| usage | `--no-usage-extra` | on | paid-overage token |
+| context | `--no-context-tokens` | on | token count side of `ctx:N/L` |
+| context | `--no-context-percent` | on | percent side of `ctx:N/L X%` |
+| context | `--no-context-compact-hint` | on | `compact:@NK ~Nm` chip |
+| git | `--no-git-branch` | on | branch name in git header segment |
+| git | `--no-git-dirty` | on | dirty / clean indicator |
+| git | `--no-git-ahead-behind` | on | ahead / behind counts |
+| git | `--no-git-worktree` | on | worktree header segment |
+| workspace | `--no-workspace-cwd` | on | cwd in header |
+| workspace | `--no-workspace-added-dirs` | on | added-dirs segment |
+| workspace | `--no-workspace-model` | on | model name segment |
+| workspace | `--no-workspace-fast-mode-indicator` | on | fast-mode badge on the model segment |
+| workspace | `--no-workspace-agent` | on | subagent name segment |
+| workspace | `--no-workspace-output-style` | on | output-style segment |
+| workspace | `--no-workspace-effort` | on | effort-level segment |
+| integrations | `--no-integrations-beads` | on | beads current-work + open count segment |
+| integrations | `--no-integrations-beads-alerts` | on | beads P0 + blocked alert segment |
+| integrations | `--no-integrations-gastown` | on | gastown header segment |
+| integrations | `--no-integrations-prompt-cache` | on | prompt-cache countdown token |
+| provider | `--provider-key-source` | off | `key:X` hint |
+| provider | `--provider-name` | off | `prov:Y` hint |
+
+**JSON-only toggles** (omit fields from `--json` output)
+
+| Flag | Default | Controls |
+|------|---------|----------|
+| `--no-json-subagents` | on | `session.subagents` |
+| `--no-json-tokens-breakdown` | on | per-token-kind fields in `session.tokens` and `window.*` |
+| `--no-json-duration` | on | `session.duration_ms`, `api_duration_ms`, `cost_per_hour`, `lines_added`, `lines_removed` |
+| `--no-json-rate-limit` | on | top-level `rate_limit` object |
+| `--no-json-usage-limits` | on | top-level `usage_limits` object |
+| `--no-json-compat-aliases` | on | top-level `cwd`, `project_dir`, `fast_mode`, and `block` (clone of `window`) |
+
+### Presets
+
+Three built-in presets configure groups of toggles at once. Atomic CLI / env / TOML flags still win over the preset values.
+
+- `minimal`: cwd + model + session cost + 5-hour usage + context percent. Skips beads, gastown, OAuth usage API, and most secondary tokens.
+- `default`: the README baseline (this is the unset state; pass it to reset after experimenting).
+- `full`: everything in `default` plus the opt-in tokens (`cost.breakdown`, `cost.provenance`, `provider.key_source`, `provider.name`).
+
+Apply via CLI, env, or TOML:
+
+```bash
+claude_statusline --preset minimal
+CLAUDE_STATUSLINE_PRESET=full claude_statusline
+```
+
+```toml
+[display]
+preset = "minimal"
+```
 
 ### Setup and diagnostics
 
@@ -203,17 +280,80 @@ Discovery order:
 Supported keys mirror the stable CLI options:
 
 ```toml
+# Mode selectors (top-level under [display])
 [display]
+preset = "default"   # minimal | default | full; or omit
 labels = "long"
 git = "verbose"
-show_provenance = true
-show_breakdown = true
-prompt_cache = true
 prompt_cache_ttl_seconds = 300
 truecolor = true
 window_scope = "global"
 burn_scope = "session"
 window_anchor = "provider"
+
+# Subsystem skip-work toggles. true = enabled (default), false = skip the work.
+[subsystems]
+git = true
+beads = true
+gastown = true
+db_cache = true
+usage_api = true
+
+# Display atomic toggles. true = visible (default for most), false = hidden.
+# breakdown / provenance / provider.* default to false (opt-in).
+[display.cost]
+session = true
+today = true
+window = true
+breakdown = false
+provenance = false
+lines_delta = true
+
+[display.usage]
+five_hour = true
+weekly = true
+opus = true
+sonnet = true
+extra = true
+
+[display.context]
+tokens = true
+percent = true
+compact_hint = true
+
+[display.git]
+branch = true
+dirty = true
+ahead_behind = true
+worktree = true
+
+[display.workspace]
+cwd = true
+added_dirs = true
+model = true
+fast_mode_indicator = true
+agent = true
+output_style = true
+effort = true
+
+[display.integrations]
+beads = true
+beads_alerts = true
+gastown = true
+prompt_cache = true
+
+[display.provider]
+key_source = false
+name = false
+
+# JSON-only opt-outs (only affect --json output)
+[json]
+subagents = true
+tokens_breakdown = true
+duration = true
+rate_limit = true
+usage_limits = true
+compat_aliases = true
 ```
 
 ### Environment Variables
@@ -221,15 +361,16 @@ window_anchor = "provider"
 | Variable | Effect |
 |----------|--------|
 | `CLAUDE_STATUSLINE_CONFIG=...` | Explicit config file path |
-| `CLAUDE_STATUS_HINTS=0` | Disable status hints (on by default) |
-| `CLAUDE_PROMPT_CACHE=0` | Disable prompt-cache countdown |
 | `CLAUDE_PROMPT_CACHE_TTL_SECONDS=N` | Override prompt-cache TTL |
 | `CLAUDE_TIME_FORMAT=12` | Force 12-hour time |
 | `CLAUDE_CONTEXT_LIMIT=N` | Override context window size (tokens) |
 | `CLAUDE_PROVIDER=...` | Override provider display (`firstParty` becomes `anthropic`) |
 | `CLAUDE_CONFIG_DIR=...` | Comma-separated list of Claude data roots |
-| `CLAUDE_DB_CACHE_DISABLE=1` | Disable SQLite cache, fall back to per-session scanning |
-| `CLAUDE_STATUSLINE_FETCH_USAGE=0` | Disable OAuth usage API calls |
+| `CLAUDE_STATUSLINE_SUBSYSTEM_NO_GIT=true` | Skip gix repository inspection entirely |
+| `CLAUDE_STATUSLINE_SUBSYSTEM_NO_BEADS=true` | Skip beads issue tracker integration |
+| `CLAUDE_STATUSLINE_SUBSYSTEM_NO_GASTOWN=true` | Skip Gas Town multi-agent integration |
+| `CLAUDE_STATUSLINE_SUBSYSTEM_NO_DB_CACHE=true` | Skip SQLite global usage cache |
+| `CLAUDE_STATUSLINE_SUBSYSTEM_NO_USAGE_API=true` | Skip OAuth usage API calls |
 | `CLAUDE_PRICE_INPUT` | Override input token price (all four must be set) |
 | `CLAUDE_PRICE_OUTPUT` | Override output token price |
 | `CLAUDE_PRICE_CACHE_CREATE` | Override cache creation token price |

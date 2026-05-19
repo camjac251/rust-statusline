@@ -15,20 +15,6 @@ const ANTHROPIC_BETA: &str = "oauth-2025-04-20";
 const API_CACHE_KEY: &str = "oauth_usage_summary";
 const NEGATIVE_CACHE_KEY: &str = "oauth_usage_negative";
 
-fn fetch_enabled() -> bool {
-    match std::env::var("CLAUDE_STATUSLINE_FETCH_USAGE") {
-        Ok(val) => {
-            let trimmed = val.trim();
-            trimmed.is_empty()
-                || matches!(
-                    trimmed.to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-        }
-        Err(_) => true,
-    }
-}
-
 /// Check if we're using direct Anthropic API with a Claude model.
 /// Returns false if:
 /// - ANTHROPIC_BASE_URL is set to a non-Anthropic endpoint (proxy detected)
@@ -59,7 +45,6 @@ pub fn is_direct_claude_api(model_id: Option<&str>) -> bool {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UsageApiHealth {
-    pub fetch_enabled: bool,
     pub direct_claude_api: bool,
     pub oauth_token_present: bool,
     pub fresh_cache_present: bool,
@@ -69,7 +54,6 @@ pub struct UsageApiHealth {
 
 pub fn inspect_usage_api(claude_paths: &[PathBuf], model_id: Option<&str>) -> UsageApiHealth {
     UsageApiHealth {
-        fetch_enabled: fetch_enabled(),
         direct_claude_api: is_direct_claude_api(model_id),
         oauth_token_present: find_oauth_token(claude_paths).is_some(),
         fresh_cache_present: crate::db::get_api_cache(API_CACHE_KEY)
@@ -154,11 +138,9 @@ struct UsageResponseDto {
 }
 
 pub fn get_usage_summary(claude_paths: &[PathBuf], model_id: Option<&str>) -> Option<UsageSummary> {
-    if !fetch_enabled() {
-        return None;
-    }
-
-    // Skip if proxy detected or non-Claude model
+    // Subsystem-level disable now lives at main.rs (subsystems.usage_api). We
+    // keep the direct-API guard here because it depends on env/model details
+    // that the gate caller doesn't know.
     if !is_direct_claude_api(model_id) {
         return None;
     }

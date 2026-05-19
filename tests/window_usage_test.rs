@@ -1,7 +1,7 @@
 use chrono::{TimeDelta, Timelike, Utc};
 
 use claude_statusline::models::Entry;
-use claude_statusline::window::{BurnScope, WindowScope, calculate_window_metrics};
+use claude_statusline::window::{BurnScope, WindowAnchor, WindowScope, calculate_window_metrics};
 
 #[test]
 fn heuristic_block_start_is_floored_to_hour_when_no_anchor() {
@@ -45,6 +45,7 @@ fn heuristic_block_start_is_floored_to_hour_when_no_anchor() {
         None, // no anchor
         WindowScope::Global,
         BurnScope::Global,
+        WindowAnchor::Provider,
     );
 
     // Infer window start from remaining_minutes
