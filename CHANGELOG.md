@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [2.1.0](https://github.com/camjac251/rust-statusline/compare/v2.0.0...v2.1.0) - 2026-05-23
+
+### Added
+
+- *(statusline)* track Workflow tool cost and pin hook to 2.1.148
+
 ## [2.0.0](https://github.com/camjac251/rust-statusline/compare/v1.5.3...v2.0.0) - 2026-05-19
 
 ### Added
