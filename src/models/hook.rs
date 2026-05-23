@@ -9,7 +9,7 @@ pub struct HookModel {
 #[derive(Deserialize, Debug)]
 pub struct HookWorkspace {
     pub current_dir: String,
-    pub project_dir: Option<String>,
+    pub project_dir: String,
     #[serde(default)]
     pub added_dirs: Vec<String>,
     pub git_worktree: Option<String>,
@@ -20,40 +20,36 @@ pub struct OutputStyle {
     pub name: String,
 }
 
-/// Optional cost summary provided by Claude Code's statusLine input
+/// Aggregate cost summary emitted unconditionally by Claude Code 2.1.148+
 #[derive(Deserialize, Debug)]
 pub struct HookCost {
-    pub total_cost_usd: Option<f64>,
-    pub total_duration_ms: Option<u64>,
-    pub total_api_duration_ms: Option<u64>,
-    pub total_lines_added: Option<i64>,
-    pub total_lines_removed: Option<i64>,
+    pub total_cost_usd: f64,
+    pub total_duration_ms: u64,
+    pub total_api_duration_ms: u64,
+    pub total_lines_added: i64,
+    pub total_lines_removed: i64,
 }
 
 /// Current usage breakdown from the last API call
 #[derive(Deserialize, Debug, Clone)]
 pub struct HookCurrentUsage {
-    pub input_tokens: Option<u64>,
-    pub output_tokens: Option<u64>,
-    pub cache_creation_input_tokens: Option<u64>,
-    pub cache_read_input_tokens: Option<u64>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
 }
 
-/// Context window information provided by Claude Code
+/// Context window information emitted unconditionally by Claude Code 2.1.148+.
+///
+/// `current_usage` is null between API calls; everything else is always populated.
 #[derive(Deserialize, Debug)]
 pub struct HookContextWindow {
-    /// Cumulative input tokens across the session
-    pub total_input_tokens: Option<u64>,
-    /// Cumulative output tokens across the session
-    pub total_output_tokens: Option<u64>,
-    /// Maximum context window size (respects API_MAX_INPUT_TOKENS if set)
-    pub context_window_size: Option<u64>,
-    /// Current context window usage from the last API call
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub context_window_size: u64,
     pub current_usage: Option<HookCurrentUsage>,
-    /// Pre-calculated used percentage (input-only, from CLI)
-    pub used_percentage: Option<u32>,
-    /// Pre-calculated remaining percentage (from CLI)
-    pub remaining_percentage: Option<u32>,
+    pub used_percentage: u32,
+    pub remaining_percentage: u32,
 }
 
 /// Subscription rate limit for a time window (5-hour or 7-day)
@@ -70,13 +66,14 @@ pub struct HookRateLimits {
     pub seven_day: Option<HookRateLimit>,
 }
 
-/// Reasoning effort information provided by Claude Code
+/// Reasoning effort information. Only emitted when the active model exposes
+/// the effort capability (cli.js gates this on `GW(model)`).
 #[derive(Deserialize, Debug, Clone)]
 pub struct HookEffort {
     pub level: String,
 }
 
-/// Extended thinking state provided by Claude Code
+/// Extended thinking state emitted unconditionally by Claude Code 2.1.148+.
 #[derive(Deserialize, Debug, Clone)]
 pub struct HookThinking {
     pub enabled: bool,
@@ -116,26 +113,22 @@ pub struct HookRemote {
 pub struct HookJson {
     pub session_id: String,
     pub transcript_path: String,
-    #[allow(dead_code)]
-    pub cwd: Option<String>,
     pub model: HookModel,
     pub workspace: HookWorkspace,
-    pub version: Option<String>,
-    pub output_style: Option<OutputStyle>,
-    /// Optional aggregate cost fields from Claude Code
-    pub cost: Option<HookCost>,
-    /// Context window information (added in Claude Code 2.0.69+)
-    pub context_window: Option<HookContextWindow>,
-    /// Whether tokens exceed 200k (long-context pricing threshold for Sonnet 4/4.5)
-    #[serde(default)]
-    pub exceeds_200k_tokens: Option<bool>,
-    /// Whether Claude Code fast mode is currently enabled
-    #[serde(default)]
-    pub fast_mode: Option<bool>,
-    /// Live reasoning effort level, when supported by the current model
+    pub version: String,
+    pub output_style: OutputStyle,
+    /// Aggregate session cost emitted unconditionally by Claude Code 2.1.148+.
+    pub cost: HookCost,
+    /// Context window snapshot emitted unconditionally by Claude Code 2.1.148+.
+    pub context_window: HookContextWindow,
+    /// True when cumulative input tokens crossed Sonnet's 200k long-context tier.
+    pub exceeds_200k_tokens: bool,
+    /// Whether Claude Code fast mode is currently enabled.
+    pub fast_mode: bool,
+    /// Extended-thinking state for this session.
+    pub thinking: HookThinking,
+    /// Live reasoning effort level when the current model exposes the capability.
     pub effort: Option<HookEffort>,
-    /// Live extended-thinking state for this session
-    pub thinking: Option<HookThinking>,
     /// Subscription rate limits (internal field, not in public docs)
     pub rate_limits: Option<HookRateLimits>,
     /// Human-readable session name from /rename

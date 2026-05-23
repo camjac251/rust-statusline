@@ -4,8 +4,36 @@ use std::env;
 use chrono::{TimeZone, Utc};
 use claude_statusline::display::build_json_output;
 use claude_statusline::models::hook::{
-    HookEffort, HookJson, HookModel, HookRemote, HookThinking, HookWorkspace,
+    HookContextWindow, HookCost, HookEffort, HookJson, HookModel, HookRemote, HookThinking,
+    HookWorkspace, OutputStyle,
 };
+
+fn default_hook_cost() -> HookCost {
+    HookCost {
+        total_cost_usd: 0.0,
+        total_duration_ms: 0,
+        total_api_duration_ms: 0,
+        total_lines_added: 0,
+        total_lines_removed: 0,
+    }
+}
+
+fn default_hook_context_window() -> HookContextWindow {
+    HookContextWindow {
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        context_window_size: 200_000,
+        current_usage: None,
+        used_percentage: 0,
+        remaining_percentage: 100,
+    }
+}
+
+fn default_output_style() -> OutputStyle {
+    OutputStyle {
+        name: "default".to_string(),
+    }
+}
 use claude_statusline::models::{PromptCacheBucketInfo, PromptCacheBucketKind, PromptCacheInfo};
 use claude_statusline::provenance::{
     CostProvenance, PricingSource, SessionCostSource, TodayCostSource,
@@ -16,27 +44,26 @@ fn json_output_shape_minimal() {
     let hook = HookJson {
         session_id: "s1".to_string(),
         transcript_path: "/tmp/transcript.jsonl".to_string(),
-        cwd: None,
         model: HookModel {
             id: "claude-3.5-sonnet".to_string(),
             display_name: "Claude 3.5 Sonnet".to_string(),
         },
         workspace: HookWorkspace {
             current_dir: "/tmp/project".to_string(),
-            project_dir: Some("/tmp/project".to_string()),
+            project_dir: "/tmp/project".to_string(),
             added_dirs: vec!["/tmp/project/packages/docs".to_string()],
             git_worktree: Some("feature-footer".to_string()),
         },
-        version: Some("test".to_string()),
-        output_style: None,
-        cost: None,
-        context_window: None,
-        exceeds_200k_tokens: None,
-        fast_mode: Some(true),
+        version: "test".to_string(),
+        output_style: default_output_style(),
+        cost: default_hook_cost(),
+        context_window: default_hook_context_window(),
+        exceeds_200k_tokens: false,
+        fast_mode: true,
         effort: Some(HookEffort {
             level: "high".to_string(),
         }),
-        thinking: Some(HookThinking { enabled: false }),
+        thinking: HookThinking { enabled: false },
         rate_limits: None,
         session_name: None,
         vim: None,
@@ -153,25 +180,24 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
     let hook = HookJson {
         session_id: "s1".to_string(),
         transcript_path: "/tmp/transcript.jsonl".to_string(),
-        cwd: None,
         model: HookModel {
             id: "claude-3.5-sonnet".to_string(),
             display_name: "Claude 3.5 Sonnet [1m]".to_string(),
         },
         workspace: HookWorkspace {
             current_dir: "/tmp/project".to_string(),
-            project_dir: Some("/tmp/project".to_string()),
+            project_dir: "/tmp/project".to_string(),
             added_dirs: Vec::new(),
             git_worktree: None,
         },
-        version: Some("test".to_string()),
-        output_style: None,
-        cost: None,
-        context_window: None,
-        exceeds_200k_tokens: None,
-        fast_mode: None,
+        version: "test".to_string(),
+        output_style: default_output_style(),
+        cost: default_hook_cost(),
+        context_window: default_hook_context_window(),
+        exceeds_200k_tokens: false,
+        fast_mode: false,
         effort: None,
-        thinking: None,
+        thinking: HookThinking { enabled: false },
         rate_limits: None,
         session_name: None,
         vim: None,
@@ -235,25 +261,24 @@ fn json_output_context_limit_override_from_hook() {
     let hook = HookJson {
         session_id: "s1".to_string(),
         transcript_path: "/tmp/transcript.jsonl".to_string(),
-        cwd: None,
         model: HookModel {
             id: "some-proxy-model".to_string(), // Unknown model
             display_name: "Custom Proxy Model".to_string(),
         },
         workspace: HookWorkspace {
             current_dir: "/tmp/project".to_string(),
-            project_dir: Some("/tmp/project".to_string()),
+            project_dir: "/tmp/project".to_string(),
             added_dirs: Vec::new(),
             git_worktree: None,
         },
-        version: Some("test".to_string()),
-        output_style: None,
-        cost: None,
-        context_window: None,
-        exceeds_200k_tokens: None,
-        fast_mode: None,
+        version: "test".to_string(),
+        output_style: default_output_style(),
+        cost: default_hook_cost(),
+        context_window: default_hook_context_window(),
+        exceeds_200k_tokens: false,
+        fast_mode: false,
         effort: None,
-        thinking: None,
+        thinking: HookThinking { enabled: false },
         rate_limits: None,
         session_name: None,
         vim: None,
@@ -368,25 +393,24 @@ fn json_output_reports_output_reserve_used_after_usable_limit() {
     let hook = HookJson {
         session_id: "s1".to_string(),
         transcript_path: "/tmp/transcript.jsonl".to_string(),
-        cwd: None,
         model: HookModel {
             id: "claude-sonnet-4-5".to_string(),
             display_name: "Claude Sonnet 4.5".to_string(),
         },
         workspace: HookWorkspace {
             current_dir: "/tmp/project".to_string(),
-            project_dir: Some("/tmp/project".to_string()),
+            project_dir: "/tmp/project".to_string(),
             added_dirs: Vec::new(),
             git_worktree: None,
         },
-        version: Some("test".to_string()),
-        output_style: None,
-        cost: None,
-        context_window: None,
-        exceeds_200k_tokens: None,
-        fast_mode: None,
+        version: "test".to_string(),
+        output_style: default_output_style(),
+        cost: default_hook_cost(),
+        context_window: default_hook_context_window(),
+        exceeds_200k_tokens: false,
+        fast_mode: false,
         effort: None,
-        thinking: None,
+        thinking: HookThinking { enabled: false },
         rate_limits: None,
         session_name: None,
         vim: None,
@@ -457,25 +481,24 @@ fn json_output_includes_provenance_and_prompt_cache() {
     let hook = HookJson {
         session_id: "s1".to_string(),
         transcript_path: "/tmp/transcript.jsonl".to_string(),
-        cwd: None,
         model: HookModel {
             id: "claude-sonnet-4-5".to_string(),
             display_name: "Claude Sonnet 4.5".to_string(),
         },
         workspace: HookWorkspace {
             current_dir: "/tmp/project".to_string(),
-            project_dir: Some("/tmp/project".to_string()),
+            project_dir: "/tmp/project".to_string(),
             added_dirs: Vec::new(),
             git_worktree: None,
         },
-        version: None,
-        output_style: None,
-        cost: None,
-        context_window: None,
-        exceeds_200k_tokens: None,
-        fast_mode: None,
+        version: "test".to_string(),
+        output_style: default_output_style(),
+        cost: default_hook_cost(),
+        context_window: default_hook_context_window(),
+        exceeds_200k_tokens: false,
+        fast_mode: false,
         effort: None,
-        thinking: None,
+        thinking: HookThinking { enabled: false },
         rate_limits: None,
         session_name: None,
         vim: None,

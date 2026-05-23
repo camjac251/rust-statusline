@@ -397,11 +397,7 @@ fn should_show_added_dirs(hook: &HookJson) -> bool {
         [] => false,
         [only_dir] => {
             let only_path = Path::new(only_dir);
-            let matches_project = hook
-                .workspace
-                .project_dir
-                .as_deref()
-                .is_some_and(|project_dir| only_path == Path::new(project_dir));
+            let matches_project = only_path == Path::new(&hook.workspace.project_dir);
             let matches_current = only_path == Path::new(&hook.workspace.current_dir);
 
             !(matches_project || matches_current)
@@ -902,13 +898,11 @@ fn render_header_line(
         ));
     }
 
-    // Output style segment (if present, skip "default")
-    if !args.no_workspace_output_style
-        && let Some(ref output_style) = hook.output_style
-    {
-        let name_lower = output_style.name.to_lowercase();
+    // Output style segment (skip "default")
+    if !args.no_workspace_output_style {
+        let name_lower = hook.output_style.name.to_lowercase();
         if name_lower != "default" {
-            let style_colored = tokens::ACCENT.paint(&output_style.name, tc);
+            let style_colored = tokens::ACCENT.paint(&hook.output_style.name, tc);
             header_parts.push(wrap_header_segment(
                 format!("{}{}", muted_label("style:", tc), style_colored),
                 tc,
@@ -1521,7 +1515,9 @@ mod tests {
     use clap::Parser;
 
     use crate::models::PromptCacheBucketInfo;
-    use crate::models::hook::{HookJson, HookModel, HookWorkspace};
+    use crate::models::hook::{
+        HookContextWindow, HookCost, HookJson, HookModel, HookThinking, HookWorkspace, OutputStyle,
+    };
 
     fn test_args() -> Args {
         Args::parse_from(["claude_statusline"])
@@ -1535,25 +1531,39 @@ mod tests {
         HookJson {
             session_id: "sess-test".to_string(),
             transcript_path: "/tmp/transcript.jsonl".to_string(),
-            cwd: None,
             model: HookModel {
                 id: "claude-sonnet-4-5".to_string(),
                 display_name: "Claude Sonnet 4.5".to_string(),
             },
             workspace: HookWorkspace {
                 current_dir: "/tmp/project".to_string(),
-                project_dir: Some("/tmp/project".to_string()),
+                project_dir: "/tmp/project".to_string(),
                 added_dirs: added_dirs.into_iter().map(str::to_string).collect(),
                 git_worktree: git_worktree.map(str::to_string),
             },
-            version: None,
-            output_style: None,
-            cost: None,
-            context_window: None,
-            exceeds_200k_tokens: None,
-            fast_mode: None,
+            version: "2.1.148".to_string(),
+            output_style: OutputStyle {
+                name: "default".to_string(),
+            },
+            cost: HookCost {
+                total_cost_usd: 0.0,
+                total_duration_ms: 0,
+                total_api_duration_ms: 0,
+                total_lines_added: 0,
+                total_lines_removed: 0,
+            },
+            context_window: HookContextWindow {
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+                context_window_size: 200_000,
+                current_usage: None,
+                used_percentage: 0,
+                remaining_percentage: 100,
+            },
+            exceeds_200k_tokens: false,
+            fast_mode: false,
             effort: None,
-            thinking: None,
+            thinking: HookThinking { enabled: false },
             rate_limits: None,
             session_name: None,
             vim: None,
@@ -1877,7 +1887,10 @@ pub fn build_json_output(
         .unwrap_or_else(|| deduce_provider_from_model(&hook.model.id).to_string());
 
     let reset_iso = latest_reset.map(|d| d.to_rfc3339());
-    let fast_mode = hook.fast_mode.unwrap_or(is_fast_mode);
+    // Hook ships an authoritative fast_mode flag on every 2.1.148 payload;
+    // is_fast_mode (transcript-derived) is retained as a defensive OR for any
+    // mid-turn divergence between transcript signals and the hook snapshot.
+    let fast_mode = hook.fast_mode || is_fast_mode;
     let effort = active_effort_level(hook);
     let (ctx_tokens, ctx_pct) = context
         .map(|(t, p)| (Some(t), Some(p)))
@@ -1971,27 +1984,18 @@ pub fn build_json_output(
         "cost_per_hour": (cost_per_hour * 100.0).round()/100.0,
     });
 
-    // Augment session info with Claude-provided cost fields when present
-    let (sess_duration_ms, sess_api_ms, sess_lines_added, sess_lines_removed, sess_cph_json) =
-        if let Some(ref c) = hook.cost {
-            let dur = c.total_duration_ms;
-            let api = c.total_api_duration_ms;
-            let la = c.total_lines_added;
-            let lr = c.total_lines_removed;
-            let cph = if let Some(ms) = dur {
-                if ms > 0 {
-                    let hrs = (ms as f64) / 3_600_000.0;
-                    Some(((session_cost / hrs) * 100.0).round() / 100.0)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            (dur, api, la, lr, cph)
-        } else {
-            (None, None, None, None, None)
-        };
+    // Hook ships these aggregates on every 2.1.148 payload.
+    let cost = &hook.cost;
+    let sess_duration_ms = cost.total_duration_ms;
+    let sess_api_ms = cost.total_api_duration_ms;
+    let sess_lines_added = cost.total_lines_added;
+    let sess_lines_removed = cost.total_lines_removed;
+    let sess_cph_json = if sess_duration_ms > 0 {
+        let hrs = (sess_duration_ms as f64) / 3_600_000.0;
+        Some(((session_cost / hrs) * 100.0).round() / 100.0)
+    } else {
+        None
+    };
 
     let usage_limits_value = usage_limits.map(|summary| {
         serde_json::json!({
@@ -2026,11 +2030,9 @@ pub fn build_json_output(
             "git_worktree": hook.workspace.git_worktree.clone(),
         },
         "version": hook.version.clone(),
-        "output_style": hook.output_style.as_ref().map(|s| serde_json::json!({"name": s.name.clone()})),
+        "output_style": {"name": hook.output_style.name.clone()},
         "effort": effort,
-        "thinking": hook.thinking.as_ref().map(|thinking| serde_json::json!({
-            "enabled": thinking.enabled
-        })),
+        "thinking": {"enabled": hook.thinking.enabled},
         "provider": {"apiKeySource": api_key_source, "env": provider_final},
         "oauth_profile": {
             "organization_type": oauth_org_type,

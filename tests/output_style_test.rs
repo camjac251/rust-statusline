@@ -1,6 +1,29 @@
 use claude_statusline::display::build_json_output;
-use claude_statusline::models::hook::{HookJson, HookModel, HookWorkspace, OutputStyle};
+use claude_statusline::models::hook::{
+    HookContextWindow, HookCost, HookJson, HookModel, HookThinking, HookWorkspace, OutputStyle,
+};
 use serde_json::Value;
+
+fn default_hook_cost() -> HookCost {
+    HookCost {
+        total_cost_usd: 0.0,
+        total_duration_ms: 0,
+        total_api_duration_ms: 0,
+        total_lines_added: 0,
+        total_lines_removed: 0,
+    }
+}
+
+fn default_hook_context_window() -> HookContextWindow {
+    HookContextWindow {
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        context_window_size: 200_000,
+        current_usage: None,
+        used_percentage: 0,
+        remaining_percentage: 100,
+    }
+}
 
 #[test]
 fn test_output_style_in_json() {
@@ -8,27 +31,26 @@ fn test_output_style_in_json() {
     let hook_with_style = HookJson {
         session_id: "test_session".to_string(),
         transcript_path: "/tmp/transcript.jsonl".to_string(),
-        cwd: None,
         model: HookModel {
             id: "claude-3.5-sonnet".to_string(),
             display_name: "Claude 3.5 Sonnet".to_string(),
         },
         workspace: HookWorkspace {
             current_dir: "/tmp/project".to_string(),
-            project_dir: Some("/tmp/project".to_string()),
+            project_dir: "/tmp/project".to_string(),
             added_dirs: Vec::new(),
             git_worktree: None,
         },
-        version: Some("1.0.0".to_string()),
-        output_style: Some(OutputStyle {
+        version: "1.0.0".to_string(),
+        output_style: OutputStyle {
             name: "verbose".to_string(),
-        }),
-        cost: None,
-        context_window: None,
-        exceeds_200k_tokens: None,
-        fast_mode: None,
+        },
+        cost: default_hook_cost(),
+        context_window: default_hook_context_window(),
+        exceeds_200k_tokens: false,
+        fast_mode: false,
         effort: None,
-        thinking: None,
+        thinking: HookThinking { enabled: false },
         rate_limits: None,
         session_name: None,
         vim: None,
@@ -90,25 +112,26 @@ fn test_output_style_in_json() {
     let hook_without_style = HookJson {
         session_id: "test_session".to_string(),
         transcript_path: "/tmp/transcript.jsonl".to_string(),
-        cwd: None,
         model: HookModel {
             id: "claude-3.5-sonnet".to_string(),
             display_name: "Claude 3.5 Sonnet".to_string(),
         },
         workspace: HookWorkspace {
             current_dir: "/tmp/project".to_string(),
-            project_dir: Some("/tmp/project".to_string()),
+            project_dir: "/tmp/project".to_string(),
             added_dirs: Vec::new(),
             git_worktree: None,
         },
-        version: Some("1.0.0".to_string()),
-        output_style: None,
-        cost: None,
-        context_window: None,
-        exceeds_200k_tokens: None,
-        fast_mode: None,
+        version: "1.0.0".to_string(),
+        output_style: OutputStyle {
+            name: "default".to_string(),
+        },
+        cost: default_hook_cost(),
+        context_window: default_hook_context_window(),
+        exceeds_200k_tokens: false,
+        fast_mode: false,
         effort: None,
-        thinking: None,
+        thinking: HookThinking { enabled: false },
         rate_limits: None,
         session_name: None,
         vim: None,
@@ -162,8 +185,8 @@ fn test_output_style_in_json() {
         None,  // prompt_cache
     );
 
-    // Verify output_style is null when not present
-    assert!(json_no_style["output_style"].is_null());
+    // output_style is always present on 2.1.148; "default" is the empty-state name.
+    assert_eq!(json_no_style["output_style"]["name"], "default");
 }
 
 #[test]
@@ -174,27 +197,26 @@ fn test_multiple_output_styles() {
         let hook = HookJson {
             session_id: "test_session".to_string(),
             transcript_path: "/tmp/transcript.jsonl".to_string(),
-            cwd: None,
             model: HookModel {
                 id: "claude-3.5-sonnet".to_string(),
                 display_name: "Claude 3.5 Sonnet".to_string(),
             },
             workspace: HookWorkspace {
                 current_dir: "/tmp/project".to_string(),
-                project_dir: Some("/tmp/project".to_string()),
+                project_dir: "/tmp/project".to_string(),
                 added_dirs: Vec::new(),
                 git_worktree: None,
             },
-            version: Some("1.0.0".to_string()),
-            output_style: Some(OutputStyle {
+            version: "1.0.0".to_string(),
+            output_style: OutputStyle {
                 name: style_name.to_string(),
-            }),
-            cost: None,
-            context_window: None,
-            exceeds_200k_tokens: None,
-            fast_mode: None,
+            },
+            cost: default_hook_cost(),
+            context_window: default_hook_context_window(),
+            exceeds_200k_tokens: false,
+            fast_mode: false,
             effort: None,
-            thinking: None,
+            thinking: HookThinking { enabled: false },
             rate_limits: None,
             session_name: None,
             vim: None,

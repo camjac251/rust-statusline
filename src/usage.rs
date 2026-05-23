@@ -881,20 +881,31 @@ pub fn scan_usage(
                                             );
                                         }
 
-                                        // Special handling for Task tool (agent invocations)
-                                        if block.get("name").and_then(|s| s.as_str())
-                                            == Some("Task")
-                                        {
-                                            if let Some(input) = block.get("input") {
-                                                if let Some(agent_type) = input
-                                                    .get("subagent_type")
-                                                    .and_then(|s| s.as_str())
-                                                {
-                                                    *agent_invocations
-                                                        .entry(agent_type.to_string())
-                                                        .or_insert(0) += 1;
+                                        // Agent-invocation tools. `Task` spawns one subagent and
+                                        // carries `subagent_type` in input. `Workflow` runs a script
+                                        // that spawns N agents in `subagents/workflows/wf_<id>/`;
+                                        // the tool_use itself doesn't name a single subagent type,
+                                        // so we bucket those under `workflow` for counting.
+                                        let tool_name = block.get("name").and_then(|s| s.as_str());
+                                        match tool_name {
+                                            Some("Task") => {
+                                                if let Some(input) = block.get("input") {
+                                                    if let Some(agent_type) = input
+                                                        .get("subagent_type")
+                                                        .and_then(|s| s.as_str())
+                                                    {
+                                                        *agent_invocations
+                                                            .entry(agent_type.to_string())
+                                                            .or_insert(0) += 1;
+                                                    }
                                                 }
                                             }
+                                            Some("Workflow") => {
+                                                *agent_invocations
+                                                    .entry("workflow".to_string())
+                                                    .or_insert(0) += 1;
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
@@ -2052,6 +2063,89 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!((entries[0].cost - 33.0).abs() < 1e-10);
         assert!((session_cost - 33.0).abs() < 1e-10);
+        Ok(())
+    }
+
+    /// Workflow agents live at `projects/<sid>/subagents/workflows/wf_<id>/agent-<id>.jsonl`
+    /// (one directory deeper than ordinary Task subagents). The recursive WalkDir
+    /// discovery must descend into that subtree and the per-entry aggregator must
+    /// credit the tokens toward today's cost and the session aggregate. Without this
+    /// behavior, `Workflow({...})` runs that spawn dozens of agents would disappear
+    /// from the statusline's window/today/burn totals.
+    #[test]
+    fn scan_usage_counts_workflow_agent_jsonls_for_today_and_session() -> Result<()> {
+        let session_id = format!(
+            "wf-cost-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+
+        let parent_line = json!({
+            "type": "assistant",
+            "sessionId": session_id,
+            "timestamp": Local::now().to_rfc3339(),
+            "message": {
+                "role": "assistant",
+                "id": "msg-parent",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+
+        let dir = write_transcript_lines(&session_id, &[parent_line])?;
+        let base = dir.path().to_path_buf();
+
+        // Drop a workflow-agent transcript at the nested path the CLI emits.
+        let workflow_dir = base
+            .join("projects")
+            .join("project")
+            .join(&session_id)
+            .join("subagents")
+            .join("workflows")
+            .join("wf_test123abc");
+        fs::create_dir_all(&workflow_dir)?;
+        let agent_path = workflow_dir.join("agent-aabb1122.jsonl");
+        let agent_line = json!({
+            "type": "assistant",
+            "sessionId": session_id,
+            "timestamp": Local::now().to_rfc3339(),
+            "isSidechain": true,
+            "agentId": "aabb1122",
+            "message": {
+                "role": "assistant",
+                "id": "msg-wf-agent-1",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 1000,
+                    "output_tokens": 200,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+        fs::write(&agent_path, format!("{}\n", agent_line))?;
+
+        let (_, _, today_cost, entries, _, _, _) = scan_usage(&[base], &session_id, None, None)?;
+
+        // Both entries should be discovered and aggregated.
+        assert_eq!(entries.len(), 2, "expected parent + workflow agent entries");
+        assert!(
+            today_cost > 0.0,
+            "today cost should include workflow tokens"
+        );
+
+        // The workflow agent should be attributed via its agent_id so the
+        // session.subagents[] JSON breakdown lists it.
+        let wf_agent_entry = entries
+            .iter()
+            .find(|e| e.agent_id.as_deref() == Some("aabb1122"))
+            .expect("workflow agent entry should carry its agent_id");
+        assert_eq!(wf_agent_entry.input, 1000);
+        assert_eq!(wf_agent_entry.output, 200);
         Ok(())
     }
 
