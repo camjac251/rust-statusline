@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [2.2.0](https://github.com/camjac251/rust-statusline/compare/v2.1.1...v2.2.0) - 2026-05-27
+
+### Added
+
+- *(cli)* expose package version flag
+
 ## [2.1.1](https://github.com/camjac251/rust-statusline/compare/v2.1.0...v2.1.1) - 2026-05-27
 
 ### Fixed
