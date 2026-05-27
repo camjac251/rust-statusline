@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## [2.1.1](https://github.com/camjac251/rust-statusline/compare/v2.1.0...v2.1.1) - 2026-05-27
+
+### Fixed
+
+- *(pricing)* remove retired model entries
+- *(statusline)* align modern hook handling
+
 ## [2.1.0](https://github.com/camjac251/rust-statusline/compare/v2.0.0...v2.1.0) - 2026-05-23
 
 ### Added
