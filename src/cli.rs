@@ -83,6 +83,7 @@ pub struct InitArgs {
 }
 
 #[derive(clap::Parser, Debug)]
+#[command(version)]
 pub struct Args {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -472,5 +473,26 @@ impl Args {
         T: Into<std::ffi::OsString> + Clone,
     {
         crate::config::parse_effective_args(itr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use clap::{CommandFactory, Parser, error::ErrorKind};
+
+    #[test]
+    fn version_metadata_uses_cargo_package_version() {
+        let command = Args::command();
+
+        assert_eq!(command.get_version(), Some(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn version_flag_prints_without_reading_hook_input() {
+        let err = Args::try_parse_from(["claude_statusline", "--version"]).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::DisplayVersion);
+        assert!(err.to_string().contains(env!("CARGO_PKG_VERSION")));
     }
 }

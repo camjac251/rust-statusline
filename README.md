@@ -138,6 +138,7 @@ Pricing is embedded at compile time from `pricing.json`. The OAuth API is option
 
 ```
 claude_statusline [OPTIONS]
+claude_statusline --version
 claude_statusline doctor [OPTIONS]
 claude_statusline init [OPTIONS]
 ```
@@ -147,6 +148,7 @@ claude_statusline init [OPTIONS]
 | Flag | Description |
 |------|-------------|
 | `--json` | Emit structured JSON instead of colorized text |
+| `--version` | Print the installed binary version |
 | `--config <PATH>` | Load a config file |
 | `--no-config` | Disable config file loading |
 | `--preset <minimal\|default\|full>` | Apply a built-in preset (atomic flags still win) |
