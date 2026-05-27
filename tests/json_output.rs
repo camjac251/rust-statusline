@@ -45,8 +45,8 @@ fn json_output_shape_minimal() {
         session_id: "s1".to_string(),
         transcript_path: "/tmp/transcript.jsonl".to_string(),
         model: HookModel {
-            id: "claude-3.5-sonnet".to_string(),
-            display_name: "Claude 3.5 Sonnet".to_string(),
+            id: "claude-sonnet-4-6".to_string(),
+            display_name: "Claude Sonnet 4.6".to_string(),
         },
         workspace: HookWorkspace {
             current_dir: "/tmp/project".to_string(),
@@ -136,8 +136,8 @@ fn json_output_shape_minimal() {
     }
 
     // Model sub-keys
-    assert_eq!(json["model"]["id"], "claude-3.5-sonnet");
-    assert_eq!(json["model"]["display_name"], "Claude 3.5 Sonnet");
+    assert_eq!(json["model"]["id"], "claude-sonnet-4-6");
+    assert_eq!(json["model"]["display_name"], "Claude Sonnet 4.6");
     assert_eq!(json["model"]["fast_mode"], true);
     assert_eq!(json["effort"], "high");
     assert_eq!(json["thinking"]["enabled"], false);
@@ -179,8 +179,8 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         session_id: "s1".to_string(),
         transcript_path: "/tmp/transcript.jsonl".to_string(),
         model: HookModel {
-            id: "claude-3.5-sonnet".to_string(),
-            display_name: "Claude 3.5 Sonnet [1m]".to_string(),
+            id: "claude-sonnet-4-6".to_string(),
+            display_name: "Claude Sonnet 4.6 [1m]".to_string(),
         },
         workspace: HookWorkspace {
             current_dir: "/tmp/project".to_string(),

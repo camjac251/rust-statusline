@@ -19,8 +19,8 @@
 //!    - `CLAUDE_PRICE_CACHE_CREATE`
 //!    - `CLAUDE_PRICE_CACHE_READ`
 //! 2. Compile-time embedded pricing.json (from `pricing.json` at build time)
-//! 3. Built-in static pricing fallback
-//! 4. Family heuristics (opus/sonnet/haiku detection)
+//! 3. Built-in static pricing fallback for active Claude models
+//! 4. Family heuristics for unknown future opus/sonnet/haiku IDs
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -184,44 +184,56 @@ fn pricing_from_config(model_id: &str) -> Option<Pricing> {
 pub(crate) fn static_pricing_lookup(model_id: &str) -> Option<Pricing> {
     // Prefer exact/known variants before family heuristics
     let m = model_id.to_lowercase();
-    // Opus 4.5+ (and catch generic "claude-4-5" as flagship/Opus)
-    if m.contains("opus-4-5")
-        || m.contains("opus-4-6")
-        || m.contains("opus-4-7")
-        || m == "claude-4-5"
-    {
+    if m.contains("opus-4-5") || m.contains("opus-4-6") || m.contains("opus-4-7") {
         let in_pt = 5e-6; // $5 / 1M
         return Some(Pricing::from_input_multipliers(in_pt, 25e-6));
     }
-    // Opus 4.1
     if m.contains("opus-4-1") {
         let in_pt = 15e-6; // $15 / 1M
         return Some(Pricing::from_input_multipliers(in_pt, 75e-6));
     }
-    // Opus 4 (avoid matching 4.1 above)
-    if m.contains("opus-4") {
-        let in_pt = 15e-6;
-        return Some(Pricing::from_input_multipliers(in_pt, 75e-6));
-    }
-    // Sonnet 4 (also catch "claude-4-sonnet")
-    if m.contains("sonnet-4") || m.contains("4-sonnet") {
+    if m.contains("sonnet-4-5") || m.contains("sonnet-4-6") {
         let in_pt = 3e-6; // $3 / 1M
         return Some(Pricing::from_input_multipliers(in_pt, 15e-6));
     }
-    // Claude 3.7 Sonnet
-    if m.contains("3-7-sonnet") {
-        let in_pt = 3e-6; // treat like sonnet family
-        return Some(Pricing::from_input_multipliers(in_pt, 15e-6));
-    }
-    // Claude 3.5 Sonnet
-    if m.contains("3-5-sonnet") {
-        let in_pt = 3e-6;
-        return Some(Pricing::from_input_multipliers(in_pt, 15e-6));
-    }
-    if m.contains("3-5-haiku") {
-        return Some(Pricing::new(0.8e-6, 4.0e-6, 1.0e-6, 1.6e-6, 0.08e-6));
+    if m.contains("haiku-4-5") {
+        return Some(Pricing::from_input_multipliers(1e-6, 5e-6));
     }
     None
+}
+
+fn is_deprecated_or_retired_model(model_id: &str) -> bool {
+    let m = model_id.to_lowercase();
+    if m.contains("claude-instant") {
+        return true;
+    }
+
+    let Some((_, tail)) = m.rsplit_once("claude-") else {
+        return false;
+    };
+
+    if tail.starts_with("1") || tail.starts_with("2") || tail.starts_with("3-") {
+        return true;
+    }
+
+    let active_opus = ["opus-4-1", "opus-4-5", "opus-4-6", "opus-4-7"];
+    if (tail == "opus-4" || tail.starts_with("opus-4-"))
+        && !active_opus.iter().any(|prefix| tail.starts_with(prefix))
+    {
+        return true;
+    }
+
+    let active_sonnet = ["sonnet-4-5", "sonnet-4-6"];
+    if (tail == "sonnet-4" || tail.starts_with("sonnet-4-"))
+        && !active_sonnet.iter().any(|prefix| tail.starts_with(prefix))
+    {
+        return true;
+    }
+
+    tail == "4-opus"
+        || tail.starts_with("4-opus-")
+        || tail == "4-sonnet"
+        || tail.starts_with("4-sonnet-")
 }
 
 fn env_pricing_override() -> Option<Pricing> {
@@ -256,16 +268,20 @@ pub fn pricing_for_model(model_id: &str) -> Option<Pricing> {
         return Some(p);
     }
 
+    if is_deprecated_or_retired_model(&m) {
+        return None;
+    }
+
     // Priority 4: Family heuristics fallback
     if m.contains("opus") {
-        let in_pt = 5e-6; // $5 / 1M (current Opus 4.5/4.6 pricing)
+        let in_pt = 5e-6; // $5 / 1M
         Some(Pricing::from_input_multipliers(in_pt, 25e-6))
     } else if m.contains("sonnet") {
         let in_pt = 3e-6; // $3 / 1M
         Some(Pricing::from_input_multipliers(in_pt, 15e-6))
     } else if m.contains("haiku") {
-        let in_pt = 0.25e-6; // $0.25 / 1M
-        Some(Pricing::from_input_multipliers(in_pt, 1.25e-6))
+        let in_pt = 1e-6; // $1 / 1M
+        Some(Pricing::from_input_multipliers(in_pt, 5e-6))
     } else {
         None
     }
@@ -282,6 +298,9 @@ pub fn pricing_source_for_model(model_id: &str) -> PricingSource {
     }
     if static_pricing_lookup(&m).is_some() {
         return PricingSource::StaticFallback;
+    }
+    if is_deprecated_or_retired_model(&m) {
+        return PricingSource::Unavailable;
     }
     if m.contains("opus") || m.contains("sonnet") || m.contains("haiku") {
         return PricingSource::FamilyHeuristic;
@@ -324,16 +343,9 @@ fn canonical_pricing_key(model_id: &str) -> Option<&'static str> {
         ("opus-4-6", "claude-opus-4-6"),
         ("opus-4-5", "claude-opus-4-5"),
         ("opus-4-1", "claude-opus-4-1"),
-        ("opus-4", "claude-opus-4"),
         ("sonnet-4-6", "claude-sonnet-4-6"),
         ("sonnet-4-5", "claude-sonnet-4-5"),
-        ("sonnet-4", "claude-sonnet-4"),
         ("haiku-4-5", "claude-haiku-4-5"),
-        ("3-7-sonnet", "claude-3-7-sonnet"),
-        ("3-5-sonnet", "claude-3-5-sonnet"),
-        ("3-5-haiku", "claude-3-5-haiku"),
-        ("3-opus", "claude-3-opus"),
-        ("3-haiku", "claude-3-haiku"),
     ];
 
     ordered
@@ -460,9 +472,7 @@ pub fn apply_tiered_pricing(
 
     // Find applicable tier
     for tier in &config.tiered_pricing.tiers {
-        // Check if this tier applies using exact or date-suffix matching:
-        // "claude-sonnet-4" matches "claude-sonnet-4" and "claude-sonnet-4-20250514"
-        // but NOT "claude-sonnet-4-5" or "claude-sonnet-4-6" (different model versions)
+        // Check if this tier applies using exact or date-suffix matching.
         let applies = tier.applies_to.iter().any(|pattern| {
             let p = pattern.to_lowercase();
             if model_lower == p {
@@ -505,21 +515,21 @@ mod tests {
     #[test]
     fn test_pricing_for_known_models() {
         // Test Sonnet pricing
-        let sonnet_pricing = pricing_for_model("claude-3.5-sonnet").unwrap();
+        let sonnet_pricing = pricing_for_model("claude-sonnet-4-6").unwrap();
         assert!((sonnet_pricing.in_per_tok - 3e-6).abs() < 1e-10);
         assert!((sonnet_pricing.out_per_tok - 15e-6).abs() < 1e-10);
         assert!((sonnet_pricing.cache_create_per_tok - 3.75e-6).abs() < 1e-10);
         assert!((sonnet_pricing.cache_read_per_tok - 0.3e-6).abs() < 1e-10);
 
         // Test Opus pricing
-        let opus_pricing = pricing_for_model("claude-opus-4").unwrap();
-        assert!((opus_pricing.in_per_tok - 15e-6).abs() < 1e-10);
-        assert!((opus_pricing.out_per_tok - 75e-6).abs() < 1e-10);
+        let opus_pricing = pricing_for_model("claude-opus-4-7").unwrap();
+        assert!((opus_pricing.in_per_tok - 5e-6).abs() < 1e-10);
+        assert!((opus_pricing.out_per_tok - 25e-6).abs() < 1e-10);
 
         // Test Haiku pricing
-        let haiku_pricing = pricing_for_model("claude-3.5-haiku").unwrap();
-        assert!((haiku_pricing.in_per_tok - 0.25e-6).abs() < 1e-10);
-        assert!((haiku_pricing.out_per_tok - 1.25e-6).abs() < 1e-10);
+        let haiku_pricing = pricing_for_model("claude-haiku-4-5").unwrap();
+        assert!((haiku_pricing.in_per_tok - 1e-6).abs() < 1e-10);
+        assert!((haiku_pricing.out_per_tok - 5e-6).abs() < 1e-10);
     }
 
     #[test]
@@ -561,11 +571,11 @@ mod tests {
 
     #[test]
     fn test_fast_mode_multiplier() {
-        // Opus 4.6 has 6x fast mode
+        // Opus 4.6 and 4.7 have 6x fast mode
+        assert!((fast_mode_multiplier("claude-opus-4-7") - 6.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("claude-opus-4-6") - 6.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("us.anthropic.claude-opus-4-6-v1") - 6.0).abs() < 1e-10);
         // Other models have no fast mode (1x)
-        assert!((fast_mode_multiplier("claude-opus-4-7") - 1.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("claude-sonnet-4-6") - 1.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("claude-sonnet-4-5") - 1.0).abs() < 1e-10);
     }
@@ -652,15 +662,27 @@ mod tests {
     }
 
     #[test]
-    fn test_fast_mode_no_false_positive_on_opus_4() {
-        // Opus 4 (not 4.6) should NOT get fast mode multiplier
-        assert!((fast_mode_multiplier("claude-opus-4") - 1.0).abs() < 1e-10);
-        assert!((fast_mode_multiplier("claude-opus-4-20250514") - 1.0).abs() < 1e-10);
+    fn test_fast_mode_no_false_positive_on_other_models() {
         assert!((fast_mode_multiplier("claude-opus-4-1") - 1.0).abs() < 1e-10);
+        assert!((fast_mode_multiplier("claude-opus-4-5") - 1.0).abs() < 1e-10);
+        assert!((fast_mode_multiplier("claude-haiku-4-5") - 1.0).abs() < 1e-10);
     }
 
     #[test]
     fn test_unknown_model() {
         assert!(pricing_for_model("unknown-model").is_none());
+    }
+
+    #[test]
+    fn test_retired_models_are_not_priced_by_family_heuristics() {
+        let retired_sonnet = ["claude", "3", "5", "sonnet", "20241022"].join("-");
+        let retired_haiku = ["claude", "3", "haiku", "20240307"].join("-");
+        let deprecated_sonnet = ["claude", "sonnet", "4", "20250514"].join("-");
+        let deprecated_opus = ["claude", "opus", "4", "20250514"].join("-");
+
+        assert!(pricing_for_model(&retired_sonnet).is_none());
+        assert!(pricing_for_model(&retired_haiku).is_none());
+        assert!(pricing_for_model(&deprecated_sonnet).is_none());
+        assert!(pricing_for_model(&deprecated_opus).is_none());
     }
 }

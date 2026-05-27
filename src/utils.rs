@@ -111,25 +111,14 @@ pub fn parse_iso_date(s: &str) -> Option<NaiveDate> {
 pub(crate) fn static_context_limit_lookup(model_id: &str) -> Option<u64> {
     let m = model_id.to_lowercase();
     // Known variants; newer 1M-capable models must be listed before family fallbacks.
-    if m.contains("opus-4-7") || m.contains("opus-4-6") {
+    if m.contains("opus-4-7") || m.contains("opus-4-6") || m.contains("sonnet-4-6") {
         return Some(1_000_000);
     }
-    if m.contains("opus-4-1") {
-        return Some(200_000);
-    }
-    if m.contains("opus-4") {
-        return Some(200_000);
-    }
-    if m.contains("sonnet-4") || m.contains("4-sonnet") {
-        return Some(200_000);
-    }
-    if m.contains("3-7-sonnet") {
-        return Some(200_000);
-    }
-    if m.contains("3-5-sonnet") {
-        return Some(200_000);
-    }
-    if m.contains("haiku-4") || m.contains("3-5-haiku") {
+    if m.contains("opus-4-1")
+        || m.contains("opus-4-5")
+        || m.contains("sonnet-4-5")
+        || m.contains("haiku-4-5")
+    {
         return Some(200_000);
     }
     None
@@ -169,8 +158,6 @@ pub fn context_limit_for_model_display(model_id: &str, display_name: &str) -> u6
 }
 
 const MIN_CONFIGURED_OUTPUT_TOKENS: u64 = 4_096;
-const OUTPUT_4K: u64 = 4_096;
-const OUTPUT_8K: u64 = 8_192;
 const OUTPUT_32K: u64 = 32_000;
 const OUTPUT_64K: u64 = 64_000;
 const OUTPUT_128K: u64 = 128_000;
@@ -228,51 +215,28 @@ fn default_output_tokens_for_model(model_id: &str) -> u64 {
         return OUTPUT_64K;
     }
     if lower.contains("sonnet-4-6")
-        || lower.contains("opus-4")
-        || lower.contains("sonnet-4")
-        || lower.contains("haiku-4")
-        || lower.contains("3-7-sonnet")
+        || lower.contains("opus-4-5")
+        || lower.contains("opus-4-1")
+        || lower.contains("sonnet-4-5")
+        || lower.contains("haiku-4-5")
     {
         return OUTPUT_32K;
-    }
-    if lower.contains("3-5-sonnet") || lower.contains("3-5-haiku") {
-        return OUTPUT_8K;
-    }
-    if lower.contains("3-opus") || lower.contains("3-haiku") {
-        return OUTPUT_4K;
-    }
-    if lower.contains("3-sonnet") {
-        return OUTPUT_8K;
     }
     OUTPUT_32K
 }
 
 fn upper_output_tokens_for_model(model_id: &str) -> u64 {
     let lower = model_id.to_lowercase();
-    if lower.contains("opus-4-7") || lower.contains("opus-4-6") || lower.contains("sonnet-4-6") {
+    if lower.contains("opus-4-7") || lower.contains("opus-4-6") {
         return OUTPUT_128K;
     }
     if lower.contains("opus-4-5")
-        || lower.contains("claude-4-5")
-        || lower.contains("sonnet-4")
-        || lower.contains("4-sonnet")
-        || lower.contains("haiku-4")
-        || lower.contains("4-haiku")
-        || lower.contains("3-7-sonnet")
+        || lower.contains("opus-4-1")
+        || lower.contains("sonnet-4-6")
+        || lower.contains("sonnet-4-5")
+        || lower.contains("haiku-4-5")
     {
         return OUTPUT_64K;
-    }
-    if lower.contains("opus-4") || lower.contains("4-opus") {
-        return OUTPUT_32K;
-    }
-    if lower.contains("3-5-sonnet") || lower.contains("3-5-haiku") {
-        return OUTPUT_8K;
-    }
-    if lower.contains("3-opus") || lower.contains("3-haiku") {
-        return OUTPUT_4K;
-    }
-    if lower.contains("3-sonnet") {
-        return OUTPUT_8K;
     }
     OUTPUT_128K
 }
@@ -293,9 +257,8 @@ pub fn usable_context_limit(model_id: &str, display_name: &str) -> u64 {
 /// already looks friendly (contains uppercase letters or spaces) or if the
 /// ID doesn't follow a recognisable Claude naming pattern.
 ///
-/// Handles both current (`claude-{family}-{ver}`) and legacy
-/// (`claude-{ver}-{family}`) naming schemes, with optional date suffixes
-/// and Bedrock `anthropic.` prefixes.
+/// Handles current `claude-{family}-{ver}` naming, with optional date suffixes
+/// and provider prefixes.
 pub fn friendly_model_name(model_id: &str, display_name: &str) -> String {
     // If display_name already looks like a proper friendly name, keep it.
     if display_name.contains(' ') || display_name.chars().any(|c| c.is_uppercase()) {
@@ -337,7 +300,7 @@ pub fn friendly_model_name(model_id: &str, display_name: &str) -> String {
         })
         .unwrap_or(without_date);
 
-    const FAMILIES: &[&str] = &["opus", "sonnet", "haiku", "instant"];
+    const FAMILIES: &[&str] = &["opus", "sonnet", "haiku"];
 
     for family in FAMILIES {
         // Current format: {family}-{version} e.g. "opus-4-6"
@@ -345,17 +308,6 @@ pub fn friendly_model_name(model_id: &str, display_name: &str) -> String {
             let version = rest.replace('-', ".");
             return format!("{} {}", capitalize(family), version);
         }
-        // Legacy format: {version}-{family} e.g. "3-5-sonnet"
-        if let Some(rest) = without_suffix.strip_suffix(&format!("-{}", family)) {
-            let version = rest.replace('-', ".");
-            return format!("{} {}", capitalize(family), version);
-        }
-    }
-
-    // No family found but still claude- prefix: "Claude {version}"
-    let version = without_suffix.replace('-', ".");
-    if !version.is_empty() {
-        return format!("Claude {}", version);
     }
 
     display_name.to_string()
@@ -386,11 +338,11 @@ mod tests {
     #[serial]
     fn test_context_limit_for_model_display() {
         assert_eq!(
-            context_limit_for_model_display("claude-3.5-sonnet", "Claude 3.5 Sonnet"),
-            200_000
+            context_limit_for_model_display("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            1_000_000
         );
         assert_eq!(
-            context_limit_for_model_display("claude-3.5-sonnet", "Claude 3.5 Sonnet [1m]"),
+            context_limit_for_model_display("claude-sonnet-4-5", "Claude Sonnet 4.5 [1m]"),
             1_000_000
         );
         assert_eq!(
@@ -401,7 +353,7 @@ mod tests {
         // SAFETY: Test runs serially, no concurrent env access
         unsafe { env::set_var("CLAUDE_CONTEXT_LIMIT", "123456") };
         assert_eq!(
-            context_limit_for_model_display("claude-3.5-sonnet", "Claude 3.5 Sonnet"),
+            context_limit_for_model_display("claude-haiku-4-5", "Claude Haiku 4.5"),
             123456
         );
         unsafe { env::remove_var("CLAUDE_CONTEXT_LIMIT") };
@@ -418,9 +370,6 @@ mod tests {
             32_000
         );
         assert_eq!(reserved_output_tokens_for_model("claude-haiku-4-5"), 32_000);
-        assert_eq!(reserved_output_tokens_for_model("claude-3-5-sonnet"), 8_192);
-        assert_eq!(reserved_output_tokens_for_model("claude-3-5-haiku"), 8_192);
-        assert_eq!(reserved_output_tokens_for_model("claude-3-haiku"), 4_096);
         assert_eq!(
             reserved_output_tokens_for_model("claude-sonnet-4-5"),
             32_000
@@ -444,10 +393,13 @@ mod tests {
 
         // Test env override below Claude Code's minimum is ignored
         unsafe { env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4000") };
-        assert_eq!(reserved_output_tokens_for_model("claude-3-5-sonnet"), 8_192);
+        assert_eq!(
+            reserved_output_tokens_for_model("claude-sonnet-4-6"),
+            32_000
+        );
 
         unsafe { env::set_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4096") };
-        assert_eq!(reserved_output_tokens_for_model("claude-3-5-sonnet"), 4_096);
+        assert_eq!(reserved_output_tokens_for_model("claude-sonnet-4-6"), 4_096);
 
         unsafe { env::remove_var("CLAUDE_CODE_MAX_OUTPUT_TOKENS") };
     }
@@ -456,13 +408,11 @@ mod tests {
     fn test_max_output_capability_for_current_models() {
         assert_eq!(max_output_capability("claude-opus-4-7"), 128_000);
         assert_eq!(max_output_capability("claude-opus-4-6"), 128_000);
-        assert_eq!(max_output_capability("claude-sonnet-4-6"), 128_000);
-        assert_eq!(max_output_capability("claude-4-5"), 64_000);
+        assert_eq!(max_output_capability("claude-sonnet-4-6"), 64_000);
+        assert_eq!(max_output_capability("claude-opus-4-5"), 64_000);
+        assert_eq!(max_output_capability("claude-opus-4-1"), 64_000);
         assert_eq!(max_output_capability("claude-sonnet-4-5"), 64_000);
-        assert_eq!(max_output_capability("claude-4-sonnet"), 64_000);
         assert_eq!(max_output_capability("claude-haiku-4-5"), 64_000);
-        assert_eq!(max_output_capability("claude-4-opus"), 32_000);
-        assert_eq!(max_output_capability("claude-3-haiku"), 4_096);
     }
 
     #[test]
@@ -474,10 +424,9 @@ mod tests {
             168_000
         );
 
-        // Test 3.5 Sonnet: 200k - 8192 = 191808
         assert_eq!(
-            usable_context_limit("claude-3-5-sonnet", "Claude 3.5 Sonnet"),
-            191_808
+            usable_context_limit("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            968_000
         );
 
         // Test 1M context variant: 1M - 32k = 968k
@@ -520,10 +469,6 @@ mod tests {
             friendly_model_name("claude-haiku-4-5", "claude-haiku-4-5"),
             "Haiku 4.5"
         );
-        assert_eq!(
-            friendly_model_name("claude-opus-4", "claude-opus-4"),
-            "Opus 4"
-        );
     }
 
     #[test]
@@ -539,23 +484,6 @@ mod tests {
     }
 
     #[test]
-    fn test_friendly_model_name_legacy_format() {
-        // Legacy naming: claude-{major}-{minor}-{family}
-        assert_eq!(
-            friendly_model_name("claude-3-5-sonnet-20241022", "claude-3-5-sonnet-20241022"),
-            "Sonnet 3.5"
-        );
-        assert_eq!(
-            friendly_model_name("claude-3-opus-20240229", "claude-3-opus-20240229"),
-            "Opus 3"
-        );
-        assert_eq!(
-            friendly_model_name("claude-3-haiku-20240307", "claude-3-haiku-20240307"),
-            "Haiku 3"
-        );
-    }
-
-    #[test]
     fn test_friendly_model_name_bedrock() {
         assert_eq!(
             friendly_model_name(
@@ -567,11 +495,10 @@ mod tests {
     }
 
     #[test]
-    fn test_friendly_model_name_no_family() {
-        // No family in ID → "Claude {version}"
+    fn test_friendly_model_name_unknown_family_stays_raw() {
         assert_eq!(
-            friendly_model_name("claude-4-5", "claude-4-5"),
-            "Claude 4.5"
+            friendly_model_name("claude-custom-model", "claude-custom-model"),
+            "claude-custom-model"
         );
     }
 

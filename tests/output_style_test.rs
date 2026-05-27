@@ -32,8 +32,8 @@ fn test_output_style_in_json() {
         session_id: "test_session".to_string(),
         transcript_path: "/tmp/transcript.jsonl".to_string(),
         model: HookModel {
-            id: "claude-3.5-sonnet".to_string(),
-            display_name: "Claude 3.5 Sonnet".to_string(),
+            id: "claude-sonnet-4-6".to_string(),
+            display_name: "Claude Sonnet 4.6".to_string(),
         },
         workspace: HookWorkspace {
             current_dir: "/tmp/project".to_string(),
@@ -113,8 +113,8 @@ fn test_output_style_in_json() {
         session_id: "test_session".to_string(),
         transcript_path: "/tmp/transcript.jsonl".to_string(),
         model: HookModel {
-            id: "claude-3.5-sonnet".to_string(),
-            display_name: "Claude 3.5 Sonnet".to_string(),
+            id: "claude-sonnet-4-6".to_string(),
+            display_name: "Claude Sonnet 4.6".to_string(),
         },
         workspace: HookWorkspace {
             current_dir: "/tmp/project".to_string(),
@@ -198,8 +198,8 @@ fn test_multiple_output_styles() {
             session_id: "test_session".to_string(),
             transcript_path: "/tmp/transcript.jsonl".to_string(),
             model: HookModel {
-                id: "claude-3.5-sonnet".to_string(),
-                display_name: "Claude 3.5 Sonnet".to_string(),
+                id: "claude-sonnet-4-6".to_string(),
+                display_name: "Claude Sonnet 4.6".to_string(),
             },
             workspace: HookWorkspace {
                 current_dir: "/tmp/project".to_string(),

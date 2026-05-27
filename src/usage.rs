@@ -1818,11 +1818,11 @@ mod tests {
         fs::write(&transcript, format!("{}\n", line))?;
 
         let context =
-            calc_context_from_transcript(&transcript, "claude-3-5-sonnet", "Claude 3.5 Sonnet");
+            calc_context_from_transcript(&transcript, "claude-haiku-4-5", "Claude Haiku 4.5");
         let detail = calc_context_from_transcript_detail(
             &transcript,
-            "claude-3-5-sonnet",
-            "Claude 3.5 Sonnet",
+            "claude-haiku-4-5",
+            "Claude Haiku 4.5",
         )
         .expect("context detail");
 
@@ -1854,7 +1854,7 @@ mod tests {
             speed: None,
             service_tier: None,
             cost: 0.0,
-            model: Some("claude-3-5-sonnet".to_string()),
+            model: Some("claude-haiku-4-5".to_string()),
             session_id: Some("session-context".to_string()),
             msg_id: None,
             req_id: None,
@@ -1865,8 +1865,8 @@ mod tests {
         let context = calc_context_from_entries(
             &[entry],
             "session-context",
-            "claude-3-5-sonnet",
-            "Claude 3.5 Sonnet",
+            "claude-haiku-4-5",
+            "Claude Haiku 4.5",
         );
 
         assert_eq!(context, Some((6000, 3)));
@@ -1918,11 +1918,11 @@ mod tests {
         )?;
 
         let context =
-            calc_context_from_transcript(&transcript, "claude-3-5-sonnet", "Claude 3.5 Sonnet");
+            calc_context_from_transcript(&transcript, "claude-haiku-4-5", "Claude Haiku 4.5");
         let detail = calc_context_from_transcript_detail(
             &transcript,
-            "claude-3-5-sonnet",
-            "Claude 3.5 Sonnet",
+            "claude-haiku-4-5",
+            "Claude Haiku 4.5",
         )
         .expect("context detail");
 
@@ -1974,8 +1974,8 @@ mod tests {
 
         let detail = calc_context_from_transcript_detail(
             &transcript,
-            "claude-3-5-sonnet",
-            "Claude 3.5 Sonnet",
+            "claude-haiku-4-5",
+            "Claude Haiku 4.5",
         )
         .expect("context detail");
 
@@ -2023,8 +2023,8 @@ mod tests {
 
         let detail = calc_context_from_transcript_detail(
             &transcript,
-            "claude-3-5-sonnet",
-            "Claude 3.5 Sonnet",
+            "claude-haiku-4-5",
+            "Claude Haiku 4.5",
         )
         .expect("context detail");
 
@@ -2074,8 +2074,8 @@ mod tests {
 
         let detail = calc_context_from_transcript_detail(
             &transcript,
-            "claude-3-5-sonnet",
-            "Claude 3.5 Sonnet",
+            "claude-haiku-4-5",
+            "Claude Haiku 4.5",
         )
         .expect("context detail");
 
@@ -2145,7 +2145,7 @@ mod tests {
         )?;
 
         let context =
-            calc_context_from_transcript(&transcript, "claude-3-5-sonnet", "Claude 3.5 Sonnet");
+            calc_context_from_transcript(&transcript, "claude-haiku-4-5", "Claude Haiku 4.5");
 
         assert_eq!(context, Some((10000, 5)));
         unsafe {
@@ -2186,7 +2186,7 @@ mod tests {
         fs::write(&transcript, format!("{}\n{}\n", usage, boundary))?;
 
         let context =
-            calc_context_from_transcript(&transcript, "claude-3-5-sonnet", "Claude 3.5 Sonnet");
+            calc_context_from_transcript(&transcript, "claude-haiku-4-5", "Claude Haiku 4.5");
 
         assert_eq!(context, Some((80000, 40)));
         unsafe {

@@ -1252,7 +1252,7 @@ fn parse_transcript_today_events(
                 .get("model")
                 .or_else(|| message.get("model"))
                 .and_then(|m| m.as_str())
-                .unwrap_or("claude-sonnet-4");
+                .unwrap_or("claude-sonnet-4-6");
             let cost = crate::pricing::calculate_cost_for_usage_with_speed(model_id, usage, speed);
 
             if cost > 0.0

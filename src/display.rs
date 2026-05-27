@@ -455,22 +455,16 @@ pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String 
     let lower_disp = display.to_lowercase();
     let tc = is_truecolor_enabled(args);
 
-    // Opus family (and Claude 2 legacy) -> Purple
-    let token = if lower_id.contains("opus")
-        || lower_disp.contains("opus")
-        || lower_id.contains("claude-2")
-    {
+    // Opus family -> Purple
+    let token = if lower_id.contains("opus") || lower_disp.contains("opus") {
         tokens::MODEL_OPUS
     }
     // Sonnet family -> Amber/Yellow
     else if lower_id.contains("sonnet") || lower_disp.contains("sonnet") {
         tokens::MODEL_SONNET
     }
-    // Haiku family (and Instant legacy) -> Cyan/Blue
-    else if lower_id.contains("haiku")
-        || lower_disp.contains("haiku")
-        || lower_id.contains("claude-instant")
-    {
+    // Haiku family -> Cyan/Blue
+    else if lower_id.contains("haiku") || lower_disp.contains("haiku") {
         tokens::MODEL_HAIKU
     } else {
         // Unknown/Other -> White
