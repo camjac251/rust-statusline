@@ -94,7 +94,8 @@ fn main() -> Result<()> {
     // - actual model in use (may differ from hook if /model was used)
     // - fast mode status (speed field from most recent API call)
     // - session cost (from SDK result messages)
-    let session_state = parse_session_state(Path::new(&hook.transcript_path));
+    let transcript_path = Path::new(&hook.transcript_path);
+    let session_state = parse_session_state(transcript_path);
     let prompt_cache_info = if !args.no_integrations_prompt_cache {
         session_state.prompt_cache.clone().map(|mut info| {
             info.now = Utc::now();
@@ -112,8 +113,8 @@ fn main() -> Result<()> {
         }
     }
 
-    // Hook ships the authoritative fast_mode flag on every 2.1.148 payload;
-    // OR in the transcript signal as a defensive fallback for any mid-turn skew.
+    // The modern hook schema ships the authoritative fast_mode flag; OR in the
+    // transcript signal as a defensive fallback for any mid-turn skew.
     let is_fast_mode = hook.fast_mode || session_state.speed.as_deref() == Some("fast");
     let db_session_today_cost = session_today_cost_for_db(
         &hook.session_id,
@@ -132,7 +133,7 @@ fn main() -> Result<()> {
         match claude_statusline::db::get_global_usage(
             &hook.session_id,
             &hook.workspace.project_dir,
-            Path::new(&hook.transcript_path),
+            transcript_path,
             Some(db_session_today_cost),
             Some(&entries),
         ) {
@@ -161,32 +162,65 @@ fn main() -> Result<()> {
         session_cost = hook.cost.total_cost_usd;
         session_cost_source = SessionCostSource::HookCost;
     }
-    // Context window: prefer hook data (from Claude Code 2.0.69+), fallback to transcript parsing
+    // Context window: prefer hook data except when the transcript proves a compact
+    // boundary has reset the visible context and hook usage is still pre-compact.
+    // If modern hook data says current_usage is null, avoid transcript/global
+    // fallbacks unless a compact boundary gives us a fresh post-compact estimate.
     let mut context: Option<(u64, u32)> = None;
     let mut context_source: Option<&'static str> = None;
+    let hook_has_live_context_usage = hook.context_window.current_usage.is_some();
+    let transcript_context_detail = claude_statusline::usage::calc_context_from_transcript_detail(
+        transcript_path,
+        &hook.model.id,
+        &hook.model.display_name,
+    );
+    let transcript_context = transcript_context_detail
+        .map(|detail| detail.as_tuple())
+        .or_else(|| {
+            calc_context_from_transcript(transcript_path, &hook.model.id, &hook.model.display_name)
+        });
 
-    // Priority 1: Use context_window from hook (always present on 2.1.148+)
-    let ctx_win = &hook.context_window;
-    if let Some(ref usage) = ctx_win.current_usage {
-        // Context tokens: input-side only (matches CLI calculation).
-        // Output tokens don't count against the input context window.
-        let total_tokens =
-            usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens;
-        if total_tokens > 0 {
-            context = Some((total_tokens, ctx_win.used_percentage.min(100)));
-            context_source = Some("hook");
+    if let Some(detail) = transcript_context_detail.filter(|detail| {
+        detail.source == claude_statusline::usage::TranscriptContextSource::CompactEstimate
+    }) {
+        context = Some(detail.as_tuple());
+        context_source = Some("transcript_compact");
+    }
+
+    // Priority 1: Use context_window from the modern hook schema unless a
+    // compact boundary made the hook's last usage sample stale.
+    if context.is_none() {
+        let ctx_win = &hook.context_window;
+        if let Some(ref usage) = ctx_win.current_usage {
+            // Context tokens: input-side only (matches CLI calculation).
+            // Output tokens don't count against the input context window.
+            let total_tokens = usage.input_tokens
+                + usage.cache_creation_input_tokens
+                + usage.cache_read_input_tokens;
+            if total_tokens > 0 {
+                context = Some((total_tokens, ctx_win.used_percentage.min(100)));
+                context_source = Some("hook");
+            }
         }
     }
 
-    // Priority 2: Parse transcript for usage (fallback for older Claude Code versions)
-    if context.is_none() {
-        context = calc_context_from_transcript(
-            Path::new(&hook.transcript_path),
-            &hook.model.id,
-            &hook.model.display_name,
-        );
+    // Priority 2: Parse transcript for usage only when the hook still has a
+    // live usage-bearing message. If the modern hook says current_usage is null,
+    // stale transcript samples should not resurrect pre-clear/pre-rewind context.
+    if context.is_none() && hook_has_live_context_usage {
+        context = transcript_context;
         if context.is_some() {
-            context_source = Some("transcript");
+            context_source = Some(
+                match transcript_context_detail.map(|detail| detail.source) {
+                    Some(claude_statusline::usage::TranscriptContextSource::CompactEstimate) => {
+                        "transcript_compact"
+                    }
+                    Some(claude_statusline::usage::TranscriptContextSource::ContextWarning) => {
+                        "transcript_warning"
+                    }
+                    _ => "transcript",
+                },
+            );
         }
     }
 
@@ -223,7 +257,7 @@ fn main() -> Result<()> {
         get_gastown_info(Path::new(gt_dir))
     };
 
-    // Hook ships context_window_size and lines added/removed on every 2.1.148+ payload.
+    // The modern hook schema ships context_window_size and lines added/removed.
     let context_limit_override =
         Some(hook.context_window.context_window_size).filter(|&size| size > 0);
 
@@ -410,8 +444,9 @@ fn main() -> Result<()> {
         cost: metrics.total_cost,
     };
 
-    // Fallback context from entries if transcript lacked usage
-    if context.is_none() {
+    // Fallback context from entries only when hook still has live usage; otherwise
+    // modern null current_usage means the visible message list has no usage sample.
+    if context.is_none() && hook_has_live_context_usage {
         context = calc_context_from_entries(
             &entries,
             &hook.session_id,
@@ -422,10 +457,6 @@ fn main() -> Result<()> {
             context_source = Some("entries");
         }
     }
-    // Note: Removed calc_context_from_any fallback - it returned stale data from
-    // previous sessions when starting a new session. Better to show no context
-    // than misleading data from a different session.
-
     if args.json {
         // Machine-readable output for statusline consumption
         // Compute per-subagent cost breakdown for this session

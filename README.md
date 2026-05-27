@@ -216,7 +216,6 @@ claude_statusline init [OPTIONS]
 | `--no-json-duration` | on | `session.duration_ms`, `api_duration_ms`, `cost_per_hour`, `lines_added`, `lines_removed` |
 | `--no-json-rate-limit` | on | top-level `rate_limit` object |
 | `--no-json-usage-limits` | on | top-level `usage_limits` object |
-| `--no-json-compat-aliases` | on | top-level `cwd`, `project_dir`, `fast_mode`, and `block` (clone of `window`) |
 
 ### Presets
 
@@ -353,7 +352,6 @@ tokens_breakdown = true
 duration = true
 rate_limit = true
 usage_limits = true
-compat_aliases = true
 ```
 
 ### Environment Variables
@@ -384,7 +382,7 @@ Pass `--json` for machine-readable output. Key fields:
 
 ```json
 {
-  "model": { "id": "claude-opus-4-6", "display_name": "Claude Opus 4.6" },
+  "model": { "id": "claude-opus-4-6", "display_name": "Claude Opus 4.6", "fast_mode": false },
   "workspace": {
     "current_dir": "/repo",
     "project_dir": "/repo",
@@ -449,7 +447,7 @@ Pass `--json` for machine-readable output. Key fields:
 }
 ```
 
-Full schema includes `provider`, `plan`, `reset_at`, `session.subagents`, `prompt_cache`, `provenance`, `git.remote_url`, `git.worktree_count`, `git.is_linked_worktree`, nested `workspace.*`, optional `remote.session_id`, and token breakdowns per window. Top-level `cwd` and `project_dir` remain as compatibility aliases. Fields are added over time; consumers should tolerate unknown keys.
+Full schema includes `provider`, `plan`, `reset_at`, `session.subagents`, `prompt_cache`, `provenance`, `git.remote_url`, `git.worktree_count`, `git.is_linked_worktree`, nested `workspace.*`, `model.fast_mode`, optional `remote.session_id`, and token breakdowns per window. Fields are added over time; consumers should tolerate unknown keys.
 
 ---
 

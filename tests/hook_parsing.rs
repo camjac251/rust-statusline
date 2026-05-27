@@ -1,8 +1,7 @@
 use claude_statusline::models::hook::HookJson;
 
-/// A minimum-shape hook payload that matches what Claude Code 2.1.148+ ships
-/// on every statusline invocation. Tests pull this in and extend it with the
-/// optional fields they care about.
+/// A minimum-shape payload for the modern Claude Code statusline hook schema.
+/// Tests pull this in and extend it with the optional fields they care about.
 const MINIMUM_HOOK: &str = r#"{
   "session_id": "sess-min",
   "transcript_path": "/tmp/transcript.jsonl",
@@ -12,7 +11,7 @@ const MINIMUM_HOOK: &str = r#"{
     "project_dir": "/tmp/project",
     "added_dirs": []
   },
-  "version": "2.1.148",
+  "version": "2.1.152",
   "output_style": { "name": "default" },
   "cost": {
     "total_cost_usd": 0.0,
@@ -35,11 +34,11 @@ const MINIMUM_HOOK: &str = r#"{
 }"#;
 
 #[test]
-fn parses_minimum_2_1_148_hook_payload() {
+fn parses_minimum_modern_hook_payload() {
     let hook: HookJson = serde_json::from_str(MINIMUM_HOOK).expect("minimum hook should parse");
     assert_eq!(hook.session_id, "sess-min");
     assert_eq!(hook.workspace.project_dir, "/tmp/project");
-    assert_eq!(hook.version, "2.1.148");
+    assert_eq!(hook.version, "2.1.152");
     assert_eq!(hook.output_style.name, "default");
     assert_eq!(hook.cost.total_cost_usd, 0.0);
     assert_eq!(hook.context_window.context_window_size, 200000);
@@ -51,7 +50,22 @@ fn parses_minimum_2_1_148_hook_payload() {
 }
 
 #[test]
-fn parses_claude_code_2113_extras() {
+fn parses_null_context_percentages_between_api_calls() {
+    let payload = MINIMUM_HOOK
+        .replace("\"used_percentage\": 0", "\"used_percentage\": null")
+        .replace(
+            "\"remaining_percentage\": 100",
+            "\"remaining_percentage\": null",
+        );
+    let hook: HookJson =
+        serde_json::from_str(&payload).expect("null context percentages should parse");
+
+    assert_eq!(hook.context_window.used_percentage, 0);
+    assert_eq!(hook.context_window.remaining_percentage, 0);
+}
+
+#[test]
+fn parses_modern_hook_workspace_and_remote_extras() {
     let hook: HookJson = serde_json::from_str(
         r#"{
           "session_id": "sess-1",
@@ -63,7 +77,7 @@ fn parses_claude_code_2113_extras() {
             "added_dirs": ["/tmp/project/docs", "/tmp/project/scripts"],
             "git_worktree": "feature/footer"
           },
-          "version": "2.1.13",
+          "version": "2.1.152",
           "output_style": { "name": "default" },
           "cost": {
             "total_cost_usd": 0.0,
@@ -103,10 +117,10 @@ fn parses_claude_code_2113_extras() {
 }
 
 #[test]
-fn parses_claude_code_2_1_128_reporting_fields() {
+fn parses_modern_hook_reporting_fields() {
     let hook: HookJson = serde_json::from_str(
         r#"{
-          "session_id": "sess-2128",
+          "session_id": "sess-reporting",
           "transcript_path": "/tmp/transcript.jsonl",
           "model": { "id": "claude-opus-4-6", "display_name": "Opus 4.6" },
           "workspace": {
@@ -114,7 +128,7 @@ fn parses_claude_code_2_1_128_reporting_fields() {
             "project_dir": "/tmp/project",
             "added_dirs": []
           },
-          "version": "2.1.128",
+          "version": "2.1.152",
           "output_style": { "name": "default" },
           "cost": {
             "total_cost_usd": 1.23,
@@ -146,7 +160,7 @@ fn parses_claude_code_2_1_128_reporting_fields() {
           }
         }"#,
     )
-    .expect("2.1.128 hook should parse");
+    .expect("modern hook should parse");
 
     assert!(hook.fast_mode);
     assert_eq!(hook.cost.total_cost_usd, 1.23);
@@ -168,10 +182,10 @@ fn parses_claude_code_2_1_128_reporting_fields() {
 }
 
 #[test]
-fn rejects_payloads_missing_required_fields() {
+fn rejects_payloads_missing_modern_required_fields() {
     let result: Result<HookJson, _> = serde_json::from_str(
         r#"{
-          "session_id": "sess-legacy",
+          "session_id": "sess-sparse",
           "transcript_path": "/tmp/transcript.jsonl",
           "model": { "id": "x", "display_name": "x" },
           "workspace": { "current_dir": "/tmp/p", "project_dir": "/tmp/p" }
@@ -179,6 +193,6 @@ fn rejects_payloads_missing_required_fields() {
     );
     assert!(
         result.is_err(),
-        "payload missing 2.1.148-required fields must fail to parse"
+        "payload missing modern required statusline fields must fail to parse"
     );
 }

@@ -68,7 +68,6 @@ struct JsonToggleHealth {
     duration: bool,
     rate_limit: bool,
     usage_limits: bool,
-    compat_aliases: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -176,7 +175,6 @@ fn build_report(args: &Args) -> Result<DoctorReport> {
         duration: !args.no_json_duration,
         rate_limit: !args.no_json_rate_limit,
         usage_limits: !args.no_json_usage_limits,
-        compat_aliases: !args.no_json_compat_aliases,
     };
 
     Ok(DoctorReport {
@@ -284,13 +282,12 @@ fn print_report(report: &DoctorReport) {
         report.display_opt_in.integrations_prompt_cache_enabled
     );
     println!(
-        "json: subagents={} tokens_breakdown={} duration={} rate_limit={} usage_limits={} compat_aliases={}",
+        "json: subagents={} tokens_breakdown={} duration={} rate_limit={} usage_limits={}",
         report.json_settings.subagents,
         report.json_settings.tokens_breakdown,
         report.json_settings.duration,
         report.json_settings.rate_limit,
-        report.json_settings.usage_limits,
-        report.json_settings.compat_aliases
+        report.json_settings.usage_limits
     );
 }
 

@@ -166,13 +166,6 @@ fn json_toggles_default_to_enabled() {
     assert!(!args.no_json_duration);
     assert!(!args.no_json_rate_limit);
     assert!(!args.no_json_usage_limits);
-    assert!(!args.no_json_compat_aliases);
-}
-
-#[test]
-fn no_json_compat_aliases_cli() {
-    let args = Args::parse_effective_from(["claude_statusline", "--no-json-compat-aliases"]);
-    assert!(args.no_json_compat_aliases);
 }
 
 #[test]
@@ -188,7 +181,6 @@ fn json_toggles_via_config() {
         duration = false
         rate_limit = false
         usage_limits = false
-        compat_aliases = false
         "#,
     )
     .expect("write config");
@@ -203,5 +195,4 @@ fn json_toggles_via_config() {
     assert!(args.no_json_duration);
     assert!(args.no_json_rate_limit);
     assert!(args.no_json_usage_limits);
-    assert!(args.no_json_compat_aliases);
 }

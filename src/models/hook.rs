@@ -20,7 +20,7 @@ pub struct OutputStyle {
     pub name: String,
 }
 
-/// Aggregate cost summary emitted unconditionally by Claude Code 2.1.148+
+/// Aggregate cost summary from the modern Claude Code statusline hook schema.
 #[derive(Deserialize, Debug)]
 pub struct HookCost {
     pub total_cost_usd: f64,
@@ -39,16 +39,25 @@ pub struct HookCurrentUsage {
     pub cache_read_input_tokens: u64,
 }
 
-/// Context window information emitted unconditionally by Claude Code 2.1.148+.
+fn null_u32_as_zero<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u32>::deserialize(deserializer)?.unwrap_or(0))
+}
+
+/// Context window information from the modern Claude Code statusline hook schema.
 ///
-/// `current_usage` is null between API calls; everything else is always populated.
+/// `current_usage` and its percentages are null between API calls.
 #[derive(Deserialize, Debug)]
 pub struct HookContextWindow {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub context_window_size: u64,
     pub current_usage: Option<HookCurrentUsage>,
+    #[serde(default, deserialize_with = "null_u32_as_zero")]
     pub used_percentage: u32,
+    #[serde(default, deserialize_with = "null_u32_as_zero")]
     pub remaining_percentage: u32,
 }
 
@@ -67,13 +76,13 @@ pub struct HookRateLimits {
 }
 
 /// Reasoning effort information. Only emitted when the active model exposes
-/// the effort capability (cli.js gates this on `GW(model)`).
+/// the effort capability.
 #[derive(Deserialize, Debug, Clone)]
 pub struct HookEffort {
     pub level: String,
 }
 
-/// Extended thinking state emitted unconditionally by Claude Code 2.1.148+.
+/// Extended thinking state from the modern Claude Code statusline hook schema.
 #[derive(Deserialize, Debug, Clone)]
 pub struct HookThinking {
     pub enabled: bool,
@@ -117,9 +126,9 @@ pub struct HookJson {
     pub workspace: HookWorkspace,
     pub version: String,
     pub output_style: OutputStyle,
-    /// Aggregate session cost emitted unconditionally by Claude Code 2.1.148+.
+    /// Aggregate session cost from the modern Claude Code statusline hook schema.
     pub cost: HookCost,
-    /// Context window snapshot emitted unconditionally by Claude Code 2.1.148+.
+    /// Context window snapshot from the modern Claude Code statusline hook schema.
     pub context_window: HookContextWindow,
     /// True when cumulative input tokens crossed Sonnet's 200k long-context tier.
     pub exceeds_200k_tokens: bool,

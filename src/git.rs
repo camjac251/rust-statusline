@@ -38,10 +38,10 @@ pub fn read_git_info(start_dir: &Path) -> Option<GitInfo> {
         Err(_) => info.is_clean = None,
     }
 
-    // Remote URL from config
+    // Sanitized remote URL from config
     let cfg = repo.config_snapshot();
     if let Some(url) = cfg.string("remote.origin.url") {
-        info.remote_url = Some(url.to_string());
+        info.remote_url = sanitize_remote_url(&url.to_string());
     }
 
     // Worktree count (primary + linked) and detect if current is a linked worktree
@@ -107,4 +107,58 @@ pub fn read_git_info(start_dir: &Path) -> Option<GitInfo> {
         }
     }
     Some(info)
+}
+
+fn sanitize_remote_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.starts_with('/') || trimmed.starts_with("~/") {
+        return None;
+    }
+
+    let Some((scheme, rest)) = trimmed.split_once("://") else {
+        return Some(trimmed.to_string());
+    };
+
+    if scheme.eq_ignore_ascii_case("file") {
+        return None;
+    }
+
+    let sanitized_rest = rest
+        .rsplit_once('@')
+        .map_or(rest, |(_, host_path)| host_path);
+    Some(format!("{scheme}://{sanitized_rest}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_remote_url;
+
+    #[test]
+    fn remote_url_sanitizer_removes_userinfo() {
+        assert_eq!(
+            sanitize_remote_url("https://name:opaque@example.com/org/repo.git"),
+            Some("https://example.com/org/repo.git".to_string())
+        );
+    }
+
+    #[test]
+    fn remote_url_sanitizer_keeps_ssh_style_remotes() {
+        assert_eq!(
+            sanitize_remote_url("git@example.com:org/repo.git"),
+            Some("git@example.com:org/repo.git".to_string())
+        );
+    }
+
+    #[test]
+    fn remote_url_sanitizer_omits_local_paths() {
+        assert_eq!(sanitize_remote_url("/var/git/example/repo.git"), None);
+        assert_eq!(
+            sanitize_remote_url("file:///var/git/example/repo.git"),
+            None
+        );
+    }
 }

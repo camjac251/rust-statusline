@@ -122,15 +122,12 @@ fn json_output_shape_minimal() {
     // High-level keys exist
     for key in [
         "model",
-        "cwd",
-        "project_dir",
         "version",
         "workspace",
         "provider",
         "reset_at",
         "session",
         "today",
-        "block",
         "window",
         "context",
         "git",
@@ -142,11 +139,8 @@ fn json_output_shape_minimal() {
     assert_eq!(json["model"]["id"], "claude-3.5-sonnet");
     assert_eq!(json["model"]["display_name"], "Claude 3.5 Sonnet");
     assert_eq!(json["model"]["fast_mode"], true);
-    assert_eq!(json["fast_mode"], true);
     assert_eq!(json["effort"], "high");
     assert_eq!(json["thinking"]["enabled"], false);
-    assert_eq!(json["cwd"], "/tmp/project");
-    assert_eq!(json["project_dir"], "/tmp/project");
     assert_eq!(json["workspace"]["current_dir"], "/tmp/project");
     assert_eq!(json["workspace"]["project_dir"], "/tmp/project");
     assert_eq!(json["workspace"]["git_worktree"], "feature-footer");
@@ -155,6 +149,10 @@ fn json_output_shape_minimal() {
         "/tmp/project/packages/docs"
     );
     assert_eq!(json["remote"]["session_id"], "remote-123");
+    assert!(json.get("cwd").is_none());
+    assert!(json.get("project_dir").is_none());
+    assert!(json.get("fast_mode").is_none());
+    assert!(json.get("block").is_none());
 
     // Basic numeric fields exist and are numbers
     assert!(json["session"]["cost_usd"].is_number());

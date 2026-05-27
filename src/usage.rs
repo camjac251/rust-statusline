@@ -258,6 +258,120 @@ fn json_number_as_f64(value: Option<&Value>) -> f64 {
     value.and_then(|n| n.as_f64()).unwrap_or(0.0)
 }
 
+fn transcript_text_token_estimate(text: &str) -> u64 {
+    text.chars().count().div_ceil(4) as u64
+}
+
+fn estimate_transcript_value_tokens(value: &Value) -> u64 {
+    match value {
+        Value::String(text) => transcript_text_token_estimate(text),
+        Value::Array(items) => items.iter().map(estimate_transcript_value_tokens).sum(),
+        Value::Object(map) => map
+            .iter()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.as_str(),
+                    "id" | "uuid"
+                        | "parentUuid"
+                        | "logicalParentUuid"
+                        | "timestamp"
+                        | "sessionId"
+                        | "type"
+                        | "subtype"
+                        | "role"
+                        | "level"
+                        | "isMeta"
+                        | "isCompactSummary"
+                        | "isVisibleInTranscriptOnly"
+                )
+            })
+            .map(|(_, value)| estimate_transcript_value_tokens(value))
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn estimate_transcript_content_tokens(value: &Value) -> u64 {
+    match value {
+        Value::String(text) => transcript_text_token_estimate(text),
+        Value::Array(items) => items.iter().map(estimate_transcript_content_tokens).sum(),
+        Value::Object(map) => {
+            let mut total = 0;
+            if let Some(text) = map.get("text").and_then(|v| v.as_str()) {
+                total += transcript_text_token_estimate(text);
+            }
+            if let Some(content) = map.get("content") {
+                total += estimate_transcript_content_tokens(content);
+            }
+            if let Some(result) = map.get("toolUseResult").and_then(|v| v.as_str()) {
+                total += transcript_text_token_estimate(result);
+            }
+            total
+        }
+        _ => 0,
+    }
+}
+
+fn estimate_transcript_message_tokens(value: &Value) -> u64 {
+    let mut total = 0;
+
+    if let Some(content) = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+    {
+        total += estimate_transcript_content_tokens(content);
+    }
+
+    if let Some(tool_use_result) = value.get("toolUseResult") {
+        total += estimate_transcript_value_tokens(tool_use_result);
+    }
+
+    if value.get("type").and_then(|entry_type| entry_type.as_str()) == Some("attachment") {
+        if let Some(attachment) = value.get("attachment") {
+            total += estimate_transcript_value_tokens(attachment);
+        }
+    }
+
+    total
+}
+
+fn context_pct(tokens: u64, budget: u64) -> u32 {
+    let pct = if budget == 0 {
+        if tokens == 0 { 0 } else { 100 }
+    } else {
+        ((tokens as f64 / budget as f64) * 100.0).round() as u32
+    };
+    pct.min(100)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranscriptContextSource {
+    ApiUsage,
+    CompactEstimate,
+    ContextWarning,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TranscriptContext {
+    pub tokens: u64,
+    pub percent: u32,
+    pub source: TranscriptContextSource,
+}
+
+impl TranscriptContext {
+    fn new(tokens: u64, percent: u32, source: TranscriptContextSource) -> Self {
+        Self {
+            tokens,
+            percent,
+            source,
+        }
+    }
+
+    pub fn as_tuple(self) -> (u64, u32) {
+        (self.tokens, self.percent)
+    }
+}
+
 // Helper: detect reset time from assistant text like "... limit reached ... resets 5am" with DST correction
 static ASSISTANT_LIMIT_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)limit\s+reached.*resets\s+(\d{1,2})\s*(am|pm)").unwrap());
@@ -366,6 +480,15 @@ pub fn calc_context_from_transcript(
     model_id: &str,
     model_display_name: &str,
 ) -> Option<(u64, u32)> {
+    calc_context_from_transcript_detail(transcript_path, model_id, model_display_name)
+        .map(TranscriptContext::as_tuple)
+}
+
+pub fn calc_context_from_transcript_detail(
+    transcript_path: &Path,
+    model_id: &str,
+    model_display_name: &str,
+) -> Option<TranscriptContext> {
     // Stream the file line-by-line to avoid loading entire transcripts into memory.
     // Keep the last assistant message with usage; context uses input-side tokens
     // only, matching Claude Code's statusLine hook calculation.
@@ -373,6 +496,7 @@ pub fn calc_context_from_transcript(
     let reader = BufReader::new(file);
     let mut last_total_in: Option<u64> = None;
     let mut context_warning_pct: Option<u32> = None;
+    let mut post_compact_estimate: Option<u64> = None;
 
     for line in reader.lines() {
         let line = match line {
@@ -386,6 +510,36 @@ pub fn calc_context_from_transcript(
 
         // First try to parse as JSON
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(t) {
+            let entry_type = parsed.get("type").and_then(|v| v.as_str());
+            let subtype = parsed.get("subtype").and_then(|v| v.as_str());
+
+            if entry_type == Some("system") && subtype == Some("compact_boundary") {
+                last_total_in = None;
+                context_warning_pct = None;
+                post_compact_estimate = Some(0);
+                continue;
+            }
+
+            if entry_type == Some("system") && subtype == Some("microcompact_boundary") {
+                if let Some(tokens_saved) = parsed
+                    .get("microcompactMetadata")
+                    .and_then(|metadata| metadata.get("tokensSaved"))
+                    .and_then(|tokens| tokens.as_u64())
+                {
+                    if let Some(total_in) = last_total_in.as_mut() {
+                        *total_in = total_in.saturating_sub(tokens_saved);
+                    }
+                    if let Some(estimate) = post_compact_estimate.as_mut() {
+                        *estimate = estimate.saturating_sub(tokens_saved);
+                    }
+                }
+                continue;
+            }
+
+            if let Some(estimate) = post_compact_estimate.as_mut() {
+                *estimate += estimate_transcript_message_tokens(&parsed);
+            }
+
             // Check for system messages with context warnings
             if parsed.get("type").and_then(|v| v.as_str()) == Some("system_message") {
                 if let Some(content) = parsed.get("content").and_then(|v| v.as_str()) {
@@ -423,30 +577,43 @@ pub fn calc_context_from_transcript(
                         + usage.cache_read_input_tokens.unwrap_or(0);
                     if total_in > 0 {
                         last_total_in = Some(total_in);
+                        post_compact_estimate = None;
                     }
                 }
             }
         }
     }
 
-    // Prefer token-based calculation if available, fall back to context warning
+    // Prefer token-based calculation if available, fall back to a compact-summary
+    // estimate, then to context-warning text.
     let budget = context_limit_for_model_display(model_id, model_display_name);
     if let Some(total_in) = last_total_in {
         let overhead = system_overhead_tokens();
         let adjusted = total_in.saturating_add(overhead);
-        let pct = if budget == 0 {
-            if adjusted == 0 { 0 } else { 100 }
-        } else {
-            ((adjusted as f64 / budget as f64) * 100.0).round() as u32
-        };
-        Some((adjusted, pct.min(100)))
+        Some(TranscriptContext::new(
+            adjusted,
+            context_pct(adjusted, budget),
+            TranscriptContextSource::ApiUsage,
+        ))
+    } else if let Some(estimated) = post_compact_estimate {
+        let overhead = system_overhead_tokens();
+        let adjusted = estimated.saturating_add(overhead);
+        Some(TranscriptContext::new(
+            adjusted,
+            context_pct(adjusted, budget),
+            TranscriptContextSource::CompactEstimate,
+        ))
     } else if let Some(warning_pct) = context_warning_pct {
         let estimated_tokens = if budget == 0 {
             0
         } else {
             ((warning_pct as f64 / 100.0) * budget as f64).round() as u64
         };
-        Some((estimated_tokens, warning_pct.min(100)))
+        Some(TranscriptContext::new(
+            estimated_tokens,
+            warning_pct.min(100),
+            TranscriptContextSource::ContextWarning,
+        ))
     } else {
         None
     }
@@ -1652,8 +1819,16 @@ mod tests {
 
         let context =
             calc_context_from_transcript(&transcript, "claude-3-5-sonnet", "Claude 3.5 Sonnet");
+        let detail = calc_context_from_transcript_detail(
+            &transcript,
+            "claude-3-5-sonnet",
+            "Claude 3.5 Sonnet",
+        )
+        .expect("context detail");
 
         assert_eq!(context, Some((6000, 3)));
+        assert_eq!(detail.as_tuple(), (6000, 3));
+        assert_eq!(detail.source, TranscriptContextSource::ApiUsage);
         unsafe {
             env::remove_var("CLAUDE_CONTEXT_LIMIT");
             env::remove_var("CLAUDE_SYSTEM_OVERHEAD");
@@ -1699,6 +1874,326 @@ mod tests {
             env::remove_var("CLAUDE_CONTEXT_LIMIT");
             env::remove_var("CLAUDE_SYSTEM_OVERHEAD");
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn calc_context_from_transcript_uses_compact_summary_after_boundary() -> Result<()> {
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe {
+            env::set_var("CLAUDE_CONTEXT_LIMIT", "200000");
+            env::set_var("CLAUDE_SYSTEM_OVERHEAD", "0");
+        }
+        let dir = tempdir()?;
+        let transcript = dir.path().join("compact-context.jsonl");
+        let pre_compact_usage = json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "usage": {
+                    "input_tokens": 150000,
+                    "output_tokens": 1000,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+        let boundary = json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "content": "Conversation compacted",
+            "compactMetadata": { "preTokens": 150000 }
+        });
+        let summary = json!({
+            "type": "user",
+            "isCompactSummary": true,
+            "message": {
+                "role": "user",
+                "content": "a".repeat(8000)
+            }
+        });
+        fs::write(
+            &transcript,
+            format!("{}\n{}\n{}\n", pre_compact_usage, boundary, summary),
+        )?;
+
+        let context =
+            calc_context_from_transcript(&transcript, "claude-3-5-sonnet", "Claude 3.5 Sonnet");
+        let detail = calc_context_from_transcript_detail(
+            &transcript,
+            "claude-3-5-sonnet",
+            "Claude 3.5 Sonnet",
+        )
+        .expect("context detail");
+
+        assert_eq!(context, Some((2000, 1)));
+        assert_eq!(detail.as_tuple(), (2000, 1));
+        assert_eq!(detail.source, TranscriptContextSource::CompactEstimate);
+        unsafe {
+            env::remove_var("CLAUDE_CONTEXT_LIMIT");
+            env::remove_var("CLAUDE_SYSTEM_OVERHEAD");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn calc_context_from_transcript_counts_post_compact_attachments() -> Result<()> {
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe {
+            env::set_var("CLAUDE_CONTEXT_LIMIT", "200000");
+            env::set_var("CLAUDE_SYSTEM_OVERHEAD", "0");
+        }
+        let dir = tempdir()?;
+        let transcript = dir.path().join("compact-attachment-context.jsonl");
+        let boundary = json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "content": "Conversation compacted",
+            "compactMetadata": { "preTokens": 150000 }
+        });
+        let summary = json!({
+            "type": "user",
+            "isCompactSummary": true,
+            "message": {
+                "role": "user",
+                "content": "a".repeat(4000)
+            }
+        });
+        let attachment = json!({
+            "type": "attachment",
+            "attachment": {
+                "type": "critical_system_reminder",
+                "content": "b".repeat(4000)
+            }
+        });
+        fs::write(
+            &transcript,
+            format!("{}\n{}\n{}\n", boundary, summary, attachment),
+        )?;
+
+        let detail = calc_context_from_transcript_detail(
+            &transcript,
+            "claude-3-5-sonnet",
+            "Claude 3.5 Sonnet",
+        )
+        .expect("context detail");
+
+        assert_eq!(detail.as_tuple(), (2000, 1));
+        assert_eq!(detail.source, TranscriptContextSource::CompactEstimate);
+        unsafe {
+            env::remove_var("CLAUDE_CONTEXT_LIMIT");
+            env::remove_var("CLAUDE_SYSTEM_OVERHEAD");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn calc_context_from_transcript_keeps_zero_compact_estimate() -> Result<()> {
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe {
+            env::set_var("CLAUDE_CONTEXT_LIMIT", "200000");
+            env::set_var("CLAUDE_SYSTEM_OVERHEAD", "0");
+        }
+        let dir = tempdir()?;
+        let transcript = dir.path().join("zero-compact-context.jsonl");
+        let pre_compact_usage = json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "usage": {
+                    "input_tokens": 150000,
+                    "output_tokens": 1000,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+        let boundary = json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "content": "Conversation compacted",
+            "compactMetadata": { "preTokens": 150000 }
+        });
+        fs::write(
+            &transcript,
+            format!("{}\n{}\n", pre_compact_usage, boundary),
+        )?;
+
+        let detail = calc_context_from_transcript_detail(
+            &transcript,
+            "claude-3-5-sonnet",
+            "Claude 3.5 Sonnet",
+        )
+        .expect("context detail");
+
+        assert_eq!(detail.as_tuple(), (0, 0));
+        assert_eq!(detail.source, TranscriptContextSource::CompactEstimate);
+        unsafe {
+            env::remove_var("CLAUDE_CONTEXT_LIMIT");
+            env::remove_var("CLAUDE_SYSTEM_OVERHEAD");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn calc_context_from_transcript_applies_microcompact_to_compact_estimate() -> Result<()> {
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe {
+            env::set_var("CLAUDE_CONTEXT_LIMIT", "200000");
+            env::set_var("CLAUDE_SYSTEM_OVERHEAD", "0");
+        }
+        let dir = tempdir()?;
+        let transcript = dir.path().join("compact-estimate-microcompact.jsonl");
+        let boundary = json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "content": "Conversation compacted",
+            "compactMetadata": { "preTokens": 150000 }
+        });
+        let summary = json!({
+            "type": "user",
+            "isCompactSummary": true,
+            "message": {
+                "role": "user",
+                "content": "a".repeat(8000)
+            }
+        });
+        let microcompact = json!({
+            "type": "system",
+            "subtype": "microcompact_boundary",
+            "content": "Context microcompacted",
+            "microcompactMetadata": { "tokensSaved": 500 }
+        });
+        fs::write(
+            &transcript,
+            format!("{}\n{}\n{}\n", boundary, summary, microcompact),
+        )?;
+
+        let detail = calc_context_from_transcript_detail(
+            &transcript,
+            "claude-3-5-sonnet",
+            "Claude 3.5 Sonnet",
+        )
+        .expect("context detail");
+
+        assert_eq!(detail.as_tuple(), (1500, 1));
+        assert_eq!(detail.source, TranscriptContextSource::CompactEstimate);
+        unsafe {
+            env::remove_var("CLAUDE_CONTEXT_LIMIT");
+            env::remove_var("CLAUDE_SYSTEM_OVERHEAD");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn calc_context_from_transcript_prefers_post_compact_api_usage() -> Result<()> {
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe {
+            env::set_var("CLAUDE_CONTEXT_LIMIT", "200000");
+            env::set_var("CLAUDE_SYSTEM_OVERHEAD", "0");
+        }
+        let dir = tempdir()?;
+        let transcript = dir.path().join("post-compact-context.jsonl");
+        let pre_compact_usage = json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "usage": {
+                    "input_tokens": 150000,
+                    "output_tokens": 1000,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+        let boundary = json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "content": "Conversation compacted",
+            "compactMetadata": { "preTokens": 150000 }
+        });
+        let summary = json!({
+            "type": "user",
+            "isCompactSummary": true,
+            "message": {
+                "role": "user",
+                "content": "a".repeat(8000)
+            }
+        });
+        let post_compact_usage = json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "usage": {
+                    "input_tokens": 9000,
+                    "output_tokens": 1000,
+                    "cache_creation_input_tokens": 500,
+                    "cache_read_input_tokens": 500
+                }
+            }
+        });
+        fs::write(
+            &transcript,
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                pre_compact_usage, boundary, summary, post_compact_usage
+            ),
+        )?;
+
+        let context =
+            calc_context_from_transcript(&transcript, "claude-3-5-sonnet", "Claude 3.5 Sonnet");
+
+        assert_eq!(context, Some((10000, 5)));
+        unsafe {
+            env::remove_var("CLAUDE_CONTEXT_LIMIT");
+            env::remove_var("CLAUDE_SYSTEM_OVERHEAD");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn calc_context_from_transcript_applies_microcompact_savings() -> Result<()> {
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe {
+            env::set_var("CLAUDE_CONTEXT_LIMIT", "200000");
+            env::set_var("CLAUDE_SYSTEM_OVERHEAD", "0");
+        }
+        let dir = tempdir()?;
+        let transcript = dir.path().join("microcompact-context.jsonl");
+        let usage = json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "usage": {
+                    "input_tokens": 100000,
+                    "output_tokens": 1000,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+        let boundary = json!({
+            "type": "system",
+            "subtype": "microcompact_boundary",
+            "content": "Context microcompacted",
+            "microcompactMetadata": { "tokensSaved": 20000 }
+        });
+        fs::write(&transcript, format!("{}\n{}\n", usage, boundary))?;
+
+        let context =
+            calc_context_from_transcript(&transcript, "claude-3-5-sonnet", "Claude 3.5 Sonnet");
+
+        assert_eq!(context, Some((80000, 40)));
+        unsafe {
+            env::remove_var("CLAUDE_CONTEXT_LIMIT");
+            env::remove_var("CLAUDE_SYSTEM_OVERHEAD");
+        }
+        Ok(())
     }
 
     #[test]

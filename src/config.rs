@@ -42,7 +42,6 @@ pub struct JsonFileConfig {
     pub duration: Option<bool>,
     pub rate_limit: Option<bool>,
     pub usage_limits: Option<bool>,
-    pub compat_aliases: Option<bool>,
 }
 
 /// Display.* atomic toggles. All values use positive semantics:
@@ -440,12 +439,6 @@ fn apply_config(args: &mut Args, matches: &clap::ArgMatches, config: &FileConfig
         config.json_settings.usage_limits,
         &mut args.no_json_usage_limits,
     );
-    apply_display_toggle(
-        matches,
-        "no_json_compat_aliases",
-        config.json_settings.compat_aliases,
-        &mut args.no_json_compat_aliases,
-    );
     if !arg_was_user_set(matches, "burn_scope") {
         if let Some(value) = config.burn_scope {
             args.burn_scope = value;
@@ -764,7 +757,6 @@ fn parse_config_str(input: &str) -> Result<FileConfig> {
             "json.duration" => config.json_settings.duration = Some(parse_bool(value)?),
             "json.rate_limit" => config.json_settings.rate_limit = Some(parse_bool(value)?),
             "json.usage_limits" => config.json_settings.usage_limits = Some(parse_bool(value)?),
-            "json.compat_aliases" => config.json_settings.compat_aliases = Some(parse_bool(value)?),
             _ => {}
         }
     }
@@ -778,12 +770,11 @@ fn normalize_key(section: &str, key: &str) -> String {
         normalized
     } else {
         let with_section = format!("{}.{}", section, normalized);
-        // Strip [display] and [statusline] section prefixes for backwards-compat
-        // (those sections were previously flat). Sections that carry meaning
+        // Strip [display] so flat display keys and documented nested display
+        // sections share the same match arms. Sections that carry meaning
         // (e.g. [subsystems]) keep their dotted prefix.
         with_section
             .strip_prefix("display.")
-            .or_else(|| with_section.strip_prefix("statusline."))
             .unwrap_or(&with_section)
             .to_string()
     }

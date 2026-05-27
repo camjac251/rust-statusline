@@ -395,14 +395,6 @@ pub struct Args {
         env = "CLAUDE_STATUSLINE_JSON_NO_USAGE_LIMITS"
     )]
     pub no_json_usage_limits: bool,
-    /// Omit compatibility aliases: top-level cwd, project_dir, fast_mode, and `block` (duplicate of `window`)
-    #[arg(
-        long = "no-json-compat-aliases",
-        global = true,
-        env = "CLAUDE_STATUSLINE_JSON_NO_COMPAT_ALIASES"
-    )]
-    pub no_json_compat_aliases: bool,
-
     /// Burn scope: session|global (default: session)
     #[arg(long, value_enum, default_value_t = BurnScopeArg::Session)]
     pub burn_scope: BurnScopeArg,

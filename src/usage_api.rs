@@ -1,5 +1,4 @@
 use chrono::{DateTime, Utc};
-use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
@@ -285,28 +284,6 @@ fn find_oauth_token(claude_paths: &[PathBuf]) -> Option<String> {
     for base_path in claude_paths {
         let credentials_path = base_path.join(".credentials.json");
         if let Ok(raw) = fs::read_to_string(&credentials_path) {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if let Some(access) = json
-                    .get("claudeAiOauth")
-                    .and_then(|v| v.get("accessToken"))
-                    .and_then(|v| v.as_str())
-                {
-                    let trimmed = access.trim().to_string();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed);
-                    }
-                }
-            }
-        }
-    }
-
-    // Fallback to legacy hardcoded path for backwards compatibility
-    if let Some(base_dirs) = BaseDirs::new() {
-        let credentials_path = base_dirs
-            .home_dir()
-            .join(".claude")
-            .join(".credentials.json");
-        if let Ok(raw) = fs::read_to_string(credentials_path) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
                 if let Some(access) = json
                     .get("claudeAiOauth")

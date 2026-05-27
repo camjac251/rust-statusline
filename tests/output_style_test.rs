@@ -41,7 +41,7 @@ fn test_output_style_in_json() {
             added_dirs: Vec::new(),
             git_worktree: None,
         },
-        version: "1.0.0".to_string(),
+        version: "2.1.152".to_string(),
         output_style: OutputStyle {
             name: "verbose".to_string(),
         },
@@ -122,7 +122,7 @@ fn test_output_style_in_json() {
             added_dirs: Vec::new(),
             git_worktree: None,
         },
-        version: "1.0.0".to_string(),
+        version: "2.1.152".to_string(),
         output_style: OutputStyle {
             name: "default".to_string(),
         },
@@ -185,7 +185,7 @@ fn test_output_style_in_json() {
         None,  // prompt_cache
     );
 
-    // output_style is always present on 2.1.148; "default" is the empty-state name.
+    // The modern hook schema always includes output_style; "default" is the empty-state name.
     assert_eq!(json_no_style["output_style"]["name"], "default");
 }
 
@@ -207,7 +207,7 @@ fn test_multiple_output_styles() {
                 added_dirs: Vec::new(),
                 git_worktree: None,
             },
-            version: "1.0.0".to_string(),
+            version: "2.1.152".to_string(),
             output_style: OutputStyle {
                 name: style_name.to_string(),
             },

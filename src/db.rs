@@ -768,10 +768,6 @@ fn upsert_session(
     Ok(())
 }
 
-fn stable_session_key(session_id: &str) -> String {
-    session_id.to_string()
-}
-
 fn logical_session_id(session_key: &str) -> &str {
     session_key
         .split_once(':')
@@ -1446,7 +1442,7 @@ pub fn get_global_usage(
     // DB cache enable/disable is gated by the caller (subsystems.db_cache).
     // No env-var check here; the caller is the single point of truth.
     let conn = open_db()?;
-    let session_key = stable_session_key(session_id);
+    let session_key = session_id.to_string();
     let today = Local::now().format("%Y-%m-%d").to_string();
 
     let metadata = fs::metadata(transcript_path)?;

@@ -1541,7 +1541,7 @@ mod tests {
                 added_dirs: added_dirs.into_iter().map(str::to_string).collect(),
                 git_worktree: git_worktree.map(str::to_string),
             },
-            version: "2.1.148".to_string(),
+            version: "2.1.152".to_string(),
             output_style: OutputStyle {
                 name: "default".to_string(),
             },
@@ -1676,12 +1676,12 @@ mod tests {
 
     #[test]
     fn short_rich_header_hides_redundant_workspace_noise() {
-        let mut hook = test_hook(vec!["/tmp/project"], Some("fix+voyageai-rate-limit-retry"));
+        let mut hook = test_hook(vec!["/tmp/project"], Some("topic+sample-worktree"));
         hook.workspace.current_dir =
-            "/tmp/project/.claude/worktrees/fix+voyageai-rate-limit-retry".to_string();
+            "/tmp/project/.claude/worktrees/topic+sample-worktree".to_string();
 
         let git_info = GitInfo {
-            branch: Some("fix/voyageai-rate-limit-retry".to_string()),
+            branch: Some("topic/sample-worktree".to_string()),
             short_commit: Some("abc1234".to_string()),
             is_clean: Some(false),
             ahead: Some(3),
@@ -1887,7 +1887,7 @@ pub fn build_json_output(
         .unwrap_or_else(|| deduce_provider_from_model(&hook.model.id).to_string());
 
     let reset_iso = latest_reset.map(|d| d.to_rfc3339());
-    // Hook ships an authoritative fast_mode flag on every 2.1.148 payload;
+    // The modern hook schema ships an authoritative fast_mode flag;
     // is_fast_mode (transcript-derived) is retained as a defensive OR for any
     // mid-turn divergence between transcript signals and the hook snapshot.
     let fast_mode = hook.fast_mode || is_fast_mode;
@@ -1984,7 +1984,7 @@ pub fn build_json_output(
         "cost_per_hour": (cost_per_hour * 100.0).round()/100.0,
     });
 
-    // Hook ships these aggregates on every 2.1.148 payload.
+    // The modern hook schema ships these aggregate session fields.
     let cost = &hook.cost;
     let sess_duration_ms = cost.total_duration_ms;
     let sess_api_ms = cost.total_api_duration_ms;
@@ -2020,9 +2020,6 @@ pub fn build_json_output(
             "display_name": hook.model.display_name.clone(),
             "fast_mode": fast_mode,
         },
-        "fast_mode": fast_mode,
-        "cwd": hook.workspace.current_dir.clone(),
-        "project_dir": hook.workspace.project_dir.clone(),
         "workspace": {
             "current_dir": hook.workspace.current_dir.clone(),
             "project_dir": hook.workspace.project_dir.clone(),
@@ -2060,7 +2057,6 @@ pub fn build_json_output(
             "cost_source": cost_provenance.map(|p| p.today_cost.as_str()),
             "sessions_count": sessions_count
         },
-        "block": block_json.clone(),
         "window": block_json,
         "context": {
             "tokens": ctx_tokens,
@@ -2212,12 +2208,6 @@ fn apply_json_toggles(json: &mut serde_json::Value, args: &Args) {
     let Some(obj) = json.as_object_mut() else {
         return;
     };
-    if args.no_json_compat_aliases {
-        obj.remove("cwd");
-        obj.remove("project_dir");
-        obj.remove("fast_mode");
-        obj.remove("block");
-    }
     if args.no_json_rate_limit {
         obj.remove("rate_limit");
     }
@@ -2242,13 +2232,11 @@ fn apply_json_toggles(json: &mut serde_json::Value, args: &Args) {
         if let Some(session) = obj.get_mut("session").and_then(|v| v.as_object_mut()) {
             session.remove("tokens");
         }
-        for key in ["window", "block"] {
-            if let Some(target) = obj.get_mut(key).and_then(|v| v.as_object_mut()) {
-                target.remove("input_tokens");
-                target.remove("output_tokens");
-                target.remove("cache_creation_input_tokens");
-                target.remove("cache_read_input_tokens");
-            }
+        if let Some(window) = obj.get_mut("window").and_then(|v| v.as_object_mut()) {
+            window.remove("input_tokens");
+            window.remove("output_tokens");
+            window.remove("cache_creation_input_tokens");
+            window.remove("cache_read_input_tokens");
         }
     }
 }
