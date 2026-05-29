@@ -184,7 +184,11 @@ fn pricing_from_config(model_id: &str) -> Option<Pricing> {
 pub(crate) fn static_pricing_lookup(model_id: &str) -> Option<Pricing> {
     // Prefer exact/known variants before family heuristics
     let m = model_id.to_lowercase();
-    if m.contains("opus-4-5") || m.contains("opus-4-6") || m.contains("opus-4-7") {
+    if m.contains("opus-4-5")
+        || m.contains("opus-4-6")
+        || m.contains("opus-4-7")
+        || m.contains("opus-4-8")
+    {
         let in_pt = 5e-6; // $5 / 1M
         return Some(Pricing::from_input_multipliers(in_pt, 25e-6));
     }
@@ -216,7 +220,7 @@ fn is_deprecated_or_retired_model(model_id: &str) -> bool {
         return true;
     }
 
-    let active_opus = ["opus-4-1", "opus-4-5", "opus-4-6", "opus-4-7"];
+    let active_opus = ["opus-4-1", "opus-4-5", "opus-4-6", "opus-4-7", "opus-4-8"];
     if (tail == "opus-4" || tail.starts_with("opus-4-"))
         && !active_opus.iter().any(|prefix| tail.starts_with(prefix))
     {
@@ -339,6 +343,7 @@ pub fn fast_mode_multiplier(model_id: &str) -> f64 {
 
 fn canonical_pricing_key(model_id: &str) -> Option<&'static str> {
     let ordered = [
+        ("opus-4-8", "claude-opus-4-8"),
         ("opus-4-7", "claude-opus-4-7"),
         ("opus-4-6", "claude-opus-4-6"),
         ("opus-4-5", "claude-opus-4-5"),
@@ -522,7 +527,7 @@ mod tests {
         assert!((sonnet_pricing.cache_read_per_tok - 0.3e-6).abs() < 1e-10);
 
         // Test Opus pricing
-        let opus_pricing = pricing_for_model("claude-opus-4-7").unwrap();
+        let opus_pricing = pricing_for_model("claude-opus-4-8").unwrap();
         assert!((opus_pricing.in_per_tok - 5e-6).abs() < 1e-10);
         assert!((opus_pricing.out_per_tok - 25e-6).abs() < 1e-10);
 
@@ -570,10 +575,22 @@ mod tests {
     }
 
     #[test]
+    fn test_opus_48_pricing() {
+        let p = pricing_for_model("claude-opus-4-8").unwrap();
+        assert!((p.in_per_tok - 5e-6).abs() < 1e-10);
+        assert!((p.out_per_tok - 25e-6).abs() < 1e-10);
+        assert!((p.cache_create_per_tok - 6.25e-6).abs() < 1e-10);
+        assert!((p.cache_create_1h_per_tok - 10e-6).abs() < 1e-10);
+        assert!((p.cache_read_per_tok - 0.5e-6).abs() < 1e-10);
+    }
+
+    #[test]
     fn test_fast_mode_multiplier() {
-        // Opus 4.6 and 4.7 have 6x fast mode
+        // Current Opus models have 6x fast mode
+        assert!((fast_mode_multiplier("claude-opus-4-8") - 6.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("claude-opus-4-7") - 6.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("claude-opus-4-6") - 6.0).abs() < 1e-10);
+        assert!((fast_mode_multiplier("us.anthropic.claude-opus-4-8") - 6.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("us.anthropic.claude-opus-4-6-v1") - 6.0).abs() < 1e-10);
         // Other models have no fast mode (1x)
         assert!((fast_mode_multiplier("claude-sonnet-4-6") - 1.0).abs() < 1e-10);
@@ -582,6 +599,10 @@ mod tests {
 
     #[test]
     fn test_provider_model_uses_specific_pricing() {
+        let p = pricing_for_model("us.anthropic.claude-opus-4-8").unwrap();
+        assert!((p.in_per_tok - 5e-6).abs() < 1e-10);
+        assert!((p.out_per_tok - 25e-6).abs() < 1e-10);
+
         let p = pricing_for_model("us.anthropic.claude-opus-4-6-v1").unwrap();
         assert!((p.in_per_tok - 5e-6).abs() < 1e-10);
         assert!((p.out_per_tok - 25e-6).abs() < 1e-10);

@@ -111,7 +111,11 @@ pub fn parse_iso_date(s: &str) -> Option<NaiveDate> {
 pub(crate) fn static_context_limit_lookup(model_id: &str) -> Option<u64> {
     let m = model_id.to_lowercase();
     // Known variants; newer 1M-capable models must be listed before family fallbacks.
-    if m.contains("opus-4-7") || m.contains("opus-4-6") || m.contains("sonnet-4-6") {
+    if m.contains("opus-4-8")
+        || m.contains("opus-4-7")
+        || m.contains("opus-4-6")
+        || m.contains("sonnet-4-6")
+    {
         return Some(1_000_000);
     }
     if m.contains("opus-4-1")
@@ -211,7 +215,7 @@ pub fn max_output_capability(model_id: &str) -> u64 {
 
 fn default_output_tokens_for_model(model_id: &str) -> u64 {
     let lower = model_id.to_lowercase();
-    if lower.contains("opus-4-7") || lower.contains("opus-4-6") {
+    if lower.contains("opus-4-8") || lower.contains("opus-4-7") || lower.contains("opus-4-6") {
         return OUTPUT_64K;
     }
     if lower.contains("sonnet-4-6")
@@ -227,7 +231,7 @@ fn default_output_tokens_for_model(model_id: &str) -> u64 {
 
 fn upper_output_tokens_for_model(model_id: &str) -> u64 {
     let lower = model_id.to_lowercase();
-    if lower.contains("opus-4-7") || lower.contains("opus-4-6") {
+    if lower.contains("opus-4-8") || lower.contains("opus-4-7") || lower.contains("opus-4-6") {
         return OUTPUT_128K;
     }
     if lower.contains("opus-4-5")
@@ -346,6 +350,10 @@ mod tests {
             1_000_000
         );
         assert_eq!(
+            context_limit_for_model_display("claude-opus-4-8", "Opus 4.8"),
+            1_000_000
+        );
+        assert_eq!(
             context_limit_for_model_display("claude-opus-4-7", "Opus 4.7"),
             1_000_000
         );
@@ -363,6 +371,7 @@ mod tests {
     #[serial]
     fn test_reserved_output_tokens_for_model() {
         // Defaults mirror Claude Code's model-specific max_tokens defaults.
+        assert_eq!(reserved_output_tokens_for_model("claude-opus-4-8"), 64_000);
         assert_eq!(reserved_output_tokens_for_model("claude-opus-4-7"), 64_000);
         assert_eq!(reserved_output_tokens_for_model("claude-opus-4-6"), 64_000);
         assert_eq!(
@@ -389,6 +398,7 @@ mod tests {
             reserved_output_tokens_for_model("claude-sonnet-4-5"),
             32_000
         );
+        assert_eq!(reserved_output_tokens_for_model("claude-opus-4-8"), 64_000);
         assert_eq!(reserved_output_tokens_for_model("claude-opus-4-7"), 64_000);
 
         // Test env override below Claude Code's minimum is ignored
@@ -406,6 +416,7 @@ mod tests {
 
     #[test]
     fn test_max_output_capability_for_current_models() {
+        assert_eq!(max_output_capability("claude-opus-4-8"), 128_000);
         assert_eq!(max_output_capability("claude-opus-4-7"), 128_000);
         assert_eq!(max_output_capability("claude-opus-4-6"), 128_000);
         assert_eq!(max_output_capability("claude-sonnet-4-6"), 64_000);
@@ -453,6 +464,10 @@ mod tests {
     #[test]
     fn test_friendly_model_name_current_format() {
         // Current naming: claude-{family}-{major}-{minor}
+        assert_eq!(
+            friendly_model_name("claude-opus-4-8", "claude-opus-4-8"),
+            "Opus 4.8"
+        );
         assert_eq!(
             friendly_model_name("claude-opus-4-7", "claude-opus-4-7"),
             "Opus 4.7"

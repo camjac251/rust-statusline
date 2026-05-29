@@ -13,6 +13,15 @@ pub struct HookWorkspace {
     #[serde(default)]
     pub added_dirs: Vec<String>,
     pub git_worktree: Option<String>,
+    pub repo: Option<HookRepo>,
+}
+
+/// Repository identity from the origin remote.
+#[derive(Deserialize, Debug, Clone)]
+pub struct HookRepo {
+    pub host: String,
+    pub owner: String,
+    pub name: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -118,6 +127,14 @@ pub struct HookRemote {
     pub session_id: String,
 }
 
+/// Open PR metadata for the current branch.
+#[derive(Deserialize, Debug, Clone)]
+pub struct HookPr {
+    pub number: u64,
+    pub url: String,
+    pub review_state: Option<String>,
+}
+
 #[derive(Deserialize, Debug)]
 pub struct HookJson {
     pub session_id: String,
@@ -150,4 +167,6 @@ pub struct HookJson {
     pub worktree: Option<HookWorktree>,
     /// Remote session info when connected via claude remote/assistant
     pub remote: Option<HookRemote>,
+    /// Open PR info for the current branch
+    pub pr: Option<HookPr>,
 }

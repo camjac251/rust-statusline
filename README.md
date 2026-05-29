@@ -83,7 +83,7 @@ Add to `~/.claude/settings.json`:
 
 `padding` and `refreshInterval` are Claude Code settings. `claude_statusline` just renders the current snapshot when Claude Code invokes it.
 
-Claude Code truncates long footer output, so `claude_statusline` now prefers a more compact, Claude-safe layout unless there is clear room for the richer two-line view.
+Claude Code truncates long footer output, so `claude_statusline` prefers a more compact, Claude-safe layout unless there is clear room for the richer two-line view. When Claude Code provides `COLUMNS` and `LINES`, those dimensions drive the layout: important segments reduce through shorter labels first, compact mode can show the project folder when useful, model names collapse to readable family names, and low-priority workspace/detail segments drop when that keeps the line more readable.
 
 Restart Claude Code. Done.
 

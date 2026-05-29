@@ -53,6 +53,7 @@ fn json_output_shape_minimal() {
             project_dir: "/tmp/project".to_string(),
             added_dirs: vec!["/tmp/project/packages/docs".to_string()],
             git_worktree: Some("feature-footer".to_string()),
+            repo: None,
         },
         version: "test".to_string(),
         output_style: default_output_style(),
@@ -72,6 +73,7 @@ fn json_output_shape_minimal() {
         remote: Some(HookRemote {
             session_id: "remote-123".to_string(),
         }),
+        pr: None,
     };
 
     let json: Value = build_json_output(
@@ -187,6 +189,7 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
             project_dir: "/tmp/project".to_string(),
             added_dirs: Vec::new(),
             git_worktree: None,
+            repo: None,
         },
         version: "test".to_string(),
         output_style: default_output_style(),
@@ -202,6 +205,7 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         agent: None,
         worktree: None,
         remote: None,
+        pr: None,
     };
 
     let json: Value = build_json_output(
@@ -268,6 +272,7 @@ fn json_output_context_limit_override_from_hook() {
             project_dir: "/tmp/project".to_string(),
             added_dirs: Vec::new(),
             git_worktree: None,
+            repo: None,
         },
         version: "test".to_string(),
         output_style: default_output_style(),
@@ -283,6 +288,7 @@ fn json_output_context_limit_override_from_hook() {
         agent: None,
         worktree: None,
         remote: None,
+        pr: None,
     };
 
     // Without override, unknown model defaults to 200k
@@ -400,6 +406,7 @@ fn json_output_reports_output_reserve_used_after_usable_limit() {
             project_dir: "/tmp/project".to_string(),
             added_dirs: Vec::new(),
             git_worktree: None,
+            repo: None,
         },
         version: "test".to_string(),
         output_style: default_output_style(),
@@ -415,6 +422,7 @@ fn json_output_reports_output_reserve_used_after_usable_limit() {
         agent: None,
         worktree: None,
         remote: None,
+        pr: None,
     };
 
     let json: Value = build_json_output(
@@ -488,6 +496,7 @@ fn json_output_includes_provenance_and_prompt_cache() {
             project_dir: "/tmp/project".to_string(),
             added_dirs: Vec::new(),
             git_worktree: None,
+            repo: None,
         },
         version: "test".to_string(),
         output_style: default_output_style(),
@@ -503,6 +512,7 @@ fn json_output_includes_provenance_and_prompt_cache() {
         agent: None,
         worktree: None,
         remote: None,
+        pr: None,
     };
     let provenance = CostProvenance {
         session_cost: SessionCostSource::TranscriptResult,

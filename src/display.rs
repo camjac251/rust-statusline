@@ -32,6 +32,7 @@ const TERMINAL_MARGIN: u16 = 15;
 // smaller budget than the full terminal width to avoid Ink truncation.
 const CLAUDE_FOOTER_RESERVE: u16 = 44;
 const SHORT_TERMINAL_ROWS: u16 = 24;
+const DROP_BEFORE_SHRINK_MARGIN: u8 = 40;
 
 // Provide a no-op color shim when "colors" feature is disabled.
 // main.rs references this for its own trivial color usage.
@@ -274,6 +275,13 @@ fn is_truecolor_enabled(args: &Args) -> bool {
     false
 }
 
+fn env_dimension(name: &str) -> Option<u16> {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .filter(|value| *value > 0)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalWidth {
     Narrow, // < 140 cols
@@ -294,6 +302,167 @@ struct RenderProfile {
     safe_width: u16,
 }
 
+struct StatusSegment {
+    variants: Vec<String>,
+    priority: u8,
+}
+
+fn status_segment(text: String, priority: u8) -> StatusSegment {
+    adaptive_segment(vec![text], priority)
+}
+
+fn adaptive_segment(variants: Vec<String>, priority: u8) -> StatusSegment {
+    let mut deduped: Vec<String> = Vec::new();
+    for variant in variants {
+        if variant.is_empty() {
+            continue;
+        }
+        if deduped
+            .last()
+            .is_none_or(|last| strip_ansi(last) != strip_ansi(&variant))
+        {
+            deduped.push(variant);
+        }
+    }
+
+    if deduped.is_empty() {
+        deduped.push(String::new());
+    }
+
+    StatusSegment {
+        variants: deduped,
+        priority,
+    }
+}
+
+fn strip_ansi(text: &str) -> String {
+    let mut stripped = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek().is_some_and(|next| *next == '[') {
+            chars.next();
+            for code in chars.by_ref() {
+                if ('@'..='~').contains(&code) {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        stripped.push(ch);
+    }
+
+    stripped
+}
+
+fn visible_width(text: &str) -> usize {
+    strip_ansi(text).chars().count()
+}
+
+fn fit_line_to_width(line: String, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if visible_width(&line) <= max_width {
+        return line;
+    }
+
+    truncate_label(&strip_ansi(&line), max_width)
+}
+
+fn join_status_segments(
+    prefix: &str,
+    segments: &[StatusSegment],
+    variant_indexes: &[usize],
+    separator: &str,
+) -> String {
+    let body = segments
+        .iter()
+        .zip(variant_indexes)
+        .map(|(segment, variant_index)| {
+            segment
+                .variants
+                .get(*variant_index)
+                .or_else(|| segment.variants.last())
+                .map(String::as_str)
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(separator);
+
+    if prefix.is_empty() {
+        body
+    } else if body.is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{prefix} {body}")
+    }
+}
+
+fn fit_status_segments(
+    prefix: &str,
+    mut segments: Vec<StatusSegment>,
+    separator: &str,
+    max_width: u16,
+) -> String {
+    let max_width = usize::from(max_width);
+    let mut variant_indexes = vec![0; segments.len()];
+    let mut line = join_status_segments(prefix, &segments, &variant_indexes, separator);
+
+    while visible_width(&line) > max_width {
+        let shrink_candidate = segments
+            .iter()
+            .enumerate()
+            .filter(|(index, segment)| variant_indexes[*index] + 1 < segment.variants.len())
+            .min_by_key(|(_, segment)| segment.priority)
+            .map(|(index, segment)| (index, segment.priority));
+
+        let drop_candidate = (segments.len() > 1)
+            .then(|| {
+                segments
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, segment)| segment.priority)
+                    .map(|(index, segment)| (index, segment.priority))
+            })
+            .flatten();
+
+        let should_drop = match (drop_candidate, shrink_candidate) {
+            (Some((_, drop_priority)), Some((_, shrink_priority))) => {
+                drop_priority.saturating_add(DROP_BEFORE_SHRINK_MARGIN) < shrink_priority
+            }
+            (Some(_), None) => true,
+            _ => false,
+        };
+
+        if should_drop {
+            if let Some((remove_index, _)) = drop_candidate {
+                segments.remove(remove_index);
+                variant_indexes.remove(remove_index);
+                line = join_status_segments(prefix, &segments, &variant_indexes, separator);
+                continue;
+            }
+        }
+
+        if let Some((shrink_index, _)) = shrink_candidate {
+            variant_indexes[shrink_index] += 1;
+            line = join_status_segments(prefix, &segments, &variant_indexes, separator);
+            continue;
+        }
+
+        if let Some((remove_index, _)) = drop_candidate {
+            segments.remove(remove_index);
+            variant_indexes.remove(remove_index);
+            line = join_status_segments(prefix, &segments, &variant_indexes, separator);
+        } else {
+            break;
+        }
+    }
+
+    fit_line_to_width(line, max_width)
+}
+
 fn width_class_for(safe_width: u16) -> TerminalWidth {
     if safe_width < WIDTH_NARROW {
         TerminalWidth::Narrow
@@ -305,23 +474,26 @@ fn width_class_for(safe_width: u16) -> TerminalWidth {
 }
 
 fn detect_terminal_dimensions() -> (u16, Option<u16>) {
-    let override_width = env::var("CLAUDE_TERMINAL_WIDTH")
-        .ok()
-        .and_then(|value| value.parse::<u16>().ok());
+    let override_width = env_dimension("CLAUDE_TERMINAL_WIDTH");
+    let statusline_width = env_dimension("COLUMNS");
+    let statusline_height = env_dimension("LINES");
     let detected = terminal_size::terminal_size();
 
     let width = override_width
+        .or(statusline_width)
         .or_else(|| detected.map(|(terminal_size::Width(w), _)| w))
         .unwrap_or(WIDTH_MEDIUM + TERMINAL_MARGIN + CLAUDE_FOOTER_RESERVE);
-    let height = detected.map(|(_, terminal_size::Height(h))| h);
+    let height = statusline_height.or_else(|| detected.map(|(_, terminal_size::Height(h))| h));
 
     (width, height)
 }
 
 fn render_profile_for_dimensions(width: u16, height: Option<u16>) -> RenderProfile {
-    let safe_width = width.saturating_sub(TERMINAL_MARGIN + CLAUDE_FOOTER_RESERVE);
+    let safe_width = width
+        .saturating_sub(TERMINAL_MARGIN + CLAUDE_FOOTER_RESERVE)
+        .max(1);
     let width_class = width_class_for(safe_width);
-    let mode = if height.is_some_and(|rows| rows < SHORT_TERMINAL_ROWS) || safe_width < WIDTH_MEDIUM
+    let mode = if height.is_some_and(|rows| rows < SHORT_TERMINAL_ROWS) || safe_width < WIDTH_NARROW
     {
         RenderMode::Compact
     } else {
@@ -338,10 +510,6 @@ fn render_profile_for_dimensions(width: u16, height: Option<u16>) -> RenderProfi
 fn render_profile() -> RenderProfile {
     let (width, height) = detect_terminal_dimensions();
     render_profile_for_dimensions(width, height)
-}
-
-fn get_terminal_width() -> TerminalWidth {
-    render_profile().width
 }
 
 fn truncate_label(text: &str, max_chars: usize) -> String {
@@ -446,6 +614,34 @@ fn worktree_segment(
     ))
 }
 
+fn compact_workspace_segment(hook: &HookJson, tc: bool) -> Option<StatusSegment> {
+    let repo_name = hook
+        .workspace
+        .repo
+        .as_ref()
+        .map(|repo| repo.name.as_str())
+        .filter(|name| !name.is_empty());
+    let project_base = repo_name.or_else(|| path_basename(&hook.workspace.project_dir));
+    let current_base = path_basename(&hook.workspace.current_dir);
+    let current_differs =
+        Path::new(&hook.workspace.current_dir) != Path::new(&hook.workspace.project_dir);
+
+    let mut variants = Vec::new();
+    if current_differs
+        && let (Some(project), Some(current)) = (project_base, current_base)
+        && !project.eq_ignore_ascii_case(current)
+    {
+        variants.push(tokens::ACCENT.paint(&format!("{project}/{current}"), tc));
+        variants.push(tokens::ACCENT.paint(current, tc));
+    }
+
+    if let Some(project) = project_base.or(current_base) {
+        variants.push(tokens::ACCENT.paint(project, tc));
+    }
+
+    (!variants.is_empty()).then(|| adaptive_segment(variants, 75))
+}
+
 pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String {
     // Respect NO_COLOR if set: return plain string
     if env::var("NO_COLOR").is_ok() {
@@ -497,24 +693,114 @@ fn normalized_model_label(
     }
 }
 
-fn render_model_segment(
+fn model_family_label(model_id: &str, display: &str) -> Option<&'static str> {
+    let lower_id = model_id.to_lowercase();
+    let lower_display = display.to_lowercase();
+    if lower_id.contains("opus") || lower_display.contains("opus") {
+        Some("Opus")
+    } else if lower_id.contains("sonnet") || lower_display.contains("sonnet") {
+        Some("Sonnet")
+    } else if lower_id.contains("haiku") || lower_display.contains("haiku") {
+        Some("Haiku")
+    } else {
+        None
+    }
+}
+
+fn model_version_hint(display: &str) -> Option<&str> {
+    display.split_whitespace().find(|part| {
+        part.chars().any(|ch| ch.is_ascii_digit())
+            && part
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || ch == '.' || ch == '-')
+    })
+}
+
+fn compact_model_label(model_id: &str, display: &str) -> String {
+    let without_vendor = display
+        .trim_start_matches("Claude ")
+        .replace(" (with 1M context)", "")
+        .replace(" [1m]", "")
+        .replace("[1m]", "")
+        .trim()
+        .to_string();
+
+    if !without_vendor.is_empty() && without_vendor != display {
+        without_vendor
+    } else if let Some(family) = model_family_label(model_id, display) {
+        model_version_hint(display).map_or_else(
+            || family.to_string(),
+            |version| format!("{family} {version}"),
+        )
+    } else {
+        display.to_string()
+    }
+}
+
+fn tiny_model_label(model_id: &str, display: &str) -> String {
+    let Some(family) = model_family_label(model_id, display) else {
+        return truncate_label(display, 12);
+    };
+    family.to_string()
+}
+
+fn render_model_segment_variants(
     model_id: &str,
     model_display_name: &str,
     context_limit_override: Option<u64>,
     args: &Args,
     is_fast_mode: bool,
     max_chars: Option<usize>,
-) -> String {
+) -> StatusSegment {
     let tc = is_truecolor_enabled(args);
     let base = normalized_model_label(model_id, model_display_name, context_limit_override);
-    let display = max_chars.map_or(base.clone(), |limit| truncate_label(&base, limit));
-    let colored = model_colored_name(model_id, &display, args);
+    let long = max_chars.map_or(base.clone(), |limit| truncate_label(&base, limit));
+    let medium = compact_model_label(model_id, &base);
+    let tiny = tiny_model_label(model_id, &base);
+    let fast = tokens::WARNING.bold("fast", tc);
+    let render = |label: &str| {
+        let colored = model_colored_name(model_id, label, args);
+        if is_fast_mode {
+            format!("{colored} {fast}")
+        } else {
+            colored
+        }
+    };
 
-    if is_fast_mode {
-        format!("{} {}", colored, tokens::WARNING.bold("fast", tc))
+    let mut variants = if max_chars.is_some() {
+        vec![render(&medium), render(&tiny)]
     } else {
-        colored
+        vec![render(&long), render(&medium), render(&tiny)]
+    };
+    if is_fast_mode {
+        variants.push(model_colored_name(model_id, &tiny, args));
     }
+    adaptive_segment(variants, 130)
+}
+
+fn cost_segment_variants(
+    long_label: &str,
+    short_label: &str,
+    value: f64,
+    gradient_max: Option<f64>,
+    tc: bool,
+    priority: u8,
+) -> StatusSegment {
+    let cost_str = format_currency(value);
+    let cost_value = if let Some(max) = gradient_max {
+        tokens::gradient(value, max).paint(&cost_str, tc)
+    } else {
+        tokens::PRIMARY.bold(&cost_str, tc)
+    };
+    let dollar = tokens::MUTED.paint(SYM_DOLLAR, tc);
+    adaptive_segment(
+        vec![
+            format!("{}{}{}", muted_label(long_label, tc), dollar, cost_value),
+            format!("{}{}{}", muted_label(short_label, tc), dollar, cost_value),
+            format!("{}{}", dollar, cost_value),
+        ],
+        priority,
+    )
 }
 
 fn use_12h_time(args: &Args) -> bool {
@@ -535,13 +821,7 @@ fn use_12h_time(args: &Args) -> bool {
     }
 }
 
-fn render_reset_inline(
-    remaining_minutes: f64,
-    active_block: Option<&Block>,
-    latest_reset: Option<DateTime<chrono::Utc>>,
-    use_12h: bool,
-    tc: bool,
-) -> String {
+fn render_reset_countdown(remaining_minutes: f64, tc: bool) -> String {
     let rem_h = (remaining_minutes as i64) / 60;
     let rem_m = (remaining_minutes as i64) % 60;
     let countdown = if rem_h > 0 {
@@ -550,7 +830,7 @@ fn render_reset_inline(
         format!("{}m", rem_m)
     };
 
-    let countdown_colored = if remaining_minutes < 30.0 {
+    if remaining_minutes < 30.0 {
         tokens::ERROR.bold(&countdown, tc)
     } else if remaining_minutes < 60.0 {
         tokens::WARNING.bold(&countdown, tc)
@@ -558,8 +838,14 @@ fn render_reset_inline(
         tokens::WARNING.paint(&countdown, tc)
     } else {
         tokens::PRIMARY_DIM.paint(&countdown, tc)
-    };
+    }
+}
 
+fn render_reset_clock(
+    active_block: Option<&Block>,
+    latest_reset: Option<DateTime<chrono::Utc>>,
+    use_12h: bool,
+) -> String {
     let window_end_local = if let Some(block) = active_block {
         block.end.with_timezone(&Local)
     } else {
@@ -568,7 +854,7 @@ fn render_reset_inline(
         end.with_timezone(&Local)
     };
 
-    let reset_disp = if window_end_local.minute() == 0 {
+    if window_end_local.minute() == 0 {
         if use_12h {
             window_end_local.format("%-I%p").to_string().to_lowercase()
         } else {
@@ -581,7 +867,18 @@ fn render_reset_inline(
             .to_lowercase()
     } else {
         window_end_local.format("%H:%M").to_string()
-    };
+    }
+}
+
+fn render_reset_inline(
+    remaining_minutes: f64,
+    active_block: Option<&Block>,
+    latest_reset: Option<DateTime<chrono::Utc>>,
+    use_12h: bool,
+    tc: bool,
+) -> String {
+    let countdown_colored = render_reset_countdown(remaining_minutes, tc);
+    let reset_disp = render_reset_clock(active_block, latest_reset, use_12h);
 
     format!(
         " {} {}",
@@ -657,87 +954,229 @@ fn build_git_status_segment(
     }
 }
 
-fn render_usage_compact_segment(
+struct UsageSegmentTiming<'a> {
+    remaining_minutes: f64,
+    active_block: Option<&'a Block>,
+    latest_reset: Option<DateTime<chrono::Utc>>,
+}
+
+struct UsageSegmentLabels<'a> {
+    long: &'a str,
+    short: &'a str,
+}
+
+fn render_usage_segment_variants(
     model_id: &str,
     args: &Args,
     usage_percent: Option<f64>,
-    remaining_minutes: f64,
-    active_block: Option<&Block>,
-    latest_reset: Option<DateTime<chrono::Utc>>,
+    projected_percent: Option<f64>,
+    timing: UsageSegmentTiming<'_>,
     usage_limits: Option<&UsageSummary>,
-) -> Option<String> {
+    labels: UsageSegmentLabels<'_>,
+) -> Option<StatusSegment> {
     if !is_direct_claude_api(Some(model_id)) {
         return None;
     }
 
     let usage_value = usage_percent?;
     let tc = is_truecolor_enabled(args);
-    let usage_label = if usage_limits.is_some_and(|summary| summary.stale) {
-        "~u:"
+    let (long_label, short_label) = if usage_limits.is_some_and(|summary| summary.stale) {
+        (format!("~{}", labels.long), format!("~{}", labels.short))
     } else {
-        "u:"
+        (labels.long.to_string(), labels.short.to_string())
     };
+    let usage_colored = colorize_percent(usage_value, args);
+    let projected_colored = projected_percent.map(|value| colorize_percent(value, args));
+    let projected = projected_colored
+        .as_ref()
+        .map(|projected| format!("{}{}", tokens::MUTED.dim(SYM_ARROW_RIGHT, tc), projected))
+        .unwrap_or_default();
+    let countdown = render_reset_countdown(timing.remaining_minutes, tc);
+    let inline = render_reset_inline(
+        timing.remaining_minutes,
+        timing.active_block,
+        timing.latest_reset,
+        use_12h_time(args),
+        tc,
+    );
 
-    Some(format!(
-        "{}{}{}",
-        muted_label(usage_label, tc),
-        colorize_percent(usage_value, args),
-        render_reset_inline(
-            remaining_minutes,
-            active_block,
-            latest_reset,
-            use_12h_time(args),
-            tc
-        )
+    Some(adaptive_segment(
+        vec![
+            format!(
+                "{}{}{}{}",
+                muted_label(&long_label, tc),
+                usage_colored,
+                projected,
+                inline
+            ),
+            format!(
+                "{}{}{} {}",
+                muted_label(&short_label, tc),
+                usage_colored,
+                projected,
+                countdown
+            ),
+            format!("{}{}", muted_label(&short_label, tc), usage_colored),
+            usage_colored,
+        ],
+        100,
     ))
 }
 
-fn render_context_compact_segment(
+fn render_context_segment_variants(
     model_id: &str,
     model_display_name: &str,
     context: Option<(u64, u32)>,
     context_limit_override: Option<u64>,
-    tc: bool,
-    width: TerminalWidth,
-) -> String {
-    let label = muted_label("ctx:", tc);
+    args: &Args,
+    tpm_indicator: f64,
+    rich_labels: bool,
+) -> StatusSegment {
+    let tc = is_truecolor_enabled(args);
+    let long_label = if rich_labels { "context:" } else { "ctx:" };
+    let short_label = "ctx:";
     let Some((ctx_tokens, pct)) = context else {
-        return format!("{label}{}", muted_label("N/A", tc));
+        return adaptive_segment(
+            vec![
+                format!("{}{}", muted_label(long_label, tc), muted_label("N/A", tc)),
+                format!("{}{}", muted_label(short_label, tc), muted_label("N/A", tc)),
+                muted_label("N/A", tc),
+            ],
+            110,
+        );
     };
 
-    let pct_token = tokens::gradient(pct as f64, 100.0);
+    let show_tokens = !args.no_context_tokens;
+    let show_percent = !args.no_context_percent;
     let pct_text = format!("{}%", pct);
+    let pct_token = tokens::gradient(pct as f64, 100.0);
     let pct_colored = if pct >= 80 {
         pct_token.bold(&pct_text, tc)
     } else {
         pct_token.paint(&pct_text, tc)
     };
-
-    let mut segment = match width {
-        TerminalWidth::Narrow => format!("{}{}", label, pct_colored),
-        _ => format!(
-            "{}{} {}",
-            label,
-            tokens::PRIMARY_DIM.paint(&format_tokens(ctx_tokens), tc),
-            pct_colored
-        ),
-    };
-
     let ctx_limit_full = context_limit_override
         .unwrap_or_else(|| context_limit_for_model_display(model_id, model_display_name));
     let ctx_limit_usable =
         ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
-    if ctx_tokens > ctx_limit_usable {
-        let reserve_used = ctx_tokens - ctx_limit_usable;
+    let output_reserve = reserved_output_tokens_for_model(model_id);
+    let overhead = system_overhead_tokens();
+    let raw_tokens = ctx_tokens.saturating_sub(overhead);
+    let tokens_colored = tokens::PRIMARY_DIM.paint(&format_tokens(ctx_tokens), tc);
+    let raw_tokens_colored = tokens::PRIMARY_DIM.paint(&format_tokens(raw_tokens), tc);
+    let limit_label = muted_label(&format_tokens(ctx_limit_full), tc);
+    let over_usable = (ctx_tokens > ctx_limit_usable).then(|| ctx_tokens - ctx_limit_usable);
+
+    let mut long = match (show_tokens, show_percent, overhead > 0 && rich_labels) {
+        (true, true, true) => format!(
+            "{}{} {}{}{}",
+            muted_label(long_label, tc),
+            raw_tokens_colored,
+            muted_label("+", tc),
+            muted_label(&format!("{} sys = ", format_tokens(overhead)), tc),
+            tokens::PRIMARY_DIM.paint(
+                &format!(
+                    "{}/{} ({})",
+                    format_tokens(ctx_tokens),
+                    format_tokens(ctx_limit_full),
+                    pct_colored
+                ),
+                tc,
+            )
+        ),
+        (true, true, false) => format!(
+            "{}{}/{} {}",
+            muted_label(long_label, tc),
+            tokens_colored,
+            limit_label,
+            pct_colored
+        ),
+        (true, false, _) => format!(
+            "{}{}/{}",
+            muted_label(long_label, tc),
+            tokens_colored,
+            limit_label
+        ),
+        (false, true, _) => format!("{}{}", muted_label(long_label, tc), pct_colored),
+        (false, false, _) => format!("{}{}", muted_label(long_label, tc), muted_label("on", tc)),
+    };
+
+    if let Some(used) = over_usable
+        && show_tokens
+    {
         let _ = write!(
-            segment,
-            " {}{}",
-            muted_label("r:", tc),
-            tokens::ERROR.paint(&format_tokens(reserve_used), tc)
+            long,
+            " {}{}{}",
+            muted_label("rsv:", tc),
+            tokens::ERROR.paint(&format_tokens(used), tc),
+            muted_label(&format!("/{}", format_tokens(output_reserve)), tc)
         );
     }
 
-    segment
+    if rich_labels
+        && show_percent
+        && !args.no_context_compact_hint
+        && pct >= 40
+        && crate::utils::auto_compact_enabled()
+    {
+        let usable = ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
+        let cushion = crate::utils::auto_compact_headroom_tokens();
+        let compact_trigger = usable.saturating_sub(cushion) as f64;
+        let headroom_to_compact = (compact_trigger - ctx_tokens as f64).max(0.0);
+        let compact_text = if tpm_indicator > 0.0 && headroom_to_compact > 0.0 {
+            let eta_min = headroom_to_compact / tpm_indicator;
+            let eta_min_i = eta_min.round() as i64;
+            let eta_disp = if eta_min_i >= 120 {
+                format!("~{}h", eta_min_i / 60)
+            } else if eta_min_i >= 60 {
+                format!("~{}h{}m", eta_min_i / 60, eta_min_i % 60)
+            } else {
+                format!("~{}m", eta_min_i)
+            };
+            format!(
+                "{}@{}K {}",
+                muted_label("compact:", tc),
+                compact_trigger as u64 / 1000,
+                eta_disp
+            )
+        } else {
+            format!(
+                "{}@{}K",
+                muted_label("compact:", tc),
+                compact_trigger as u64 / 1000
+            )
+        };
+        let _ = write!(
+            long,
+            "{}{}",
+            separator(tc, false),
+            tokens::WARNING.paint(&compact_text, tc)
+        );
+    }
+
+    let medium = match (show_tokens, show_percent) {
+        (true, true) => format!(
+            "{}{} {}",
+            muted_label(short_label, tc),
+            tokens_colored,
+            pct_colored
+        ),
+        (true, false) => format!("{}{}", muted_label(short_label, tc), tokens_colored),
+        (false, true) => format!("{}{}", muted_label(short_label, tc), pct_colored),
+        (false, false) => format!("{}{}", muted_label(short_label, tc), muted_label("on", tc)),
+    };
+    let short = match (show_tokens, show_percent) {
+        (_, true) => format!("{}{}", muted_label(short_label, tc), pct_colored),
+        (true, false) => format!("{}{}", muted_label(short_label, tc), tokens_colored),
+        (false, false) => muted_label("ctx", tc),
+    };
+    let tiny = match (show_tokens, show_percent) {
+        (_, true) => pct_colored,
+        (true, false) => tokens_colored,
+        (false, false) => muted_label("ctx", tc),
+    };
+
+    adaptive_segment(vec![long, medium, short, tiny], 110)
 }
 
 fn wrap_header_segment(content: String, tc: bool) -> String {
@@ -746,6 +1185,17 @@ fn wrap_header_segment(content: String, tc: bool) -> String {
         tokens::MUTED.paint("[", tc),
         content,
         tokens::MUTED.paint("]", tc)
+    )
+}
+
+fn wrap_header_segment_variants(segment: StatusSegment, tc: bool) -> StatusSegment {
+    adaptive_segment(
+        segment
+            .variants
+            .into_iter()
+            .map(|variant| wrap_header_segment(variant, tc))
+            .collect(),
+        segment.priority,
     )
 }
 
@@ -770,26 +1220,63 @@ fn render_header_line(
     let tc = is_truecolor_enabled(args);
 
     // Build header segments: git (minimal) + model + beads + output_style + optional provider hints
-    let mut header_parts: Vec<String> = Vec::new();
+    let mut header_parts: Vec<StatusSegment> = Vec::new();
+    if !args.no_workspace_cwd {
+        if let Some(base) = path_basename(&hook.workspace.current_dir) {
+            header_parts.push(adaptive_segment(
+                vec![
+                    tokens::ACCENT.paint(&dir_fmt, tc),
+                    tokens::ACCENT.paint(base, tc),
+                ],
+                90,
+            ));
+        } else {
+            header_parts.push(status_segment(tokens::ACCENT.paint(&dir_fmt, tc), 90));
+        }
+    }
     if let Some(git_seg) = build_git_status_segment(git_info, tc, profile.width, lines_delta, true)
     {
-        header_parts.push(wrap_header_segment(git_seg, tc));
+        let compact_git = build_git_status_segment(git_info, tc, profile.width, None, false);
+        let mut variants = vec![git_seg];
+        if let Some(compact_git) = compact_git {
+            variants.push(compact_git);
+        }
+        header_parts.push(wrap_header_segment_variants(
+            adaptive_segment(variants, 80),
+            tc,
+        ));
     }
     if !args.no_git_worktree
         && should_show_header_worktree(hook)
         && let Some(wt_seg) = worktree_segment(hook, git_info, tc, profile.width)
     {
-        header_parts.push(wrap_header_segment(wt_seg, tc));
+        header_parts.push(wrap_header_segment_variants(
+            adaptive_segment(vec![wt_seg, muted_label("wt", tc)], 40),
+            tc,
+        ));
     }
     if !args.no_workspace_added_dirs
         && let Some(dirs_seg) = added_dirs_segment(hook, tc)
     {
-        header_parts.push(wrap_header_segment(dirs_seg, tc));
+        header_parts.push(wrap_header_segment_variants(
+            adaptive_segment(
+                vec![
+                    dirs_seg,
+                    format!(
+                        "{}{}d",
+                        tokens::ACCENT.paint("+", tc),
+                        hook.workspace.added_dirs.len()
+                    ),
+                ],
+                30,
+            ),
+            tc,
+        ));
     }
 
     // Model segment (with fast mode indicator)
     if !args.no_workspace_model {
-        let model_seg = render_model_segment(
+        let model_seg = render_model_segment_variants(
             &hook.model.id,
             &hook.model.display_name,
             context_limit_override,
@@ -797,7 +1284,7 @@ fn render_header_line(
             is_fast_mode,
             None,
         );
-        header_parts.push(wrap_header_segment(model_seg, tc));
+        header_parts.push(wrap_header_segment_variants(model_seg, tc));
     }
 
     // Beads current work segment (if available)
@@ -825,14 +1312,14 @@ fn render_header_line(
                 tokens::ACCENT.paint(&work_display, tc)
             };
 
-            header_parts.push(wrap_header_segment(work_colored, tc));
+            header_parts.push(status_segment(wrap_header_segment(work_colored, tc), 20));
         } else if beads.total_open > 0 {
             // No current work but there are open issues - show count
             let count_text = format!("{} open", beads.total_open);
             let count_colored = tokens::MUTED.dim(&count_text, tc);
-            header_parts.push(wrap_header_segment(
-                format!("{}{}", muted_label("bd:", tc), count_colored),
-                tc,
+            header_parts.push(status_segment(
+                wrap_header_segment(format!("{}{}", muted_label("bd:", tc), count_colored), tc),
+                20,
             ));
         }
     }
@@ -851,7 +1338,10 @@ fn render_header_line(
             alerts.push(tokens::WARNING.paint(&blocked_text, tc));
         }
         if !alerts.is_empty() {
-            header_parts.push(wrap_header_segment(alerts.join(" "), tc));
+            header_parts.push(status_segment(
+                wrap_header_segment(alerts.join(" "), tc),
+                25,
+            ));
         }
     }
 
@@ -874,9 +1364,9 @@ fn render_header_line(
             };
             let gt_colored = gt_token.paint(&gt_display, tc);
 
-            header_parts.push(wrap_header_segment(
-                format!("{}{}", muted_label("gt:", tc), gt_colored),
-                tc,
+            header_parts.push(status_segment(
+                wrap_header_segment(format!("{}{}", muted_label("gt:", tc), gt_colored), tc),
+                20,
             ));
         }
     }
@@ -886,9 +1376,12 @@ fn render_header_line(
         && let Some(ref agent) = hook.agent
     {
         let agent_colored = tokens::ACCENT.paint(&agent.name, tc);
-        header_parts.push(wrap_header_segment(
-            format!("{}{}", muted_label("agent:", tc), agent_colored),
-            tc,
+        header_parts.push(status_segment(
+            wrap_header_segment(
+                format!("{}{}", muted_label("agent:", tc), agent_colored),
+                tc,
+            ),
+            50,
         ));
     }
 
@@ -897,8 +1390,14 @@ fn render_header_line(
         let name_lower = hook.output_style.name.to_lowercase();
         if name_lower != "default" {
             let style_colored = tokens::ACCENT.paint(&hook.output_style.name, tc);
-            header_parts.push(wrap_header_segment(
-                format!("{}{}", muted_label("style:", tc), style_colored),
+            header_parts.push(wrap_header_segment_variants(
+                adaptive_segment(
+                    vec![
+                        format!("{}{}", muted_label("style:", tc), style_colored),
+                        format!("{}{}", muted_label("st:", tc), style_colored),
+                    ],
+                    10,
+                ),
                 tc,
             ));
         }
@@ -920,8 +1419,15 @@ fn render_header_line(
             "max" => tokens::EFFORT_MAX.bold(&effort_lower, tc),
             other => tokens::EFFORT_MEDIUM.paint(other, tc),
         };
-        header_parts.push(wrap_header_segment(
-            format!("{}{}", muted_label(label, tc), effort_colored),
+        header_parts.push(wrap_header_segment_variants(
+            adaptive_segment(
+                vec![
+                    format!("{}{}", muted_label(label, tc), effort_colored),
+                    format!("{}{}", muted_label("eff:", tc), effort_colored),
+                    effort_colored,
+                ],
+                55,
+            ),
             tc,
         ));
     }
@@ -954,16 +1460,20 @@ fn render_header_line(
             ));
         }
         if !prov_hint_parts.is_empty() {
-            header_parts.push(wrap_header_segment(prov_hint_parts.join(" "), tc));
+            header_parts.push(status_segment(
+                wrap_header_segment(prov_hint_parts.join(" "), tc),
+                10,
+            ));
         }
     }
 
     // Print header line: cwd then segments
-    if args.no_workspace_cwd {
-        return Some(header_parts.join(" "));
-    }
-    let dir_colored = tokens::ACCENT.paint(&dir_fmt, tc);
-    Some(format!("{} {}", dir_colored, header_parts.join(" ")))
+    Some(fit_status_segments(
+        "",
+        header_parts,
+        " ",
+        profile.safe_width,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1014,19 +1524,25 @@ fn render_compact_text_output(
     let prompt = tokens::ACCENT.paint(SYM_PROMPT, tc);
     let mut segments = Vec::new();
 
+    if !args.no_workspace_cwd
+        && let Some(cwd_seg) = compact_workspace_segment(hook, tc)
+    {
+        segments.push(cwd_seg);
+    }
+
     if let Some(git_seg) = build_git_status_segment(git_info, tc, profile.width, lines_delta, false)
     {
-        segments.push(git_seg);
+        segments.push(status_segment(git_seg, 30));
     }
     if !args.no_git_worktree
         && let Some(wt_seg) = worktree_segment(hook, git_info, tc, profile.width)
     {
-        segments.push(wt_seg);
+        segments.push(status_segment(wt_seg, 20));
     }
     if !args.no_workspace_added_dirs
         && let Some(dirs_seg) = added_dirs_segment(hook, tc)
     {
-        segments.push(dirs_seg);
+        segments.push(status_segment(dirs_seg, 10));
     }
 
     if !args.no_workspace_model {
@@ -1035,7 +1551,7 @@ fn render_compact_text_output(
             TerminalWidth::Medium => 22,
             TerminalWidth::Wide => 28,
         };
-        segments.push(render_model_segment(
+        segments.push(render_model_segment_variants(
             &hook.model.id,
             &hook.model.display_name,
             context_limit_override,
@@ -1046,41 +1562,51 @@ fn render_compact_text_output(
     }
 
     if !args.no_cost_session {
-        let session_cost_str = format_currency(session_cost);
-        segments.push(format!(
-            "{}{}{}",
-            muted_label("s:", tc),
-            tokens::MUTED.paint(SYM_DOLLAR, tc),
-            tokens::PRIMARY.bold(&session_cost_str, tc)
+        segments.push(cost_segment_variants(
+            "session:",
+            "s:",
+            session_cost,
+            None,
+            tc,
+            80,
         ));
     }
 
     if !args.no_usage_five_hour
-        && let Some(usage_seg) = render_usage_compact_segment(
+        && let Some(usage_seg) = render_usage_segment_variants(
             &hook.model.id,
             args,
             usage_percent,
-            remaining_minutes,
-            active_block,
-            latest_reset,
+            None,
+            UsageSegmentTiming {
+                remaining_minutes,
+                active_block,
+                latest_reset,
+            },
             usage_limits,
+            UsageSegmentLabels {
+                long: "usage:",
+                short: "u:",
+            },
         )
     {
         segments.push(usage_seg);
     }
 
     if !args.no_context_tokens || !args.no_context_percent {
-        segments.push(render_context_compact_segment(
+        segments.push(render_context_segment_variants(
             &hook.model.id,
             &hook.model.display_name,
             context,
             context_limit_override,
-            tc,
-            profile.width,
+            args,
+            0.0,
+            false,
         ));
     }
 
-    format!("{} {}", prompt, segments.join(&separator(tc, true)))
+    let separator = separator(tc, true);
+    fit_status_segments(&prompt, segments, &separator, profile.safe_width)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1107,13 +1633,14 @@ fn render_rich_text_output(
     context_limit_override: Option<u64>,
     prompt_cache: Option<&PromptCacheInfo>,
 ) -> String {
-    let term_width = get_terminal_width();
+    let profile = render_profile();
+    let term_width = profile.width;
     let tc = is_truecolor_enabled(args);
     let prompt = tokens::ACCENT.paint(SYM_PROMPT, tc);
     let long_labels = matches!(args.labels, LabelsArg::Long);
     let is_claude = is_direct_claude_api(Some(model_id));
     let use_12h = use_12h_time(args);
-    let mut segments: Vec<String> = Vec::new();
+    let mut segments: Vec<StatusSegment> = Vec::new();
 
     if !args.no_cost_session {
         let session_label = match term_width {
@@ -1121,12 +1648,13 @@ fn render_rich_text_output(
             TerminalWidth::Medium => "sess:",
             TerminalWidth::Wide => "session:",
         };
-        let session_cost_str = format_currency(session_cost);
-        segments.push(format!(
-            "{}{}{}",
-            muted_label(session_label, tc),
-            tokens::MUTED.paint(SYM_DOLLAR, tc),
-            tokens::PRIMARY.bold(&session_cost_str, tc)
+        segments.push(cost_segment_variants(
+            session_label,
+            "s:",
+            session_cost,
+            None,
+            tc,
+            80,
         ));
     }
 
@@ -1135,12 +1663,13 @@ fn render_rich_text_output(
             TerminalWidth::Narrow => "t:",
             _ => "today:",
         };
-        let today_cost_str = format_currency(today_cost);
-        segments.push(format!(
-            "{}{}{}",
-            muted_label(today_label, tc),
-            tokens::MUTED.paint(SYM_DOLLAR, tc),
-            tokens::gradient(today_cost, 10.0).paint(&today_cost_str, tc)
+        segments.push(cost_segment_variants(
+            today_label,
+            "t:",
+            today_cost,
+            Some(10.0),
+            tc,
+            30,
         ));
     }
 
@@ -1151,12 +1680,13 @@ fn render_rich_text_output(
             TerminalWidth::Wide if long_labels => "window:",
             TerminalWidth::Wide => "win:",
         };
-        let window_cost_str = format_currency(total_cost);
-        segments.push(format!(
-            "{}{}{}",
-            muted_label(window_label, tc),
-            tokens::MUTED.paint(SYM_DOLLAR, tc),
-            tokens::gradient(total_cost, 5.0).bold(&window_cost_str, tc)
+        segments.push(cost_segment_variants(
+            window_label,
+            "w:",
+            total_cost,
+            Some(5.0),
+            tc,
+            40,
         ));
     }
 
@@ -1164,36 +1694,28 @@ fn render_rich_text_output(
         && !args.no_usage_five_hour
         && let Some(usage_value) = usage_percent
     {
-        let usage_label = match (
-            term_width,
-            usage_limits.is_some_and(|summary| summary.stale),
+        let usage_label = match term_width {
+            TerminalWidth::Narrow => "u:",
+            _ => "usage:",
+        };
+        if let Some(usage_segment) = render_usage_segment_variants(
+            model_id,
+            args,
+            Some(usage_value),
+            projected_percent,
+            UsageSegmentTiming {
+                remaining_minutes,
+                active_block,
+                latest_reset,
+            },
+            usage_limits,
+            UsageSegmentLabels {
+                long: usage_label,
+                short: "u:",
+            },
         ) {
-            (TerminalWidth::Narrow, true) => "~u:",
-            (TerminalWidth::Narrow, false) => "u:",
-            (_, true) => "~usage:",
-            (_, false) => "usage:",
-        };
-        let usage_colored = colorize_percent(usage_value, args);
-        let reset_inline =
-            render_reset_inline(remaining_minutes, active_block, latest_reset, use_12h, tc);
-        let usage_segment = if let Some(projected_value) = projected_percent {
-            format!(
-                "{}{}{}{}{}",
-                muted_label(usage_label, tc),
-                usage_colored,
-                tokens::MUTED.dim(SYM_ARROW_RIGHT, tc),
-                colorize_percent(projected_value, args),
-                reset_inline
-            )
-        } else {
-            format!(
-                "{}{}{}",
-                muted_label(usage_label, tc),
-                usage_colored,
-                reset_inline
-            )
-        };
-        segments.push(usage_segment);
+            segments.push(usage_segment);
+        }
 
         if let Some(summary) = usage_limits {
             if !args.no_usage_weekly
@@ -1222,24 +1744,30 @@ fn render_rich_text_output(
                     };
                     let _ = write!(text, " {}", muted_label(&format!("({reset_fmt})"), tc));
                 }
-                segments.push(text);
+                segments.push(status_segment(text, 15));
             }
             if !args.no_usage_opus
                 && let Some(pct) = summary.seven_day_opus.utilization
             {
-                segments.push(format!(
-                    "{}{}",
-                    muted_label("opus:", tc),
-                    colorize_percent(pct, args)
+                segments.push(status_segment(
+                    format!(
+                        "{}{}",
+                        muted_label("opus:", tc),
+                        colorize_percent(pct, args)
+                    ),
+                    14,
                 ));
             }
             if !args.no_usage_sonnet
                 && let Some(pct) = summary.seven_day_sonnet.utilization
             {
-                segments.push(format!(
-                    "{}{}",
-                    muted_label("sonnet:", tc),
-                    colorize_percent(pct, args)
+                segments.push(status_segment(
+                    format!(
+                        "{}{}",
+                        muted_label("sonnet:", tc),
+                        colorize_percent(pct, args)
+                    ),
+                    13,
                 ));
             }
 
@@ -1271,7 +1799,7 @@ fn render_rich_text_output(
                         spent_token.paint(&format!("{:.2}", spent), tc)
                     )
                 };
-                segments.push(extra_segment);
+                segments.push(status_segment(extra_segment, 12));
             }
         }
     }
@@ -1281,124 +1809,40 @@ fn render_rich_text_output(
         let to = format_tokens(tokens_output);
         let tcc = format_tokens(tokens_cache_create);
         let tcr = format_tokens(tokens_cache_read);
-        segments.push(format!(
-            "{}{} {}{} {}{}",
-            muted_label("tok:", tc),
-            tokens::PRIMARY_DIM.paint(&format!("{}/{}", ti, to), tc),
-            muted_label("cache:", tc),
-            tokens::PRIMARY_DIM.paint(&format!("{}/{}", tcc, tcr), tc),
-            muted_label("ws:", tc),
-            tokens::PRIMARY_DIM.paint(&web_search_requests.to_string(), tc)
+        segments.push(status_segment(
+            format!(
+                "{}{} {}{} {}{}",
+                muted_label("tok:", tc),
+                tokens::PRIMARY_DIM.paint(&format!("{}/{}", ti, to), tc),
+                muted_label("cache:", tc),
+                tokens::PRIMARY_DIM.paint(&format!("{}/{}", tcc, tcr), tc),
+                muted_label("ws:", tc),
+                tokens::PRIMARY_DIM.paint(&web_search_requests.to_string(), tc)
+            ),
+            5,
         ));
     }
 
     if !args.no_integrations_prompt_cache
         && let Some(info) = prompt_cache
     {
-        segments.push(render_prompt_cache_segment(info, tc));
+        segments.push(status_segment(render_prompt_cache_segment(info, tc), 50));
     }
 
-    let ctx_label = match term_width {
-        TerminalWidth::Narrow => "ctx:",
-        _ => "context:",
-    };
-    let context_segment = if let Some((ctx_tokens, pct)) = context {
-        let pct_token = tokens::gradient(pct as f64, 100.0);
-        let pct_colored = if pct >= 80 {
-            pct_token.bold(&format!("{}%", pct), tc)
-        } else {
-            pct_token.paint(&format!("{}%", pct), tc)
-        };
+    if !args.no_context_tokens || !args.no_context_percent {
+        segments.push(render_context_segment_variants(
+            model_id,
+            model_display_name,
+            context,
+            context_limit_override,
+            args,
+            tpm_indicator,
+            true,
+        ));
+    }
 
-        let ctx_limit_full = context_limit_override
-            .unwrap_or_else(|| context_limit_for_model_display(model_id, model_display_name));
-        let ctx_limit_usable =
-            ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
-        let output_reserve = reserved_output_tokens_for_model(model_id);
-        let overhead = system_overhead_tokens();
-        let raw_tokens = ctx_tokens.saturating_sub(overhead);
-        let over_usable = (ctx_tokens > ctx_limit_usable).then(|| ctx_tokens - ctx_limit_usable);
-
-        let mut text = if overhead > 0 {
-            format!(
-                "{}{} {}{}{}",
-                muted_label(ctx_label, tc),
-                tokens::PRIMARY_DIM.paint(&format_tokens(raw_tokens), tc),
-                muted_label("+", tc),
-                muted_label(&format!("{} sys = ", format_tokens(overhead)), tc),
-                tokens::PRIMARY_DIM.paint(
-                    &format!(
-                        "{}/{} ({})",
-                        format_tokens(ctx_tokens),
-                        format_tokens(ctx_limit_full),
-                        pct_colored
-                    ),
-                    tc,
-                )
-            )
-        } else {
-            format!(
-                "{}{}/{} {}",
-                muted_label(ctx_label, tc),
-                tokens::PRIMARY_DIM.paint(&format_tokens(ctx_tokens), tc),
-                muted_label(&format_tokens(ctx_limit_full), tc),
-                pct_colored
-            )
-        };
-
-        if let Some(used) = over_usable {
-            let _ = write!(
-                text,
-                " {}{}{}",
-                muted_label("rsv:", tc),
-                tokens::ERROR.paint(&format_tokens(used), tc),
-                muted_label(&format!("/{}", format_tokens(output_reserve)), tc)
-            );
-        }
-
-        if !args.no_context_compact_hint && pct >= 40 && crate::utils::auto_compact_enabled() {
-            let usable = ctx_limit_full.saturating_sub(reserved_output_tokens_for_model(model_id));
-            let cushion = crate::utils::auto_compact_headroom_tokens();
-            let compact_trigger = usable.saturating_sub(cushion) as f64;
-            let headroom_to_compact = (compact_trigger - ctx_tokens as f64).max(0.0);
-            let compact_text = if tpm_indicator > 0.0 && headroom_to_compact > 0.0 {
-                let eta_min = headroom_to_compact / tpm_indicator;
-                let eta_min_i = eta_min.round() as i64;
-                let eta_disp = if eta_min_i >= 120 {
-                    format!("~{}h", eta_min_i / 60)
-                } else if eta_min_i >= 60 {
-                    format!("~{}h{}m", eta_min_i / 60, eta_min_i % 60)
-                } else {
-                    format!("~{}m", eta_min_i)
-                };
-                format!(
-                    "{}@{}K {}",
-                    muted_label("compact:", tc),
-                    compact_trigger as u64 / 1000,
-                    eta_disp
-                )
-            } else {
-                format!(
-                    "{}@{}K",
-                    muted_label("compact:", tc),
-                    compact_trigger as u64 / 1000
-                )
-            };
-            let _ = write!(
-                text,
-                "{}{}",
-                separator(tc, false),
-                tokens::WARNING.paint(&compact_text, tc)
-            );
-        }
-
-        text
-    } else {
-        format!("{}{}", muted_label(ctx_label, tc), muted_label("N/A", tc))
-    };
-    segments.push(context_segment);
-
-    format!("{} {}", prompt, segments.join(&separator(tc, false)))
+    let separator = separator(tc, false);
+    fit_status_segments(&prompt, segments, &separator, profile.safe_width)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1485,10 +1929,8 @@ pub fn print_text_output(
     {
         let tc = is_truecolor_enabled(args);
         let compact = profile.mode == RenderMode::Compact;
-        let _ = write!(
-            line,
-            "{}{}{} {}{} {}{}",
-            separator(tc, compact),
+        let provenance_segment = format!(
+            "{}{} {}{} {}{}",
             muted_label("src:", tc),
             tokens::PRIMARY_DIM.paint(provenance.session_cost.as_str(), tc),
             muted_label("today:", tc),
@@ -1496,6 +1938,11 @@ pub fn print_text_output(
             muted_label("price:", tc),
             tokens::PRIMARY_DIM.paint(provenance.pricing.as_str(), tc)
         );
+        let separator = separator(tc, compact);
+        let candidate = format!("{line}{separator}{provenance_segment}");
+        if visible_width(&candidate) <= usize::from(profile.safe_width) {
+            line = candidate;
+        }
     }
 
     println!("{}", line);
@@ -1507,6 +1954,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use clap::Parser;
+    use serial_test::serial;
 
     use crate::models::PromptCacheBucketInfo;
     use crate::models::hook::{
@@ -1534,8 +1982,9 @@ mod tests {
                 project_dir: "/tmp/project".to_string(),
                 added_dirs: added_dirs.into_iter().map(str::to_string).collect(),
                 git_worktree: git_worktree.map(str::to_string),
+                repo: None,
             },
-            version: "2.1.152".to_string(),
+            version: "2.1.157".to_string(),
             output_style: OutputStyle {
                 name: "default".to_string(),
             },
@@ -1564,7 +2013,66 @@ mod tests {
             agent: None,
             worktree: None,
             remote: None,
+            pr: None,
         }
+    }
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new(names: &[&'static str]) -> Self {
+            Self {
+                saved: names
+                    .iter()
+                    .map(|name| (*name, std::env::var(name).ok()))
+                    .collect(),
+            }
+        }
+
+        fn set(&self, name: &str, value: &str) {
+            // SAFETY: env-mutating display tests are marked serial.
+            unsafe { std::env::set_var(name, value) };
+        }
+
+        fn remove(&self, name: &str) {
+            // SAFETY: env-mutating display tests are marked serial.
+            unsafe { std::env::remove_var(name) };
+        }
+
+        fn force_dimensions(&self, columns: &str, lines: &str) {
+            self.remove("CLAUDE_TERMINAL_WIDTH");
+            self.set("COLUMNS", columns);
+            self.set("LINES", lines);
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in &self.saved {
+                // SAFETY: env-mutating display tests are marked serial.
+                unsafe {
+                    if let Some(value) = value {
+                        std::env::set_var(name, value);
+                    } else {
+                        std::env::remove_var(name);
+                    }
+                }
+            }
+        }
+    }
+
+    fn terminal_env_guard() -> EnvGuard {
+        EnvGuard::new(&[
+            "CLAUDE_TERMINAL_WIDTH",
+            "COLUMNS",
+            "LINES",
+            "NO_COLOR",
+            "TERM",
+            "COLORTERM",
+            "CLAUDE_TRUECOLOR",
+        ])
     }
 
     #[test]
@@ -1574,7 +2082,11 @@ mod tests {
             RenderMode::Rich
         );
         assert_eq!(
-            render_profile_for_dimensions(220, Some(32)).mode,
+            render_profile_for_dimensions(200, Some(32)).mode,
+            RenderMode::Rich
+        );
+        assert_eq!(
+            render_profile_for_dimensions(180, Some(32)).mode,
             RenderMode::Compact
         );
         assert_eq!(
@@ -1586,13 +2098,38 @@ mod tests {
     #[test]
     fn header_is_suppressed_in_compact_mode() {
         assert_eq!(
-            render_profile_for_dimensions(220, Some(32)).mode,
+            render_profile_for_dimensions(180, Some(32)).mode,
             RenderMode::Compact
         );
     }
 
     #[test]
+    #[serial]
+    fn detect_terminal_dimensions_uses_statusline_columns_and_lines() {
+        let env = terminal_env_guard();
+        env.force_dimensions("120", "20");
+
+        assert_eq!(detect_terminal_dimensions(), (120, Some(20)));
+        assert_eq!(render_profile().mode, RenderMode::Compact);
+    }
+
+    #[test]
+    #[serial]
+    fn terminal_width_override_wins_over_columns() {
+        let env = terminal_env_guard();
+        env.force_dimensions("120", "32");
+        env.set("CLAUDE_TERMINAL_WIDTH", "320");
+
+        assert_eq!(detect_terminal_dimensions(), (320, Some(32)));
+        assert_eq!(render_profile().mode, RenderMode::Rich);
+    }
+
+    #[test]
+    #[serial]
     fn compact_line_includes_added_dirs_and_hook_worktree() {
+        let env = terminal_env_guard();
+        env.force_dimensions("320", "32");
+
         let hook = test_hook(vec!["/tmp/project/docs"], Some("hook-wt"));
         let git_info = GitInfo {
             branch: Some("feature/footer".to_string()),
@@ -1632,7 +2169,155 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn compact_line_fits_safe_width_from_columns() {
+        let env = terminal_env_guard();
+        env.force_dimensions("120", "32");
+        env.set("NO_COLOR", "1");
+        env.set("TERM", "dumb");
+        env.remove("COLORTERM");
+        env.remove("CLAUDE_TRUECOLOR");
+
+        let hook = test_hook(
+            vec!["/tmp/project/docs", "/tmp/project/scripts"],
+            Some("very-long-worktree-name-that-would-overflow"),
+        );
+        let git_info = GitInfo {
+            branch: Some("feature/very-long-responsive-statusline-branch".to_string()),
+            short_commit: Some("abc1234".to_string()),
+            is_clean: Some(false),
+            ahead: Some(4),
+            behind: Some(1),
+            remote_url: None,
+            is_head_on_remote: None,
+            worktree_count: Some(2),
+            is_linked_worktree: Some(true),
+        };
+
+        let line = render_compact_text_output(
+            &hook,
+            Some(&git_info),
+            &test_args(),
+            false,
+            1.25,
+            Some(12.0),
+            95.0,
+            None,
+            None,
+            Some((12_345, 6)),
+            Some((8, 3)),
+            None,
+            Some(200_000),
+        );
+        let profile = render_profile();
+        let plain = strip_ansi(&line);
+
+        assert_eq!(profile.mode, RenderMode::Compact);
+        assert!(!line.contains('\n'));
+        assert!(
+            visible_width(&line) <= usize::from(profile.safe_width),
+            "{} > {}: {}",
+            visible_width(&line),
+            profile.safe_width,
+            line
+        );
+        assert!(plain.contains("project"));
+        assert!(plain.contains("Sonnet"));
+        assert!(!plain.contains("S4"));
+        assert!(plain.contains("$1.25"));
+        assert!(plain.contains("u:") || plain.contains("12%"));
+        assert!(plain.contains("ctx:") || plain.contains("6%"));
+        assert!(!plain.contains("dirs:"));
+        assert!(!plain.contains("very-long-worktree"));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_line_keeps_family_name_at_tiny_width() {
+        let env = terminal_env_guard();
+        env.force_dimensions("80", "32");
+        env.set("NO_COLOR", "1");
+        env.set("TERM", "dumb");
+        env.remove("COLORTERM");
+        env.remove("CLAUDE_TRUECOLOR");
+
+        let hook = test_hook(vec![], None);
+        let line = render_compact_text_output(
+            &hook,
+            None,
+            &test_args(),
+            false,
+            1.25,
+            Some(12.0),
+            95.0,
+            None,
+            None,
+            Some((12_345, 6)),
+            None,
+            None,
+            Some(200_000),
+        );
+        let profile = render_profile();
+        let plain = strip_ansi(&line);
+
+        assert_eq!(profile.mode, RenderMode::Compact);
+        assert!(
+            visible_width(&line) <= usize::from(profile.safe_width),
+            "{} > {}: {}",
+            visible_width(&line),
+            profile.safe_width,
+            line
+        );
+        assert!(plain.contains("Sonnet"));
+        assert!(!plain.contains("S4"));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_line_prefers_repo_name_for_workspace_identity() {
+        let env = terminal_env_guard();
+        env.force_dimensions("180", "32");
+        env.set("NO_COLOR", "1");
+        env.set("TERM", "dumb");
+        env.remove("COLORTERM");
+        env.remove("CLAUDE_TRUECOLOR");
+
+        let mut hook = test_hook(vec![], None);
+        hook.workspace.current_dir = "/tmp/local-folder/src".to_string();
+        hook.workspace.project_dir = "/tmp/local-folder".to_string();
+        hook.workspace.repo = Some(crate::models::hook::HookRepo {
+            host: "github.com".to_string(),
+            owner: "cam".to_string(),
+            name: "origin-repo".to_string(),
+        });
+
+        let line = render_compact_text_output(
+            &hook,
+            None,
+            &test_args(),
+            false,
+            1.25,
+            Some(12.0),
+            95.0,
+            None,
+            None,
+            Some((12_345, 6)),
+            None,
+            None,
+            Some(200_000),
+        );
+        let plain = strip_ansi(&line);
+
+        assert!(plain.contains("origin-repo"));
+        assert!(!plain.contains("local-folder"));
+    }
+
+    #[test]
+    #[serial]
     fn rich_header_uses_workspace_segments() {
+        let env = terminal_env_guard();
+        env.force_dimensions("320", "32");
+
         let hook = test_hook(
             vec!["/tmp/project/docs", "/tmp/project/scripts"],
             Some("hook-wt"),
@@ -1669,7 +2354,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn short_rich_header_hides_redundant_workspace_noise() {
+        let env = terminal_env_guard();
+        env.force_dimensions("320", "32");
+
         let mut hook = test_hook(vec!["/tmp/project"], Some("topic+sample-worktree"));
         hook.workspace.current_dir =
             "/tmp/project/.claude/worktrees/topic+sample-worktree".to_string();
@@ -1705,7 +2394,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn rich_usage_row_keeps_existing_detail_by_default() {
+        let env = terminal_env_guard();
+        env.force_dimensions("320", "32");
+
         let summary = UsageSummary {
             seven_day: UsageLimit {
                 utilization: Some(22.0),
@@ -2019,6 +2712,11 @@ pub fn build_json_output(
             "project_dir": hook.workspace.project_dir.clone(),
             "added_dirs": hook.workspace.added_dirs.clone(),
             "git_worktree": hook.workspace.git_worktree.clone(),
+            "repo": hook.workspace.repo.as_ref().map(|repo| serde_json::json!({
+                "host": repo.host.clone(),
+                "owner": repo.owner.clone(),
+                "name": repo.name.clone()
+            })),
         },
         "version": hook.version.clone(),
         "output_style": {"name": hook.output_style.name.clone()},
@@ -2102,6 +2800,11 @@ pub fn build_json_output(
         "vim": hook.vim.as_ref().map(|v| serde_json::json!({"mode": v.mode.clone()})),
         "remote": hook.remote.as_ref().map(|remote| serde_json::json!({
             "session_id": remote.session_id.clone()
+        })),
+        "pr": hook.pr.as_ref().map(|pr| serde_json::json!({
+            "number": pr.number,
+            "url": pr.url.clone(),
+            "review_state": pr.review_state.clone()
         })),
         "agent": hook.agent.as_ref().map(|a| serde_json::json!({
             "name": a.name.clone(),
