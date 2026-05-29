@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [2.3.0](https://github.com/camjac251/rust-statusline/compare/v2.2.0...v2.3.0) - 2026-05-29
+
+### Added
+
+- *(statusline)* support current hook metadata and adaptive layout
+
 ## [2.2.0](https://github.com/camjac251/rust-statusline/compare/v2.1.1...v2.2.0) - 2026-05-27
 
 ### Added
