@@ -120,6 +120,7 @@ impl ColorToken {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // -- Model identity -----------------------------------------------------------
+pub const MODEL_FABLE: ColorToken = ColorToken::new((255, 140, 190), Ansi::Magenta);
 pub const MODEL_OPUS: ColorToken = ColorToken::new((200, 160, 255), Ansi::BrightMagenta);
 pub const MODEL_SONNET: ColorToken = ColorToken::new((255, 200, 100), Ansi::BrightYellow);
 pub const MODEL_HAIKU: ColorToken = ColorToken::new((100, 220, 255), Ansi::BrightCyan);

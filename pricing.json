@@ -1,11 +1,27 @@
 {
   "_meta": {
-    "updated": "2026-05-27",
+    "updated": "2026-06-09",
     "currency": "USD",
     "unit": "per_token",
     "description": "Pricing configuration for Claude models. All prices are in USD per token. Source: https://platform.claude.com/docs/en/about-claude/pricing"
   },
   "models": {
+    "claude-fable-5": {
+      "name": "Claude Fable 5",
+      "input": 1e-5,
+      "output": 5e-5,
+      "cache_create": 1.25e-5,
+      "cache_create_1h": 2e-5,
+      "cache_read": 1e-6
+    },
+    "claude-mythos-5": {
+      "name": "Claude Mythos 5",
+      "input": 1e-5,
+      "output": 5e-5,
+      "cache_create": 1.25e-5,
+      "cache_create_1h": 2e-5,
+      "cache_read": 1e-6
+    },
     "claude-opus-4-8": {
       "name": "Claude Opus 4.8",
       "input": 5e-6,
@@ -13,7 +29,7 @@
       "cache_create": 6.25e-6,
       "cache_create_1h": 1e-5,
       "cache_read": 5e-7,
-      "fast_mode_multiplier": 6.0
+      "fast_mode_multiplier": 2.0
     },
     "claude-opus-4-7": {
       "name": "Claude Opus 4.7",

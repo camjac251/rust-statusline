@@ -111,7 +111,9 @@ pub fn parse_iso_date(s: &str) -> Option<NaiveDate> {
 pub(crate) fn static_context_limit_lookup(model_id: &str) -> Option<u64> {
     let m = model_id.to_lowercase();
     // Known variants; newer 1M-capable models must be listed before family fallbacks.
-    if m.contains("opus-4-8")
+    if m.contains("fable-5")
+        || m.contains("mythos-5")
+        || m.contains("opus-4-8")
         || m.contains("opus-4-7")
         || m.contains("opus-4-6")
         || m.contains("sonnet-4-6")
@@ -215,7 +217,12 @@ pub fn max_output_capability(model_id: &str) -> u64 {
 
 fn default_output_tokens_for_model(model_id: &str) -> u64 {
     let lower = model_id.to_lowercase();
-    if lower.contains("opus-4-8") || lower.contains("opus-4-7") || lower.contains("opus-4-6") {
+    if lower.contains("fable-5")
+        || lower.contains("mythos-5")
+        || lower.contains("opus-4-8")
+        || lower.contains("opus-4-7")
+        || lower.contains("opus-4-6")
+    {
         return OUTPUT_64K;
     }
     if lower.contains("sonnet-4-6")
@@ -231,7 +238,12 @@ fn default_output_tokens_for_model(model_id: &str) -> u64 {
 
 fn upper_output_tokens_for_model(model_id: &str) -> u64 {
     let lower = model_id.to_lowercase();
-    if lower.contains("opus-4-8") || lower.contains("opus-4-7") || lower.contains("opus-4-6") {
+    if lower.contains("fable-5")
+        || lower.contains("mythos-5")
+        || lower.contains("opus-4-8")
+        || lower.contains("opus-4-7")
+        || lower.contains("opus-4-6")
+    {
         return OUTPUT_128K;
     }
     if lower.contains("opus-4-5")
@@ -304,7 +316,7 @@ pub fn friendly_model_name(model_id: &str, display_name: &str) -> String {
         })
         .unwrap_or(without_date);
 
-    const FAMILIES: &[&str] = &["opus", "sonnet", "haiku"];
+    const FAMILIES: &[&str] = &["fable", "mythos", "opus", "sonnet", "haiku"];
 
     for family in FAMILIES {
         // Current format: {family}-{version} e.g. "opus-4-6"
@@ -355,6 +367,18 @@ mod tests {
         );
         assert_eq!(
             context_limit_for_model_display("claude-opus-4-7", "Opus 4.7"),
+            1_000_000
+        );
+        assert_eq!(
+            context_limit_for_model_display("claude-fable-5", "Fable 5"),
+            1_000_000
+        );
+        assert_eq!(
+            context_limit_for_model_display("claude-fable-5[1m]", "Fable 5"),
+            1_000_000
+        );
+        assert_eq!(
+            context_limit_for_model_display("claude-mythos-5", "Mythos 5"),
             1_000_000
         );
 
@@ -464,6 +488,14 @@ mod tests {
     #[test]
     fn test_friendly_model_name_current_format() {
         // Current naming: claude-{family}-{major}-{minor}
+        assert_eq!(
+            friendly_model_name("claude-fable-5", "claude-fable-5"),
+            "Fable 5"
+        );
+        assert_eq!(
+            friendly_model_name("claude-mythos-5", "claude-mythos-5"),
+            "Mythos 5"
+        );
         assert_eq!(
             friendly_model_name("claude-opus-4-8", "claude-opus-4-8"),
             "Opus 4.8"

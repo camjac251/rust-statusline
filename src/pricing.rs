@@ -184,6 +184,10 @@ fn pricing_from_config(model_id: &str) -> Option<Pricing> {
 pub(crate) fn static_pricing_lookup(model_id: &str) -> Option<Pricing> {
     // Prefer exact/known variants before family heuristics
     let m = model_id.to_lowercase();
+    if m.contains("fable-5") || m.contains("mythos-5") {
+        let in_pt = 10e-6; // $10 / 1M
+        return Some(Pricing::from_input_multipliers(in_pt, 50e-6));
+    }
     if m.contains("opus-4-5")
         || m.contains("opus-4-6")
         || m.contains("opus-4-7")
@@ -277,7 +281,10 @@ pub fn pricing_for_model(model_id: &str) -> Option<Pricing> {
     }
 
     // Priority 4: Family heuristics fallback
-    if m.contains("opus") {
+    if m.contains("fable") || m.contains("mythos") {
+        let in_pt = 10e-6; // $10 / 1M
+        Some(Pricing::from_input_multipliers(in_pt, 50e-6))
+    } else if m.contains("opus") {
         let in_pt = 5e-6; // $5 / 1M
         Some(Pricing::from_input_multipliers(in_pt, 25e-6))
     } else if m.contains("sonnet") {
@@ -306,7 +313,12 @@ pub fn pricing_source_for_model(model_id: &str) -> PricingSource {
     if is_deprecated_or_retired_model(&m) {
         return PricingSource::Unavailable;
     }
-    if m.contains("opus") || m.contains("sonnet") || m.contains("haiku") {
+    if m.contains("opus")
+        || m.contains("sonnet")
+        || m.contains("haiku")
+        || m.contains("fable")
+        || m.contains("mythos")
+    {
         return PricingSource::FamilyHeuristic;
     }
     PricingSource::Unavailable
@@ -343,6 +355,8 @@ pub fn fast_mode_multiplier(model_id: &str) -> f64 {
 
 fn canonical_pricing_key(model_id: &str) -> Option<&'static str> {
     let ordered = [
+        ("fable-5", "claude-fable-5"),
+        ("mythos-5", "claude-mythos-5"),
         ("opus-4-8", "claude-opus-4-8"),
         ("opus-4-7", "claude-opus-4-7"),
         ("opus-4-6", "claude-opus-4-6"),
@@ -551,6 +565,34 @@ mod tests {
     }
 
     #[test]
+    fn test_fable_and_mythos_pricing() {
+        let fable = pricing_for_model("claude-fable-5").unwrap();
+        assert!((fable.in_per_tok - 10e-6).abs() < 1e-10);
+        assert!((fable.out_per_tok - 50e-6).abs() < 1e-10);
+        assert!((fable.cache_create_per_tok - 12.5e-6).abs() < 1e-10);
+        assert!((fable.cache_read_per_tok - 1e-6).abs() < 1e-10);
+
+        let mythos = pricing_for_model("claude-mythos-5").unwrap();
+        assert!((mythos.in_per_tok - 10e-6).abs() < 1e-10);
+        assert!((mythos.out_per_tok - 50e-6).abs() < 1e-10);
+
+        // 1M-suffixed IDs resolve through the canonical key
+        let fable_1m = pricing_for_model("claude-fable-5[1m]").unwrap();
+        assert!((fable_1m.in_per_tok - 10e-6).abs() < 1e-10);
+
+        // Mythos preview and future variants fall back to the family heuristic
+        let preview = pricing_for_model("claude-mythos-preview").unwrap();
+        assert!((preview.in_per_tok - 10e-6).abs() < 1e-10);
+        assert!((preview.out_per_tok - 50e-6).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_fable_and_mythos_have_no_fast_mode() {
+        assert_eq!(fast_mode_multiplier("claude-fable-5"), 1.0);
+        assert_eq!(fast_mode_multiplier("claude-mythos-5"), 1.0);
+    }
+
+    #[test]
     fn test_sonnet_46_pricing() {
         let p = pricing_for_model("claude-sonnet-4-6").unwrap();
         assert!((p.in_per_tok - 3e-6).abs() < 1e-10);
@@ -586,11 +628,11 @@ mod tests {
 
     #[test]
     fn test_fast_mode_multiplier() {
-        // Current Opus models have 6x fast mode
-        assert!((fast_mode_multiplier("claude-opus-4-8") - 6.0).abs() < 1e-10);
+        // Fast mode: Opus 4.8 is $10/$50 (2x base), Opus 4.6/4.7 are $30/$150 (6x base)
+        assert!((fast_mode_multiplier("claude-opus-4-8") - 2.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("claude-opus-4-7") - 6.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("claude-opus-4-6") - 6.0).abs() < 1e-10);
-        assert!((fast_mode_multiplier("us.anthropic.claude-opus-4-8") - 6.0).abs() < 1e-10);
+        assert!((fast_mode_multiplier("us.anthropic.claude-opus-4-8") - 2.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("us.anthropic.claude-opus-4-6-v1") - 6.0).abs() < 1e-10);
         // Other models have no fast mode (1x)
         assert!((fast_mode_multiplier("claude-sonnet-4-6") - 1.0).abs() < 1e-10);

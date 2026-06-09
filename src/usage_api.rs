@@ -84,6 +84,8 @@ pub struct ExtraUsage {
     pub monthly_limit: Option<f64>,
     pub used_credits: Option<f64>,
     pub utilization: Option<f64>,
+    pub currency: Option<String>,
+    pub disabled_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -95,6 +97,9 @@ pub struct UsageSummary {
     pub seven_day_sonnet: UsageLimit,
     pub seven_day_oauth_apps: UsageLimit,
     pub seven_day_cowork: UsageLimit,
+    /// One-time promotional credit shared between Claude Code and Cowork;
+    /// `resets_at` is the credit's expiry rather than a window reset.
+    pub cinder_cove: UsageLimit,
     pub extra_usage: Option<ExtraUsage>,
     /// True when serving expired cached data after an API failure
     pub stale: bool,
@@ -107,6 +112,8 @@ struct ExtraUsageDto {
     monthly_limit: Option<f64>,
     used_credits: Option<f64>,
     utilization: Option<f64>,
+    currency: Option<String>,
+    disabled_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +139,8 @@ struct UsageResponseDto {
     seven_day_oauth_apps: Option<UsageLimitDto>,
     #[serde(default)]
     seven_day_cowork: Option<UsageLimitDto>,
+    #[serde(default)]
+    cinder_cove: Option<UsageLimitDto>,
     #[serde(default)]
     extra_usage: Option<ExtraUsageDto>,
 }
@@ -239,12 +248,15 @@ fn fetch_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
             .seven_day_cowork
             .map(UsageLimit::from)
             .unwrap_or_default(),
+        cinder_cove: dto.cinder_cove.map(UsageLimit::from).unwrap_or_default(),
         extra_usage: dto.extra_usage.map(|e| ExtraUsage {
             is_enabled: e.is_enabled,
             // API returns cents, convert to dollars
             monthly_limit: e.monthly_limit.map(|v| v / 100.0),
             used_credits: e.used_credits.map(|v| v / 100.0),
             utilization: e.utilization,
+            currency: e.currency,
+            disabled_reason: e.disabled_reason,
         }),
         stale: false,
     })
@@ -376,5 +388,52 @@ where
             .map_err(serde::de::Error::custom)
     } else {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_response_parses_raw_api_shape() {
+        // Mirrors the live /api/oauth/usage body, including null codename
+        // fields the statusline does not model.
+        let raw = r#"{
+            "five_hour": {"utilization": 20.0, "resets_at": "2026-06-09T21:20:01.037017+00:00"},
+            "seven_day": {"utilization": 5.0, "resets_at": "2026-06-16T07:00:01.037038+00:00"},
+            "seven_day_oauth_apps": null,
+            "seven_day_opus": null,
+            "seven_day_sonnet": {"utilization": 0.0, "resets_at": null},
+            "seven_day_cowork": null,
+            "seven_day_omelette": null,
+            "tangelo": null,
+            "iguana_necktie": null,
+            "omelette_promotional": null,
+            "cinder_cove": {"utilization": 12.0, "resets_at": "2026-07-01T00:00:00+00:00"},
+            "extra_usage": {
+                "is_enabled": true,
+                "monthly_limit": 30000,
+                "used_credits": 1200.0,
+                "utilization": 4.0,
+                "currency": "USD",
+                "disabled_reason": null
+            }
+        }"#;
+
+        let dto: UsageResponseDto = serde_json::from_str(raw).expect("parse raw usage response");
+        assert_eq!(
+            dto.five_hour.as_ref().and_then(|l| l.utilization),
+            Some(20.0)
+        );
+        assert!(dto.seven_day_opus.is_none());
+
+        let cinder = UsageLimit::from(dto.cinder_cove.expect("cinder_cove"));
+        assert_eq!(cinder.utilization, Some(12.0));
+        assert!(cinder.resets_at.is_some());
+
+        let extra = dto.extra_usage.expect("extra_usage");
+        assert_eq!(extra.currency.as_deref(), Some("USD"));
+        assert_eq!(extra.disabled_reason, None);
     }
 }

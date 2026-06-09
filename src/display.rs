@@ -651,8 +651,16 @@ pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String 
     let lower_disp = display.to_lowercase();
     let tc = is_truecolor_enabled(args);
 
+    // Fable/Mythos tier -> Rose
+    let token = if lower_id.contains("fable")
+        || lower_disp.contains("fable")
+        || lower_id.contains("mythos")
+        || lower_disp.contains("mythos")
+    {
+        tokens::MODEL_FABLE
+    }
     // Opus family -> Purple
-    let token = if lower_id.contains("opus") || lower_disp.contains("opus") {
+    else if lower_id.contains("opus") || lower_disp.contains("opus") {
         tokens::MODEL_OPUS
     }
     // Sonnet family -> Amber/Yellow
@@ -696,7 +704,11 @@ fn normalized_model_label(
 fn model_family_label(model_id: &str, display: &str) -> Option<&'static str> {
     let lower_id = model_id.to_lowercase();
     let lower_display = display.to_lowercase();
-    if lower_id.contains("opus") || lower_display.contains("opus") {
+    if lower_id.contains("fable") || lower_display.contains("fable") {
+        Some("Fable")
+    } else if lower_id.contains("mythos") || lower_display.contains("mythos") {
+        Some("Mythos")
+    } else if lower_id.contains("opus") || lower_display.contains("opus") {
         Some("Opus")
     } else if lower_id.contains("sonnet") || lower_display.contains("sonnet") {
         Some("Sonnet")
@@ -1609,6 +1621,23 @@ fn render_compact_text_output(
     fit_status_segments(&prompt, segments, &separator, profile.safe_width)
 }
 
+/// Currency symbol for the extra-usage token; mirrors the Claude Code
+/// formatter's symbol map and falls back to the ISO code for the rest.
+fn extra_usage_symbol(currency: Option<&str>) -> String {
+    match currency.unwrap_or("USD") {
+        "USD" => SYM_DOLLAR.to_string(),
+        "EUR" => "€".to_string(),
+        "GBP" => "£".to_string(),
+        "JPY" => "¥".to_string(),
+        "BRL" => "R$".to_string(),
+        "CAD" => "CA$".to_string(),
+        "AUD" => "AU$".to_string(),
+        "NZD" => "NZ$".to_string(),
+        "SGD" => "SG$".to_string(),
+        other => format!("{other} "),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_rich_text_output(
     args: &Args,
@@ -1776,6 +1805,7 @@ fn render_rich_text_output(
                 && extra.is_enabled
             {
                 let label = if long_labels { "extra:" } else { "ex:" };
+                let symbol = extra_usage_symbol(extra.currency.as_deref());
                 let spent = extra.used_credits.unwrap_or(0.0);
                 let limit = extra.monthly_limit.unwrap_or(0.0);
                 let spent_token = if limit > 0.0 {
@@ -1787,7 +1817,7 @@ fn render_rich_text_output(
                     format!(
                         "{}{}{}/{}",
                         muted_label(label, tc),
-                        tokens::MUTED.paint(SYM_DOLLAR, tc),
+                        tokens::MUTED.paint(&symbol, tc),
                         spent_token.paint(&format!("{:.0}", spent), tc),
                         muted_label(&format!("{:.0}", limit), tc)
                     )
@@ -1795,7 +1825,7 @@ fn render_rich_text_output(
                     format!(
                         "{}{}{}",
                         muted_label(label, tc),
-                        tokens::MUTED.paint(SYM_DOLLAR, tc),
+                        tokens::MUTED.paint(&symbol, tc),
                         spent_token.paint(&format!("{:.2}", spent), tc)
                     )
                 };
@@ -2232,6 +2262,32 @@ mod tests {
     }
 
     #[test]
+    fn extra_usage_symbol_maps_currencies() {
+        assert_eq!(extra_usage_symbol(None), "$");
+        assert_eq!(extra_usage_symbol(Some("USD")), "$");
+        assert_eq!(extra_usage_symbol(Some("EUR")), "€");
+        assert_eq!(extra_usage_symbol(Some("CHF")), "CHF ");
+    }
+
+    #[test]
+    fn model_labels_recognize_fable_and_mythos() {
+        assert_eq!(
+            model_family_label("claude-fable-5", "Fable 5"),
+            Some("Fable")
+        );
+        assert_eq!(
+            model_family_label("claude-mythos-5", "Mythos 5"),
+            Some("Mythos")
+        );
+        assert_eq!(tiny_model_label("claude-fable-5[1m]", "Fable 5"), "Fable");
+        assert_eq!(compact_model_label("claude-fable-5", "Fable 5"), "Fable 5");
+        assert_eq!(
+            compact_model_label("claude-mythos-5", "Claude Mythos 5"),
+            "Mythos 5"
+        );
+    }
+
+    #[test]
     #[serial]
     fn compact_line_keeps_family_name_at_tiny_width() {
         let env = terminal_env_guard();
@@ -2413,6 +2469,7 @@ mod tests {
                 monthly_limit: Some(60.0),
                 used_credits: Some(17.0),
                 utilization: Some(28.3),
+                ..Default::default()
             }),
             ..UsageSummary::default()
         };
@@ -2692,11 +2749,14 @@ pub fn build_json_output(
             "seven_day_sonnet": usage_limit_json(&summary.seven_day_sonnet),
             "seven_day_oauth_apps": usage_limit_json(&summary.seven_day_oauth_apps),
             "seven_day_cowork": usage_limit_json(&summary.seven_day_cowork),
+            "cinder_cove": usage_limit_json(&summary.cinder_cove),
             "extra_usage": summary.extra_usage.as_ref().map(|e| serde_json::json!({
                 "is_enabled": e.is_enabled,
                 "monthly_limit": e.monthly_limit,
                 "used_credits": e.used_credits,
-                "utilization": e.utilization
+                "utilization": e.utilization,
+                "currency": e.currency,
+                "disabled_reason": e.disabled_reason
             }))
         })
     });
