@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [2.4.0](https://github.com/camjac251/rust-statusline/compare/v2.3.0...v2.4.0) - 2026-06-09
+
+### Added
+
+- add Claude Fable 5 and Mythos 5 support
+
 ## [2.3.0](https://github.com/camjac251/rust-statusline/compare/v2.2.0...v2.3.0) - 2026-05-29
 
 ### Added
