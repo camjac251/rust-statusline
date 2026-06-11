@@ -79,7 +79,7 @@ Pipeline: stdin JSON hook -> transcript parsing -> pricing -> display (text or J
 - Transcript files in `~/.config/claude` and `~/.claude`
 - Pricing embedded from `pricing.json`, overridable via `CLAUDE_PRICE_*` env vars
 - Config files are optional: explicit `--config`, project `.claude-statusline.toml`, then `~/.config/claude-statusline/config.toml`; precedence is defaults < config < env < CLI
-- `doctor` reports Claude paths, `settings.json`, DB/WAL health, OAuth cache/token availability, config load status, and pricing source without reading hook stdin
+- `doctor` reports Claude paths, `settings.json`, DB/WAL health, OAuth cache/token availability, the usage API egress route (direct or proxy, from `HTTPS_PROXY`/`NO_PROXY`, plus `NODE_EXTRA_CA_CERTS` trust), config load status, and pricing source without reading hook stdin
 - `init` writes/updates the Claude Code `statusLine` command, padding, and `refreshInterval`
 - OAuth usage API for utilization percentages and reset times (fallback; hook data is preferred)
 - Subagent transcripts in `subagents/agent-*.jsonl` are included in cost calculations

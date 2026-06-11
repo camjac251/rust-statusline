@@ -11,6 +11,10 @@ const CACHE_TTL_SECONDS: i64 = 300;
 const NEGATIVE_CACHE_TTL_SECONDS: i64 = 120;
 const FETCH_LOCK_TTL_SECONDS: i64 = 10;
 const ANTHROPIC_BETA: &str = "oauth-2025-04-20";
+/// Extra CA bundle path, matching Claude Code's proxy CA env var. When set, the
+/// usage call trusts these certs (plus system roots) so it validates behind a
+/// TLS-intercepting proxy whose CA is not in the public root store.
+const EXTRA_CA_ENV: &str = "NODE_EXTRA_CA_CERTS";
 const API_CACHE_KEY: &str = "oauth_usage_summary";
 const NEGATIVE_CACHE_KEY: &str = "oauth_usage_negative";
 
@@ -42,6 +46,122 @@ pub fn is_direct_claude_api(model_id: Option<&str>) -> bool {
     true
 }
 
+/// Where the OAuth usage ("stats") API request egresses: straight to Anthropic,
+/// or through an HTTP/HTTPS proxy resolved from the environment.
+///
+/// Resolution mirrors the real request path. It uses ureq's own
+/// `Proxy::try_from_env` (the same value the request agent is built from) and
+/// `NO_PROXY` matching, so the reported route is exactly what the call takes.
+/// Proxy credentials are never included in any field.
+#[derive(Debug, Clone, Serialize)]
+pub struct UsageEgress {
+    /// Human-readable route with credentials masked, e.g. `direct` or
+    /// `proxy http://127.0.0.1:8080 (auth)`.
+    pub route: String,
+    /// True when an environment proxy carries the request.
+    pub via_proxy: bool,
+    /// Proxy origin as `host:port` when `via_proxy`; never contains credentials.
+    pub proxy_origin: Option<String>,
+    /// True when a configured proxy is bypassed by `NO_PROXY` for the usage host.
+    pub no_proxy_bypass: bool,
+    /// Path from `NODE_EXTRA_CA_CERTS` when set; the usage call trusts this CA
+    /// bundle (plus system roots) for TLS, mirroring Claude Code.
+    pub extra_ca: Option<String>,
+}
+
+/// Path from `NODE_EXTRA_CA_CERTS` if it is set to a non-empty value.
+fn extra_ca_path() -> Option<String> {
+    env::var(EXTRA_CA_ENV)
+        .ok()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+}
+
+/// Resolve the egress route for the usage endpoint from the current environment.
+pub fn resolve_usage_egress() -> UsageEgress {
+    let extra_ca = extra_ca_path();
+    let direct = |route: &str, bypass: bool| UsageEgress {
+        route: route.to_string(),
+        via_proxy: false,
+        proxy_origin: None,
+        no_proxy_bypass: bypass,
+        extra_ca: extra_ca.clone(),
+    };
+
+    let Ok(endpoint) = USAGE_ENDPOINT.parse::<ureq::http::Uri>() else {
+        return direct("direct", false);
+    };
+
+    match ureq::Proxy::try_from_env() {
+        None => direct("direct", false),
+        Some(proxy) if proxy.is_no_proxy(&endpoint) => direct("direct (NO_PROXY bypass)", true),
+        Some(proxy) => {
+            let scheme = proxy.protocol().to_string().to_lowercase();
+            let origin = format!("{}:{}", proxy.host(), proxy.port());
+            let auth = if proxy.username().is_some() {
+                " (auth)"
+            } else {
+                ""
+            };
+            UsageEgress {
+                route: format!("proxy {scheme}://{origin}{auth}"),
+                via_proxy: true,
+                proxy_origin: Some(origin),
+                no_proxy_bypass: false,
+                extra_ca,
+            }
+        }
+    }
+}
+
+/// Parse every certificate from a PEM bundle, skipping any non-certificate items.
+fn parse_ca_pem(pem: &[u8]) -> Vec<ureq::tls::Certificate<'static>> {
+    ureq::tls::parse_pem(pem)
+        .filter_map(|item| match item {
+            Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Build the TLS root set for the usage call.
+///
+/// Returns `None` when `NODE_EXTRA_CA_CERTS` is unset, so ureq keeps its default
+/// Mozilla roots and the common path is unchanged. When set, trust the system
+/// roots plus the extra CA bundle (Claude Code trusts bundled + system + extra),
+/// so the call validates whether or not the proxy intercepts the usage host.
+fn usage_root_certs() -> Option<ureq::tls::RootCerts> {
+    let extra_path = extra_ca_path()?;
+
+    let mut certs: Vec<ureq::tls::Certificate<'static>> = Vec::new();
+
+    // System roots so hosts the proxy does not intercept still validate.
+    let native = rustls_native_certs::load_native_certs();
+    for err in &native.errors {
+        eprintln!("CA load: system root store warning: {}", err);
+    }
+    certs.extend(
+        native
+            .certs
+            .iter()
+            .map(|der| ureq::tls::Certificate::from_der(der.as_ref()).to_owned()),
+    );
+
+    // The proxy's CA bundle (NODE_EXTRA_CA_CERTS); may contain several certs.
+    match fs::read(&extra_path) {
+        Ok(pem) => certs.extend(parse_ca_pem(&pem)),
+        Err(e) => eprintln!(
+            "CA load: cannot read {} ({}): {}",
+            EXTRA_CA_ENV, extra_path, e
+        ),
+    }
+
+    if certs.is_empty() {
+        return None;
+    }
+    Some(ureq::tls::RootCerts::from(certs))
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct UsageApiHealth {
     pub direct_claude_api: bool,
@@ -49,6 +169,7 @@ pub struct UsageApiHealth {
     pub fresh_cache_present: bool,
     pub stale_cache_present: bool,
     pub negative_cache_active: bool,
+    pub egress: UsageEgress,
 }
 
 pub fn inspect_usage_api(claude_paths: &[PathBuf], model_id: Option<&str>) -> UsageApiHealth {
@@ -67,6 +188,7 @@ pub fn inspect_usage_api(claude_paths: &[PathBuf], model_id: Option<&str>) -> Us
             .ok()
             .flatten()
             .is_some(),
+        egress: resolve_usage_egress(),
     }
 }
 
@@ -206,10 +328,12 @@ fn stale_fallback() -> Option<UsageSummary> {
 
 fn fetch_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
     let token = find_oauth_token(claude_paths)?;
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(5)))
-        .build()
-        .into();
+    let mut config = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(5)));
+    // Honor NODE_EXTRA_CA_CERTS so the call works behind a TLS-intercepting proxy.
+    if let Some(roots) = usage_root_certs() {
+        config = config.tls_config(ureq::tls::TlsConfig::builder().root_certs(roots).build());
+    }
+    let agent: ureq::Agent = config.build().into();
 
     let response = agent
         .get(USAGE_ENDPOINT)
@@ -394,6 +518,148 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    /// Every env var ureq's `Proxy::try_from_env` inspects, cleared so each
+    /// egress test starts from a known direct baseline regardless of any proxy
+    /// vars the host shell exports.
+    const PROXY_VARS: &[&str] = &[
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ];
+
+    fn clear_proxy_env() {
+        for var in PROXY_VARS {
+            unsafe { env::remove_var(var) };
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn egress_is_direct_without_proxy_env() {
+        clear_proxy_env();
+        let egress = resolve_usage_egress();
+        assert_eq!(egress.route, "direct");
+        assert!(!egress.via_proxy);
+        assert!(!egress.no_proxy_bypass);
+        assert!(egress.proxy_origin.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn egress_reports_proxy_without_leaking_credentials() {
+        clear_proxy_env();
+        unsafe { env::set_var("HTTPS_PROXY", "http://user:s3cr3t@127.0.0.1:8080") };
+        let egress = resolve_usage_egress();
+        clear_proxy_env();
+
+        assert!(egress.via_proxy);
+        assert_eq!(egress.proxy_origin.as_deref(), Some("127.0.0.1:8080"));
+        assert_eq!(egress.route, "proxy http://127.0.0.1:8080 (auth)");
+        // Credentials must never appear in any reported field.
+        assert!(!egress.route.contains("user"));
+        assert!(!egress.route.contains("s3cr3t"));
+    }
+
+    #[test]
+    #[serial]
+    fn egress_marks_proxy_without_auth() {
+        clear_proxy_env();
+        unsafe { env::set_var("HTTPS_PROXY", "http://127.0.0.1:8080") };
+        let egress = resolve_usage_egress();
+        clear_proxy_env();
+
+        assert!(egress.via_proxy);
+        assert_eq!(egress.route, "proxy http://127.0.0.1:8080");
+    }
+
+    #[test]
+    #[serial]
+    fn egress_honors_no_proxy_bypass_for_usage_host() {
+        clear_proxy_env();
+        unsafe {
+            env::set_var("HTTPS_PROXY", "http://127.0.0.1:8080");
+            env::set_var("NO_PROXY", "api.anthropic.com");
+        }
+        let egress = resolve_usage_egress();
+        clear_proxy_env();
+
+        assert!(!egress.via_proxy);
+        assert!(egress.no_proxy_bypass);
+        assert_eq!(egress.route, "direct (NO_PROXY bypass)");
+    }
+
+    /// A throwaway self-signed CA (generic `example.com` subject) used to verify
+    /// PEM parsing without depending on the host trust store.
+    const TEST_CA_PEM: &[u8] = b"-----BEGIN CERTIFICATE-----
+MIIDNzCCAh+gAwIBAgIUP1PQSL0D5eHPT0VFXLKgGCLiMRgwDQYJKoZIhvcNAQEL
+BQAwKzEXMBUGA1UEAwwOY2EuZXhhbXBsZS5jb20xEDAOBgNVBAoMB0V4YW1wbGUw
+HhcNMjYwNjExMjMxNzU4WhcNMzYwNjA4MjMxNzU4WjArMRcwFQYDVQQDDA5jYS5l
+eGFtcGxlLmNvbTEQMA4GA1UECgwHRXhhbXBsZTCCASIwDQYJKoZIhvcNAQEBBQAD
+ggEPADCCAQoCggEBALR302tX0VsRu3oA1+erX01HgCJLjbRtzBv9kWenCwiWfJN5
+AGkcKc0iMJ/gzQ9TbAoLJf/pNtF6v+AtI3CSb0+TbwbvlTrBIpyN6KtWdEyrvgyD
+HcE1fWvZA/b9lEnzEXd5NNcBjlkpnqqBM8HucR40hpfRj7n7tcPvaBLvMzcK87Lq
+LBB9jzPswBn4LqjZ7ExFb6CbrrgL9ByMww8pE0CtL3b8OsK09dyHbgPcoiBmWl6n
+KjYwNAciMwnDffcX+BvlGrQKOiUdvJtwFOgvXPVRux+7wrpOxok9rC2JkGm/9yDd
+XR3U6p4X+lCR1RuABX+J1UXmJU3UObTAavkVrFkCAwEAAaNTMFEwHQYDVR0OBBYE
+FFeqt9XZl/slVJ030KkOyr776PDUMB8GA1UdIwQYMBaAFFeqt9XZl/slVJ030KkO
+yr776PDUMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEBAKJ8V5hl
+BA0mC/B1f3MbKvZQbEtryd+a3np27N2IRJ+XfLMHOa1LvGg1qC4+JoVyfhEtNmsO
+sgkHnIL2RvIW8/SYMSUaq1cY7mzw6JRNcZe12OTVYkOtqJ52wTZACqWlQ1xpwz0e
+k5nj3y5iLftTuywFo817iOMyqpz7iq2XNdufSEVj/xo04si+s8Un9moyBEr5nCep
+fdecU9SsQ5B3axIt8C4/jrJZT1NczYwQFdeBhO9P7v6l9z6OcrPaHjB/pXqi3KOb
+5EwLfd2N18XYtvK6cgwtbTtKA/Y7Gpsx9DJgjXKEgxmf/bFy5MQ/t6W1O0GzjhFF
+KYWlso+DPM561Zw=
+-----END CERTIFICATE-----
+";
+
+    #[test]
+    fn parse_ca_pem_extracts_certificates() {
+        assert_eq!(parse_ca_pem(TEST_CA_PEM).len(), 1);
+    }
+
+    #[test]
+    fn parse_ca_pem_ignores_non_certificate_input() {
+        assert!(parse_ca_pem(b"not a pem file").is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn usage_root_certs_absent_without_extra_ca_env() {
+        let prior = env::var(EXTRA_CA_ENV).ok();
+        unsafe { env::remove_var(EXTRA_CA_ENV) };
+        assert!(usage_root_certs().is_none());
+        if let Some(value) = prior {
+            unsafe { env::set_var(EXTRA_CA_ENV, value) };
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn egress_reports_extra_ca_path() {
+        clear_proxy_env();
+        let prior = env::var(EXTRA_CA_ENV).ok();
+
+        unsafe { env::set_var(EXTRA_CA_ENV, "/etc/ssl/corp-ca.pem") };
+        assert_eq!(
+            resolve_usage_egress().extra_ca.as_deref(),
+            Some("/etc/ssl/corp-ca.pem")
+        );
+
+        unsafe { env::remove_var(EXTRA_CA_ENV) };
+        assert!(resolve_usage_egress().extra_ca.is_none());
+
+        match prior {
+            Some(value) => unsafe { env::set_var(EXTRA_CA_ENV, value) },
+            None => unsafe { env::remove_var(EXTRA_CA_ENV) },
+        }
+    }
 
     #[test]
     fn usage_response_parses_raw_api_shape() {

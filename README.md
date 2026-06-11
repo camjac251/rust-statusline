@@ -249,7 +249,7 @@ claude_statusline init --dry-run
 claude_statusline init --refresh-interval 5
 ```
 
-`doctor` checks Claude config paths, `settings.json`, SQLite cache health, OAuth cache/token availability, config loading, and pricing lookup provenance without reading statusline stdin.
+`doctor` checks Claude config paths, `settings.json`, SQLite cache health, OAuth cache/token availability, the usage API egress route (direct, or through a proxy resolved from `HTTPS_PROXY`/`NO_PROXY`, plus any `NODE_EXTRA_CA_CERTS` trust), config loading, and pricing lookup provenance without reading statusline stdin.
 
 `init` writes the Claude Code `statusLine` block to `settings.json`:
 
@@ -366,6 +366,8 @@ usage_limits = true
 | `CLAUDE_CONTEXT_LIMIT=N` | Override context window size (tokens) |
 | `CLAUDE_PROVIDER=...` | Override provider display (`firstParty` becomes `anthropic`) |
 | `CLAUDE_CONFIG_DIR=...` | Comma-separated list of Claude data roots |
+| `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | Route the OAuth usage API call through the same proxy Claude Code uses (upper or lower case). Inherited from the environment, including `settings.json` `env`. Verify the resolved route with `doctor` |
+| `NODE_EXTRA_CA_CERTS=...` | Extra CA bundle (PEM) trusted for the usage API call, in addition to system roots. Mirrors Claude Code, so the call works behind a TLS-intercepting proxy |
 | `CLAUDE_STATUSLINE_SUBSYSTEM_NO_GIT=true` | Skip gix repository inspection entirely |
 | `CLAUDE_STATUSLINE_SUBSYSTEM_NO_BEADS=true` | Skip beads issue tracker integration |
 | `CLAUDE_STATUSLINE_SUBSYSTEM_NO_GASTOWN=true` | Skip Gas Town multi-agent integration |

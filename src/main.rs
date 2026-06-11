@@ -18,7 +18,7 @@ use claude_statusline::provenance::{CostProvenance, SessionCostSource, TodayCost
 use claude_statusline::usage::{
     calc_context_from_entries, calc_context_from_transcript, parse_session_state, scan_usage,
 };
-use claude_statusline::usage_api::{UsageSummary, get_usage_summary};
+use claude_statusline::usage_api::{UsageSummary, get_usage_summary, resolve_usage_egress};
 use claude_statusline::utils::{claude_paths, friendly_model_name, read_stdin};
 use claude_statusline::window::{BurnScope, WindowScope, calculate_window_metrics};
 
@@ -639,6 +639,16 @@ fn main() -> Result<()> {
                 "Window scope: {:?}, Burn scope: {:?}",
                 args.window_scope, args.burn_scope
             );
+            let usage_egress = resolve_usage_egress();
+            match &usage_egress.extra_ca {
+                Some(path) => {
+                    eprintln!(
+                        "Usage API egress: {} (extra CA: {})",
+                        usage_egress.route, path
+                    )
+                }
+                None => eprintln!("Usage API egress: {}", usage_egress.route),
+            }
             eprintln!("{}", "========================".bright_black());
         }
     }

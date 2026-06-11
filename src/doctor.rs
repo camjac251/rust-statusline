@@ -259,6 +259,14 @@ fn print_report(report: &DoctorReport) {
         report.usage_api.negative_cache_active
     );
     println!(
+        "usage_api egress: {}{}",
+        report.usage_api.egress.route,
+        match &report.usage_api.egress.extra_ca {
+            Some(path) => format!(" (extra CA: {})", path),
+            None => String::new(),
+        }
+    );
+    println!(
         "pricing: model={} source={}",
         report.pricing.probe_model,
         report.pricing.source.as_str()
