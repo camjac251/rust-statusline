@@ -160,7 +160,7 @@ claude_statusline init [OPTIONS]
 | `--burn-scope <session\|global>` | Burn rate scope (default: session) |
 | `--git <minimal\|verbose>` | Git header verbosity (default: minimal) |
 | `--truecolor` | Force truecolor accents |
-| `--debug` | Show detailed calculation info to stderr |
+| `--debug` | Show detailed calculation info to stderr (includes the usage API egress route) |
 | `--claude-config-dir <PATHS>` | Override Claude data roots (comma-separated) |
 
 **Subsystem toggles** (skip the work entirely; affects text + JSON)
@@ -250,6 +250,17 @@ claude_statusline init --refresh-interval 5
 ```
 
 `doctor` checks Claude config paths, `settings.json`, SQLite cache health, OAuth cache/token availability, the usage API egress route (direct, or through a proxy resolved from `HTTPS_PROXY`/`NO_PROXY`, plus any `NODE_EXTRA_CA_CERTS` trust), config loading, and pricing lookup provenance without reading statusline stdin.
+
+The `usage_api` lines show where the OAuth usage call goes (an excerpt):
+
+```text
+usage_api: direct=true token=true cache=false stale_cache=false negative_cache=false
+usage_api egress: proxy http://proxy.internal:8080 (auth)
+```
+
+The route reads `direct` when no proxy applies. Credentials embedded in the proxy URL are masked.
+
+**Proxy and TLS.** The usage API call follows the same proxy as Claude Code. It reads `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` (upper or lower case) from the inherited environment, so whatever you set in your shell or in `settings.json` `env` applies with no extra configuration. For a TLS-intercepting proxy, point `NODE_EXTRA_CA_CERTS` at the proxy's CA bundle (PEM); it is trusted in addition to the system roots. Run `doctor` to confirm the resolved route.
 
 `init` writes the Claude Code `statusLine` block to `settings.json`:
 

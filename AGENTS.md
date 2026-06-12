@@ -56,7 +56,7 @@ Pipeline: stdin JSON hook -> transcript parsing -> pricing -> display (text or J
 | `models/beads.rs` | Beads models |
 | `models/gastown.rs` | Gas Town models |
 | `usage.rs` | Transcript analysis, session/window/daily metrics, burn rates |
-| `usage_api.rs` | OAuth usage API client with SQLite-cached responses |
+| `usage_api.rs` | OAuth usage API client with SQLite-cached responses; honors proxy env and `NODE_EXTRA_CA_CERTS`, reports egress route |
 | `pricing.rs` | Model pricing tables (compile-time from `pricing.json`) |
 | `provenance.rs` | Cost, pricing, and context source metadata |
 | `db.rs` | SQLite persistent cache and usage event ledger for cross-session usage tracking |
@@ -80,6 +80,7 @@ Pipeline: stdin JSON hook -> transcript parsing -> pricing -> display (text or J
 - Pricing embedded from `pricing.json`, overridable via `CLAUDE_PRICE_*` env vars
 - Config files are optional: explicit `--config`, project `.claude-statusline.toml`, then `~/.config/claude-statusline/config.toml`; precedence is defaults < config < env < CLI
 - `doctor` reports Claude paths, `settings.json`, DB/WAL health, OAuth cache/token availability, the usage API egress route (direct or proxy, from `HTTPS_PROXY`/`NO_PROXY`, plus `NODE_EXTRA_CA_CERTS` trust), config load status, and pricing source without reading hook stdin
+- Usage API HTTP honors `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` (via ureq env defaults, inherited from Claude Code's environment) and `NODE_EXTRA_CA_CERTS` (system roots + extra bundle via `rustls-native-certs`); `resolve_usage_egress` powers the route shown by `doctor`/`--debug`
 - `init` writes/updates the Claude Code `statusLine` command, padding, and `refreshInterval`
 - OAuth usage API for utilization percentages and reset times (fallback; hook data is preferred)
 - Subagent transcripts in `subagents/agent-*.jsonl` are included in cost calculations
@@ -116,7 +117,7 @@ Config: `release-plz.toml` (git-only, no crates.io publish, no CHANGELOG.md)
 
 ## Constraints
 
-- **Binary size**: Release < 7MB (CI enforced)
+- **Binary size**: Release < 7MB (CI enforced); currently ~6.5MB on Linux, so weigh new dependencies against the remaining headroom
 - **MSRV**: 1.88.0, edition 2024
 - **Pricing**: Compile-time embedded; override with all four `CLAUDE_PRICE_*` env vars
 - **Cache**: SQLite at `~/.claude/statusline.db` with session rows and a usage event ledger (WAL mode, concurrent-safe)
