@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## [2.5.0](https://github.com/camjac251/rust-statusline/compare/v2.4.0...v2.5.0) - 2026-06-12
+
+### Added
+
+- *(usage)* surface usage API egress and honor NODE_EXTRA_CA_CERTS
+
+### Other
+
+- document usage API proxy routing and NODE_EXTRA_CA_CERTS
+
 ## [2.4.0](https://github.com/camjac251/rust-statusline/compare/v2.3.0...v2.4.0) - 2026-06-09
 
 ### Added
