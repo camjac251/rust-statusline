@@ -1,4 +1,4 @@
-# AGENTS.md
+# rust-statusline
 
 Instructions for AI coding agents working on this repository.
 
