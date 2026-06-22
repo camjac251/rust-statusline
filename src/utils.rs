@@ -110,9 +110,11 @@ pub fn parse_iso_date(s: &str) -> Option<NaiveDate> {
 
 pub(crate) fn static_context_limit_lookup(model_id: &str) -> Option<u64> {
     let m = model_id.to_lowercase();
-    // Known variants; newer 1M-capable models must be listed before family fallbacks.
-    if m.contains("fable-5")
-        || m.contains("mythos-5")
+    // Every Fable/Mythos model (Fable 5, Mythos 5, Mythos Preview) ships a 1M
+    // window, so match the family. The Opus/Sonnet entries stay version-specific
+    // because only some generations of those families are 1M.
+    if m.contains("fable")
+        || m.contains("mythos")
         || m.contains("opus-4-8")
         || m.contains("opus-4-7")
         || m.contains("opus-4-6")
@@ -319,9 +321,11 @@ pub fn friendly_model_name(model_id: &str, display_name: &str) -> String {
     const FAMILIES: &[&str] = &["fable", "mythos", "opus", "sonnet", "haiku"];
 
     for family in FAMILIES {
-        // Current format: {family}-{version} e.g. "opus-4-6"
+        // Current format: {family}-{version} e.g. "opus-4-6". The 1M-context
+        // beta appends a "[1m]" tag to the id; drop it so the friendly name is
+        // just family + version (the 1M marker is re-derived for display).
         if let Some(rest) = without_suffix.strip_prefix(&format!("{}-", family)) {
-            let version = rest.replace('-', ".");
+            let version = rest.trim_end_matches("[1m]").replace('-', ".");
             return format!("{} {}", capitalize(family), version);
         }
     }
@@ -380,6 +384,20 @@ mod tests {
         assert_eq!(
             context_limit_for_model_display("claude-mythos-5", "Mythos 5"),
             1_000_000
+        );
+        // Mythos Preview is also a 1M Glasswing model (matched by family, not version).
+        assert_eq!(
+            context_limit_for_model_display("claude-mythos-preview", "Mythos Preview"),
+            1_000_000
+        );
+        // 200K models stay 200K (no family match wrongly bumps them to 1M).
+        assert_eq!(
+            context_limit_for_model_display("claude-haiku-4-5", "Haiku 4.5"),
+            200_000
+        );
+        assert_eq!(
+            context_limit_for_model_display("claude-opus-4-5", "Opus 4.5"),
+            200_000
         );
 
         // SAFETY: Test runs serially, no concurrent env access
@@ -538,6 +556,20 @@ mod tests {
                 "anthropic.claude-opus-4-6-v1"
             ),
             "Opus 4.6"
+        );
+    }
+
+    #[test]
+    fn test_friendly_model_name_drops_1m_tag() {
+        // The 1M-context beta appends a "[1m]" tag to the model id. Deriving a
+        // friendly name from the id (the /model-switch path) must not leak it.
+        assert_eq!(
+            friendly_model_name("claude-opus-4-8[1m]", "claude-opus-4-8[1m]"),
+            "Opus 4.8"
+        );
+        assert_eq!(
+            friendly_model_name("claude-sonnet-4-5[1m]", "claude-sonnet-4-5[1m]"),
+            "Sonnet 4.5"
         );
     }
 

@@ -92,7 +92,7 @@ use crate::usage_api::{UsageLimit, UsageSummary};
 use crate::utils::{
     auto_compact_enabled, auto_compact_headroom_tokens, context_limit_for_model_display,
     deduce_provider_from_model, format_currency, format_path, format_tokens,
-    reserved_output_tokens_for_model, system_overhead_tokens,
+    reserved_output_tokens_for_model, static_context_limit_lookup, system_overhead_tokens,
 };
 use crate::window::window_bounds;
 
@@ -677,6 +677,20 @@ pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String 
     token.paint(display, tc)
 }
 
+/// Strip the verbose 1M-context markers Claude Code attaches to model display
+/// names so every variant collapses to the bare family + version. The
+/// statusline hook names a 1M model "Opus 4.8 (1M context)", the model picker
+/// uses "(with 1M context)", and a raw model id can carry a "[1m]" tag.
+fn strip_context_suffix(display: &str) -> String {
+    display
+        .replace(" (with 1M context)", "")
+        .replace(" (1M context)", "")
+        .replace(" [1m]", "")
+        .replace("[1m]", "")
+        .trim()
+        .to_string()
+}
+
 fn normalized_model_label(
     model_id: &str,
     model_display_name: &str,
@@ -684,20 +698,18 @@ fn normalized_model_label(
 ) -> String {
     let effective_limit = context_limit_override
         .unwrap_or_else(|| context_limit_for_model_display(model_id, model_display_name));
-    let display_lower = model_display_name.to_lowercase();
-    let already_shows_context = display_lower.contains("1m") || display_lower.contains("200k");
+    let base = strip_context_suffix(model_display_name);
+    // The model's native window, ignoring any 1M opt-in tag. A 1M marker is only
+    // worth showing when 1M exceeds the default (e.g. Sonnet 4.5 with the 1M
+    // beta over its 200K default). When 1M *is* the default (Opus 4.8, Sonnet
+    // 4.6, Fable 5...) the marker just duplicates the context segment, so drop
+    // it. Unknown models default to 200K so an explicit 1M override still shows.
+    let native_limit = static_context_limit_lookup(model_id).unwrap_or(200_000);
 
-    if effective_limit >= 1_000_000 && !already_shows_context {
-        format!("{model_display_name} 1M")
-    } else if effective_limit < 1_000_000 && display_lower.contains("1m") {
-        model_display_name
-            .replace(" (with 1M context)", "")
-            .replace(" [1m]", "")
-            .replace("[1m]", "")
-            .trim()
-            .to_string()
+    if effective_limit >= 1_000_000 && effective_limit > native_limit {
+        format!("{base} (1M)")
     } else {
-        model_display_name.to_string()
+        base
     }
 }
 
@@ -728,14 +740,22 @@ fn model_version_hint(display: &str) -> Option<&str> {
     })
 }
 
+/// Mythos Preview shares the "Mythos" family with Mythos 5, so at compact widths
+/// (where the version is dropped) it needs its own tag to stay distinguishable.
+fn is_mythos_preview(model_id: &str, display: &str) -> bool {
+    let id = model_id.to_lowercase();
+    let disp = display.to_lowercase();
+    (id.contains("mythos") && id.contains("preview"))
+        || (disp.contains("mythos") && disp.contains("preview"))
+}
+
+const MYTHOS_PREVIEW_SHORT: &str = "Mythos-P";
+
 fn compact_model_label(model_id: &str, display: &str) -> String {
-    let without_vendor = display
-        .trim_start_matches("Claude ")
-        .replace(" (with 1M context)", "")
-        .replace(" [1m]", "")
-        .replace("[1m]", "")
-        .trim()
-        .to_string();
+    if is_mythos_preview(model_id, display) {
+        return MYTHOS_PREVIEW_SHORT.to_string();
+    }
+    let without_vendor = strip_context_suffix(display.trim_start_matches("Claude "));
 
     if !without_vendor.is_empty() && without_vendor != display {
         without_vendor
@@ -750,6 +770,9 @@ fn compact_model_label(model_id: &str, display: &str) -> String {
 }
 
 fn tiny_model_label(model_id: &str, display: &str) -> String {
+    if is_mythos_preview(model_id, display) {
+        return MYTHOS_PREVIEW_SHORT.to_string();
+    }
     let Some(family) = model_family_label(model_id, display) else {
         return truncate_label(display, 12);
     };
@@ -2284,6 +2307,105 @@ mod tests {
         assert_eq!(
             compact_model_label("claude-mythos-5", "Claude Mythos 5"),
             "Mythos 5"
+        );
+        // Mythos 5 keeps the plain family tag at the narrowest width.
+        assert_eq!(tiny_model_label("claude-mythos-5", "Mythos 5"), "Mythos");
+    }
+
+    #[test]
+    fn mythos_preview_gets_a_distinct_compact_tag() {
+        // Mythos Preview collapses to "Mythos-P" at compact and tiny widths so it
+        // stays distinct from Mythos 5, while the full name shows when there's room.
+        assert_eq!(
+            normalized_model_label("claude-mythos-preview", "Mythos Preview", Some(1_000_000)),
+            "Mythos Preview"
+        );
+        assert_eq!(
+            compact_model_label("claude-mythos-preview", "Mythos Preview"),
+            "Mythos-P"
+        );
+        assert_eq!(
+            tiny_model_label("claude-mythos-preview", "Mythos Preview"),
+            "Mythos-P"
+        );
+        // Detection also works from the id alone (e.g. the /model-switch path).
+        assert_eq!(
+            tiny_model_label("claude-mythos-preview", "claude-mythos-preview"),
+            "Mythos-P"
+        );
+        // Mythos 5 is unaffected.
+        assert_eq!(
+            compact_model_label("claude-mythos-5", "Mythos 5"),
+            "Mythos 5"
+        );
+        assert_eq!(tiny_model_label("claude-mythos-5", "Mythos 5"), "Mythos");
+    }
+
+    #[test]
+    fn model_label_drops_marker_when_1m_is_the_default() {
+        // 1M is Opus 4.8's native window, so every verbose form Claude Code can
+        // send collapses to the bare name with no redundant marker.
+        for display in [
+            "Opus 4.8 (1M context)",
+            "Opus 4.8 (with 1M context)",
+            "Opus 4.8[1m]",
+            "Opus 4.8 [1m]",
+            "Opus 4.8",
+        ] {
+            assert_eq!(
+                normalized_model_label("claude-opus-4-8[1m]", display, Some(1_000_000)),
+                "Opus 4.8",
+                "input {display:?} did not normalize"
+            );
+        }
+        // Sonnet 4.6 is also a native-1M model.
+        assert_eq!(
+            normalized_model_label("claude-sonnet-4-6", "Sonnet 4.6", Some(1_000_000)),
+            "Sonnet 4.6"
+        );
+        // Fable 5, Mythos 5, and Mythos Preview are all native-1M: no marker.
+        assert_eq!(
+            normalized_model_label("claude-fable-5", "Fable 5", Some(1_000_000)),
+            "Fable 5"
+        );
+        assert_eq!(
+            normalized_model_label("claude-mythos-5", "Mythos 5", Some(1_000_000)),
+            "Mythos 5"
+        );
+        assert_eq!(
+            normalized_model_label("claude-mythos-preview", "Mythos Preview", Some(1_000_000)),
+            "Mythos Preview"
+        );
+    }
+
+    #[test]
+    fn model_label_marks_1m_only_when_above_native_window() {
+        // Sonnet 4.5's native window is 200K, so the 1M beta variant is flagged.
+        for display in ["Sonnet 4.5 (1M context)", "Sonnet 4.5[1m]", "Sonnet 4.5"] {
+            assert_eq!(
+                normalized_model_label("claude-sonnet-4-5[1m]", display, Some(1_000_000)),
+                "Sonnet 4.5 (1M)",
+                "input {display:?} did not normalize"
+            );
+        }
+        // The standard 200K Sonnet 4.5 gets no marker.
+        assert_eq!(
+            normalized_model_label("claude-sonnet-4-5", "Sonnet 4.5", Some(200_000)),
+            "Sonnet 4.5"
+        );
+        // A stale 1M tag is dropped when the effective window is not 1M.
+        assert_eq!(
+            normalized_model_label(
+                "claude-sonnet-4-5",
+                "Sonnet 4.5 (1M context)",
+                Some(200_000)
+            ),
+            "Sonnet 4.5"
+        );
+        // A plain 200K model keeps its name unchanged.
+        assert_eq!(
+            normalized_model_label("claude-haiku-4-5", "Haiku 4.5", Some(200_000)),
+            "Haiku 4.5"
         );
     }
 
