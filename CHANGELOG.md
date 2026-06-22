@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## [2.5.1](https://github.com/camjac251/rust-statusline/compare/v2.5.0...v2.5.1) - 2026-06-22
+
+### Fixed
+
+- *(display)* correct 1M context naming across all models
+
+### Other
+
+- title CLAUDE.md with project name
+- make CLAUDE.md canonical, symlink AGENTS.md to it
+
 ## [2.5.0](https://github.com/camjac251/rust-statusline/compare/v2.4.0...v2.5.0) - 2026-06-12
 
 ### Added
