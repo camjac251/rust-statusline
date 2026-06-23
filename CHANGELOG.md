@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [2.5.2](https://github.com/camjac251/rust-statusline/compare/v2.5.1...v2.5.2) - 2026-06-23
+
+### Fixed
+
+- *(usage)* keep 5h window reset time accurate to the minute
+
 ## [2.5.1](https://github.com/camjac251/rust-statusline/compare/v2.5.0...v2.5.1) - 2026-06-22
 
 ### Fixed
