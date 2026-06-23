@@ -376,31 +376,31 @@ impl TranscriptContext {
 static ASSISTANT_LIMIT_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)limit\s+reached.*resets\s+(\d{1,2})\s*(am|pm)").unwrap());
 
-/// Round reset time to nearest hour (:00) to handle timezone/clock offset issues
+/// Round a reset timestamp to the nearest whole minute.
+///
+/// `resets_at` arrives from the OAuth usage API, the Claude Code hook, and
+/// transcript "limit reached" markers. The backend recomputes the value on
+/// every request, so the same window can report timestamps that differ by
+/// sub-second jitter (e.g. `14:15:00.10` on one call, `14:14:59.90` on the
+/// next). Rounding to the nearest minute collapses that jitter to one stable
+/// instant without distorting the real reset.
+///
+/// Do not round to the hour: 5-hour session windows are anchored to first
+/// use, so their resets are not hour-aligned (a window started at 09:15
+/// resets at 14:15). Hour-rounding would move that reset by up to 30 minutes
+/// and can push it into the past.
 pub fn normalize_reset_time(dt: DateTime<Utc>) -> DateTime<Utc> {
-    let minute = dt.minute();
-    let second = dt.second();
-
-    // If already at :00:00, return as-is
-    if minute == 0 && second == 0 {
-        return dt;
-    }
-
-    // Always round to nearest hour (:00) to handle timezone/clock offset issues
-    // Round up if minute >= 30, otherwise round down
-    let rounded_hour = if minute >= 30 {
-        // Round up to next hour
-        dt + chrono::TimeDelta::hours(1)
-    } else {
-        // Round down to current hour
-        dt
-    };
-
-    rounded_hour
-        .with_minute(0)
-        .and_then(|d| d.with_second(0))
+    let truncated = dt
+        .with_second(0)
         .and_then(|d| d.with_nanosecond(0))
-        .unwrap_or(dt)
+        .unwrap_or(dt);
+
+    // Round to the nearest minute: carry up once we are at or past :30 seconds.
+    if dt.second() >= 30 {
+        truncated + chrono::TimeDelta::minutes(1)
+    } else {
+        truncated
+    }
 }
 
 // Context warning message patterns
@@ -1791,6 +1791,56 @@ mod tests {
             .collect::<String>();
         fs::write(&transcript, contents)?;
         Ok(dir)
+    }
+
+    #[test]
+    fn normalize_reset_time_preserves_off_hour_minute() {
+        // 5-hour windows are anchored to first use, so resets land off the hour
+        // (a window started at 09:15 resets at 14:15). The minute must survive;
+        // hour-rounding here previously moved 14:15 back to 14:00.
+        let reset = Utc.with_ymd_and_hms(2026, 1, 1, 14, 15, 0).unwrap();
+        assert_eq!(normalize_reset_time(reset), reset);
+    }
+
+    #[test]
+    fn normalize_reset_time_collapses_sub_second_jitter() {
+        // The backend recomputes resets_at per request, so the same window can
+        // report 14:15:00.10 on one call and 14:14:59.90 on the next. Both must
+        // normalize to the same stable minute.
+        let expected = Utc.with_ymd_and_hms(2026, 1, 1, 14, 15, 0).unwrap();
+        let high = Utc
+            .with_ymd_and_hms(2026, 1, 1, 14, 15, 0)
+            .unwrap()
+            .with_nanosecond(100_000_000)
+            .unwrap();
+        let low = Utc
+            .with_ymd_and_hms(2026, 1, 1, 14, 14, 59)
+            .unwrap()
+            .with_nanosecond(900_000_000)
+            .unwrap();
+        assert_eq!(normalize_reset_time(high), expected);
+        assert_eq!(normalize_reset_time(low), expected);
+    }
+
+    #[test]
+    fn normalize_reset_time_keeps_hour_aligned_resets() {
+        // Weekly limits reset on the hour; rounding must leave them untouched.
+        let reset = Utc.with_ymd_and_hms(2026, 1, 1, 6, 0, 0).unwrap();
+        assert_eq!(normalize_reset_time(reset), reset);
+    }
+
+    #[test]
+    fn normalize_reset_time_rounds_at_half_minute() {
+        let down = Utc.with_ymd_and_hms(2026, 1, 1, 14, 15, 29).unwrap();
+        assert_eq!(
+            normalize_reset_time(down),
+            Utc.with_ymd_and_hms(2026, 1, 1, 14, 15, 0).unwrap()
+        );
+        let up = Utc.with_ymd_and_hms(2026, 1, 1, 14, 15, 30).unwrap();
+        assert_eq!(
+            normalize_reset_time(up),
+            Utc.with_ymd_and_hms(2026, 1, 1, 14, 16, 0).unwrap()
+        );
     }
 
     #[test]
