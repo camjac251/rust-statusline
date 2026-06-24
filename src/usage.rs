@@ -738,6 +738,16 @@ fn usage_limit_reset_from_text(text: &str, base: Option<DateTime<Utc>>) -> Optio
     }
 }
 
+fn line_may_affect_usage_scan(line: &str) -> bool {
+    line.contains("\"usage\"")
+        || line.contains("\"modelUsage\"")
+        || line.contains("\"total_cost_usd\"")
+        || line.contains("\"apiKeySource\"")
+        || line.contains("usage limit")
+        || line.contains("Usage limit")
+        || line.contains("USAGE LIMIT")
+}
+
 #[allow(clippy::type_complexity)]
 pub fn scan_usage(
     paths: &[PathBuf],
@@ -820,6 +830,9 @@ pub fn scan_usage(
                 };
                 let t = line.trim();
                 if t.is_empty() {
+                    continue;
+                }
+                if !line_may_affect_usage_scan(t) {
                     continue;
                 }
                 let v: Value = match serde_json::from_str(t) {
@@ -1700,6 +1713,31 @@ mod tests {
             normalize_reset_time(up),
             Utc.with_ymd_and_hms(2026, 1, 1, 14, 16, 0).unwrap()
         );
+    }
+
+    #[test]
+    fn usage_scan_filter_keeps_cost_usage_reset_and_provider_lines() {
+        assert!(line_may_affect_usage_scan(
+            r#"{"message":{"usage":{"input_tokens":1}}}"#
+        ));
+        assert!(line_may_affect_usage_scan(
+            r#"{"type":"result","modelUsage":{"claude-sonnet-4-6":{}}}"#
+        ));
+        assert!(line_may_affect_usage_scan(
+            r#"{"type":"result","total_cost_usd":1.23}"#
+        ));
+        assert!(line_may_affect_usage_scan(
+            r#"{"type":"system","apiKeySource":"oauth"}"#
+        ));
+        assert!(line_may_affect_usage_scan(
+            r#"{"message":{"content":[{"text":"Claude AI usage limit reached"}]}}"#
+        ));
+        assert!(!line_may_affect_usage_scan(
+            r#"{"type":"user","message":{"content":"ordinary message"}}"#
+        ));
+        assert!(!line_may_affect_usage_scan(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use"}]}}"#
+        ));
     }
 
     #[test]
