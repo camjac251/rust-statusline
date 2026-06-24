@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [2.5.4](https://github.com/camjac251/rust-statusline/compare/v2.5.3...v2.5.4) - 2026-06-24
+
+### Other
+
+- *(usage)* avoid redundant statusline scans
+
 ## [2.5.3](https://github.com/camjac251/rust-statusline/compare/v2.5.2...v2.5.3) - 2026-06-24
 
 ### Fixed
