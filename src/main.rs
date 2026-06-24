@@ -16,15 +16,17 @@ use claude_statusline::gastown::get_gastown_info;
 use claude_statusline::models::{Entry, HookJson, RateLimitInfo};
 use claude_statusline::provenance::{CostProvenance, SessionCostSource, TodayCostSource};
 use claude_statusline::usage::{
-    DEFAULT_SCAN_LOOKBACK_HOURS, calc_context_from_entries, calc_context_from_transcript,
-    parse_session_state, scan_usage,
+    DEFAULT_SCAN_LOOKBACK_HOURS, calc_context_from_entries, parse_active_transcript_state,
+    scan_usage,
 };
 use claude_statusline::usage_api::{UsageSummary, get_usage_summary, resolve_usage_egress};
 use claude_statusline::utils::{claude_paths, friendly_model_name, read_stdin};
 use claude_statusline::window::{BurnScope, WindowScope, calculate_window_metrics};
 
 const DB_SCAN_REFRESH_KEY: &str = "usage_scan:last_full_scan_at";
+const DB_SCAN_LOCK_KEY: &str = "usage_scan:full_scan_lock";
 const DB_SCAN_REFRESH_INTERVAL_SECONDS: i64 = 60;
+const DB_SCAN_LOCK_TTL_SECONDS: i64 = 20;
 
 fn db_scan_recently_refreshed(now_ts: i64) -> bool {
     claude_statusline::db::load_metadata(DB_SCAN_REFRESH_KEY)
@@ -39,6 +41,15 @@ fn db_scan_recently_refreshed(now_ts: i64) -> bool {
 
 fn mark_db_scan_refreshed(now_ts: i64) {
     let _ = claude_statusline::db::store_metadata(DB_SCAN_REFRESH_KEY, &now_ts.to_string());
+}
+
+fn try_acquire_db_scan_lock() -> bool {
+    claude_statusline::db::try_set_api_cache(DB_SCAN_LOCK_KEY, "1", DB_SCAN_LOCK_TTL_SECONDS)
+        .unwrap_or(false)
+}
+
+fn release_db_scan_lock() {
+    let _ = claude_statusline::db::set_api_cache(DB_SCAN_LOCK_KEY, "", 0);
 }
 
 fn session_today_cost_for_db(
@@ -98,7 +109,8 @@ fn main() -> Result<()> {
     // - actual model in use (may differ from hook if /model was used)
     // - fast mode status (speed field from most recent API call)
     // - session cost (from SDK result messages)
-    let session_state = parse_session_state(transcript_path);
+    let active_transcript = parse_active_transcript_state(transcript_path);
+    let session_state = &active_transcript.session;
     let prompt_cache_info = if !args.no_integrations_prompt_cache {
         session_state.prompt_cache.clone().map(|mut info| {
             info.now = Utc::now();
@@ -150,6 +162,7 @@ fn main() -> Result<()> {
     let scan_refresh_now = Utc::now().timestamp();
     let can_use_db_fast_path = db_fast_path_allowed && db_scan_recently_refreshed(scan_refresh_now);
     let mut needs_scan = !can_use_db_fast_path;
+    let mut scan_lock_acquired = false;
 
     if can_use_db_fast_path {
         match claude_statusline::db::get_global_usage(
@@ -170,6 +183,32 @@ fn main() -> Result<()> {
             Err(e) => {
                 eprintln!("DB cache error (using scan_usage fallback): {}", e);
                 needs_scan = true;
+            }
+        }
+    }
+
+    if needs_scan && db_fast_path_allowed {
+        scan_lock_acquired = try_acquire_db_scan_lock();
+        if !scan_lock_acquired {
+            match claude_statusline::db::get_global_usage(
+                &hook.session_id,
+                &hook.workspace.project_dir,
+                transcript_path,
+                live_session_cost,
+                None,
+            ) {
+                Ok(global_usage) => {
+                    session_cost = global_usage.session_cost;
+                    today_cost = global_usage.global_today;
+                    sessions_count = global_usage.sessions_count;
+                    today_cost_source = TodayCostSource::DbGlobalUsage;
+                    entries = global_usage.entries;
+                    usage_entry_source = "db_cache";
+                    needs_scan = false;
+                }
+                Err(e) => {
+                    eprintln!("DB cache error while scan lock is held (using scan fallback): {e}");
+                }
             }
         }
     }
@@ -231,6 +270,9 @@ fn main() -> Result<()> {
                 }
             }
         }
+        if scan_lock_acquired {
+            release_db_scan_lock();
+        }
     }
 
     // Session cost priority:
@@ -254,16 +296,9 @@ fn main() -> Result<()> {
     let mut context: Option<(u64, u32)> = None;
     let mut context_source: Option<&'static str> = None;
     let hook_has_live_context_usage = hook.context_window.current_usage.is_some();
-    let transcript_context_detail = claude_statusline::usage::calc_context_from_transcript_detail(
-        transcript_path,
-        &hook.model.id,
-        &hook.model.display_name,
-    );
-    let transcript_context = transcript_context_detail
-        .map(|detail| detail.as_tuple())
-        .or_else(|| {
-            calc_context_from_transcript(transcript_path, &hook.model.id, &hook.model.display_name)
-        });
+    let transcript_context_detail =
+        active_transcript.context_for(&hook.model.id, &hook.model.display_name);
+    let transcript_context = transcript_context_detail.map(|detail| detail.as_tuple());
 
     if let Some(detail) = transcript_context_detail.filter(|detail| {
         detail.source == claude_statusline::usage::TranscriptContextSource::CompactEstimate

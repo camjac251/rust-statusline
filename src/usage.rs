@@ -23,8 +23,7 @@ use walkdir::WalkDir;
 
 use crate::models::prompt_cache::{PROMPT_CACHE_1H_TTL_SECONDS, PROMPT_CACHE_5M_TTL_SECONDS};
 use crate::models::{
-    Entry, MessageUsage, PromptCacheBucketInfo, PromptCacheBucketKind, PromptCacheInfo,
-    RateLimitInfo, TranscriptLine,
+    Entry, PromptCacheBucketInfo, PromptCacheBucketKind, PromptCacheInfo, RateLimitInfo,
 };
 use crate::pricing::calculate_cost_for_usage_with_speed;
 use crate::utils::{context_limit_for_model_display, parse_iso_date, system_overhead_tokens};
@@ -104,10 +103,56 @@ pub struct SessionState {
     pub prompt_cache: Option<PromptCacheInfo>,
 }
 
+/// Active transcript data needed by one statusline render.
+///
+/// This keeps the hot path from reading the same transcript tail separately
+/// for session metadata and context fallback.
+#[derive(Debug, Default)]
+pub struct ActiveTranscriptState {
+    pub session: SessionState,
+    context: TranscriptContextParts,
+}
+
+impl ActiveTranscriptState {
+    pub fn context_for(
+        &self,
+        model_id: &str,
+        model_display_name: &str,
+    ) -> Option<TranscriptContext> {
+        transcript_context_from_parts(
+            self.context.last_total_in,
+            self.context.post_compact_estimate,
+            self.context.context_warning_pct,
+            model_id,
+            model_display_name,
+        )
+    }
+}
+
+#[derive(Debug, Default)]
+struct TranscriptContextParts {
+    last_total_in: Option<u64>,
+    post_compact_estimate: Option<u64>,
+    context_warning_pct: Option<u32>,
+}
+
 /// Parse session-specific state directly from a transcript file.
 /// Reads all lines sequentially, keeping the latest values (last writer wins).
 pub fn parse_session_state(transcript_path: &Path) -> SessionState {
-    let mut state = SessionState::default();
+    parse_active_transcript_state(transcript_path).session
+}
+
+pub fn parse_active_transcript_state(transcript_path: &Path) -> ActiveTranscriptState {
+    let lines = match recent_transcript_lines(transcript_path) {
+        Some(lines) => lines,
+        None => return ActiveTranscriptState::default(),
+    };
+
+    parse_active_transcript_lines(lines)
+}
+
+fn parse_active_transcript_lines(lines: Vec<String>) -> ActiveTranscriptState {
+    let mut active = ActiveTranscriptState::default();
     let mut cache_5m_bucket: Option<PromptCacheBucketInfo> = None;
     let mut cache_1h_bucket: Option<PromptCacheBucketInfo> = None;
     let mut cache_unknown_bucket: Option<PromptCacheBucketInfo> = None;
@@ -115,11 +160,9 @@ pub fn parse_session_state(transcript_path: &Path) -> SessionState {
     let mut last_cache_read_at: Option<DateTime<Utc>> = None;
     let mut last_cache_write_tokens = 0;
     let mut last_cache_read_tokens = 0;
-
-    let lines = match recent_transcript_lines(transcript_path) {
-        Some(lines) => lines,
-        None => return state,
-    };
+    let mut last_total_in: Option<u64> = None;
+    let mut context_warning_pct: Option<u32> = None;
+    let mut post_compact_estimate: Option<u64> = None;
 
     for line in lines {
         let t = line.trim();
@@ -134,13 +177,71 @@ pub fn parse_session_state(transcript_path: &Path) -> SessionState {
         // SDK result messages have authoritative session cost
         if v.get("type").and_then(|s| s.as_str()) == Some("result") {
             if let Some(cost) = v.get("total_cost_usd").and_then(|n| n.as_f64()) {
-                if cost > state.session_cost.unwrap_or(0.0) {
-                    state.session_cost = Some(cost);
+                if cost > active.session.session_cost.unwrap_or(0.0) {
+                    active.session.session_cost = Some(cost);
                 }
             }
         }
 
-        // Assistant messages with usage blocks have speed, model, service_tier
+        let entry_type = v.get("type").and_then(|value| value.as_str());
+        let subtype = v.get("subtype").and_then(|value| value.as_str());
+
+        if entry_type == Some("system") && subtype == Some("compact_boundary") {
+            last_total_in = None;
+            context_warning_pct = None;
+            post_compact_estimate = Some(0);
+            continue;
+        }
+
+        if entry_type == Some("system") && subtype == Some("microcompact_boundary") {
+            if let Some(tokens_saved) = v
+                .get("microcompactMetadata")
+                .and_then(|metadata| metadata.get("tokensSaved"))
+                .and_then(|tokens| tokens.as_u64())
+            {
+                if let Some(total_in) = last_total_in.as_mut() {
+                    *total_in = total_in.saturating_sub(tokens_saved);
+                }
+                if let Some(estimate) = post_compact_estimate.as_mut() {
+                    *estimate = estimate.saturating_sub(tokens_saved);
+                }
+            }
+            continue;
+        }
+
+        if let Some(estimate) = post_compact_estimate.as_mut() {
+            *estimate += estimate_transcript_message_tokens(&v);
+        }
+
+        if entry_type == Some("system_message")
+            && let Some(content) = v.get("content").and_then(|value| value.as_str())
+        {
+            if let Some(caps) = CONTEXT_AUTO_COMPACT_RE.captures(content) {
+                if let Ok(percent_left) = caps[1].parse::<u32>() {
+                    context_warning_pct = Some(100 - percent_left);
+                }
+            } else if let Some(caps) = CONTEXT_LOW_RE.captures(content)
+                && let Ok(percent_left) = caps[1].parse::<u32>()
+            {
+                context_warning_pct = Some(100 - percent_left);
+            }
+        }
+
+        if entry_type == Some("assistant") {
+            let usage = v.get("message").and_then(|message| message.get("usage"));
+            let input = usage.and_then(|usage| usage.get("input_tokens"));
+            let cache_create = usage.and_then(|usage| usage.get("cache_creation_input_tokens"));
+            let cache_read = usage.and_then(|usage| usage.get("cache_read_input_tokens"));
+            let total_in = json_number_as_u64(input)
+                + json_number_as_u64(cache_create)
+                + json_number_as_u64(cache_read);
+            if total_in > 0 {
+                last_total_in = Some(total_in);
+                post_compact_estimate = None;
+            }
+        }
+
+        // Assistant messages with usage blocks have speed, model, service_tier.
         let msg = if let Some(m) = v.get("message") {
             m
         } else {
@@ -155,12 +256,13 @@ pub fn parse_session_state(transcript_path: &Path) -> SessionState {
             .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
             .map(|dt| dt.with_timezone(&Utc));
         if let Some(ts) = assistant_ts {
-            if state
+            if active
+                .session
                 .last_assistant_at
                 .map(|last| ts > last)
                 .unwrap_or(true)
             {
-                state.last_assistant_at = Some(ts);
+                active.session.last_assistant_at = Some(ts);
             }
         }
         let usage = match msg.get("usage") {
@@ -209,13 +311,13 @@ pub fn parse_session_state(transcript_path: &Path) -> SessionState {
             .and_then(|s| s.as_str())
             .or_else(|| v.get("speed").and_then(|s| s.as_str()))
         {
-            state.speed = Some(spd.to_string());
+            active.session.speed = Some(spd.to_string());
         }
         if let Some(mdl) = msg.get("model").and_then(|s| s.as_str()) {
-            state.model = Some(mdl.to_string());
+            active.session.model = Some(mdl.to_string());
         }
         if let Some(tier) = usage.get("service_tier").and_then(|s| s.as_str()) {
-            state.service_tier = Some(tier.to_string());
+            active.session.service_tier = Some(tier.to_string());
         }
 
         if let Some(ts) = assistant_ts {
@@ -286,7 +388,7 @@ pub fn parse_session_state(transcript_path: &Path) -> SessionState {
         buckets.push(bucket);
     }
     if last_cache_write_at.is_some() || last_cache_read_at.is_some() {
-        state.prompt_cache = Some(PromptCacheInfo {
+        active.session.prompt_cache = Some(PromptCacheInfo {
             buckets,
             last_cache_write_at,
             last_cache_read_at,
@@ -296,7 +398,13 @@ pub fn parse_session_state(transcript_path: &Path) -> SessionState {
         });
     }
 
-    state
+    active.context = TranscriptContextParts {
+        last_total_in,
+        post_compact_estimate,
+        context_warning_pct,
+    };
+
+    active
 }
 
 fn json_number_as_u64(value: Option<&Value>) -> u64 {
@@ -540,98 +648,16 @@ pub fn calc_context_from_transcript_detail(
     model_id: &str,
     model_display_name: &str,
 ) -> Option<TranscriptContext> {
-    // Keep the last assistant message with usage; context uses input-side tokens
-    // only, matching Claude Code's statusLine hook calculation. Large transcripts
-    // can contain huge tool-result lines, so read a bounded tail for latest state.
-    let lines = recent_transcript_lines(transcript_path)?;
-    let mut last_total_in: Option<u64> = None;
-    let mut context_warning_pct: Option<u32> = None;
-    let mut post_compact_estimate: Option<u64> = None;
+    parse_active_transcript_state(transcript_path).context_for(model_id, model_display_name)
+}
 
-    for line in lines {
-        let t = line.trim();
-        if t.is_empty() {
-            continue;
-        }
-
-        // First try to parse as JSON
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(t) {
-            let entry_type = parsed.get("type").and_then(|v| v.as_str());
-            let subtype = parsed.get("subtype").and_then(|v| v.as_str());
-
-            if entry_type == Some("system") && subtype == Some("compact_boundary") {
-                last_total_in = None;
-                context_warning_pct = None;
-                post_compact_estimate = Some(0);
-                continue;
-            }
-
-            if entry_type == Some("system") && subtype == Some("microcompact_boundary") {
-                if let Some(tokens_saved) = parsed
-                    .get("microcompactMetadata")
-                    .and_then(|metadata| metadata.get("tokensSaved"))
-                    .and_then(|tokens| tokens.as_u64())
-                {
-                    if let Some(total_in) = last_total_in.as_mut() {
-                        *total_in = total_in.saturating_sub(tokens_saved);
-                    }
-                    if let Some(estimate) = post_compact_estimate.as_mut() {
-                        *estimate = estimate.saturating_sub(tokens_saved);
-                    }
-                }
-                continue;
-            }
-
-            if let Some(estimate) = post_compact_estimate.as_mut() {
-                *estimate += estimate_transcript_message_tokens(&parsed);
-            }
-
-            // Check for system messages with context warnings
-            if parsed.get("type").and_then(|v| v.as_str()) == Some("system_message") {
-                if let Some(content) = parsed.get("content").and_then(|v| v.as_str()) {
-                    // Parse "Context left until auto-compact: X%"
-                    if let Some(caps) = CONTEXT_AUTO_COMPACT_RE.captures(content) {
-                        if let Ok(percent_left) = caps[1].parse::<u32>() {
-                            context_warning_pct = Some(100 - percent_left);
-                        }
-                    }
-                    // Parse "Context low (X% remaining)"
-                    else if let Some(caps) = CONTEXT_LOW_RE.captures(content) {
-                        if let Ok(percent_left) = caps[1].parse::<u32>() {
-                            context_warning_pct = Some(100 - percent_left);
-                        }
-                    }
-                }
-            }
-
-            // Continue with existing assistant message parsing
-            if let Ok(parsed_line) = serde_json::from_value::<TranscriptLine>(parsed) {
-                if parsed_line.r#type.as_deref() == Some("assistant") {
-                    let usage = parsed_line
-                        .message
-                        .and_then(|m| m.usage)
-                        .unwrap_or(MessageUsage {
-                            input_tokens: None,
-                            output_tokens: None,
-                            cache_creation_input_tokens: None,
-                            cache_read_input_tokens: None,
-                            cache_creation: None,
-                        });
-                    let inp = usage.input_tokens.unwrap_or(0);
-                    let total_in = inp
-                        + usage.cache_creation_input_tokens.unwrap_or(0)
-                        + usage.cache_read_input_tokens.unwrap_or(0);
-                    if total_in > 0 {
-                        last_total_in = Some(total_in);
-                        post_compact_estimate = None;
-                    }
-                }
-            }
-        }
-    }
-
-    // Prefer token-based calculation if available, fall back to a compact-summary
-    // estimate, then to context-warning text.
+fn transcript_context_from_parts(
+    last_total_in: Option<u64>,
+    post_compact_estimate: Option<u64>,
+    context_warning_pct: Option<u32>,
+    model_id: &str,
+    model_display_name: &str,
+) -> Option<TranscriptContext> {
     let budget = context_limit_for_model_display(model_id, model_display_name);
     if let Some(total_in) = last_total_in {
         let overhead = system_overhead_tokens();
@@ -2575,6 +2601,60 @@ mod tests {
             .expect("workflow agent entry should carry its agent_id");
         assert_eq!(wf_agent_entry.input, 1000);
         assert_eq!(wf_agent_entry.output, 200);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_active_transcript_state_extracts_session_and_context() -> Result<()> {
+        let dir = tempdir()?;
+        let transcript = dir.path().join("session.jsonl");
+        let ts = Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap();
+        let line = json!({
+            "type": "assistant",
+            "timestamp": ts.to_rfc3339(),
+            "message": {
+                "role": "assistant",
+                "id": "msg-active-state",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 100000,
+                    "output_tokens": 100,
+                    "cache_creation_input_tokens": 300,
+                    "cache_read_input_tokens": 400,
+                    "speed": "fast",
+                    "service_tier": "standard_only",
+                    "cache_creation": {
+                        "ephemeral_5m_input_tokens": 300
+                    }
+                }
+            }
+        });
+        fs::write(&transcript, format!("{}\n", line))?;
+
+        let active = parse_active_transcript_state(&transcript);
+
+        assert_eq!(active.session.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(active.session.speed.as_deref(), Some("fast"));
+        assert_eq!(
+            active.session.service_tier.as_deref(),
+            Some("standard_only")
+        );
+        assert_eq!(active.session.last_assistant_at, Some(ts));
+        assert_eq!(
+            active
+                .session
+                .prompt_cache
+                .as_ref()
+                .map(|info| info.cache_write_input_tokens),
+            Some(300)
+        );
+
+        let context = active
+            .context_for("claude-sonnet-4-6", "Claude Sonnet 4.6")
+            .expect("context from assistant usage");
+        assert_eq!(context.source, TranscriptContextSource::ApiUsage);
+        assert!(context.tokens >= 100700);
+        assert!(context.percent > 0);
         Ok(())
     }
 

@@ -2844,6 +2844,26 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn test_try_set_api_cache_acts_as_expiring_lock() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_api_cache_lock.db");
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
+
+        let _ = std::fs::remove_file(&db_path);
+
+        assert!(try_set_api_cache("lock_key_unique", "1", 1).unwrap());
+        assert!(!try_set_api_cache("lock_key_unique", "2", 1).unwrap());
+
+        thread::sleep(std::time::Duration::from_millis(1100));
+
+        assert!(try_set_api_cache("lock_key_unique", "3", 1).unwrap());
+
+        unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_stale_cleanup() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
