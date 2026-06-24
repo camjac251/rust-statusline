@@ -16,7 +16,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use walkdir::WalkDir;
@@ -30,6 +30,61 @@ use crate::pricing::calculate_cost_for_usage_with_speed;
 use crate::utils::{context_limit_for_model_display, parse_iso_date, system_overhead_tokens};
 
 pub const DEFAULT_SCAN_LOOKBACK_HOURS: i64 = 24;
+const ACTIVE_TRANSCRIPT_TAIL_BYTES: u64 = 8 * 1024 * 1024;
+const ACTIVE_TRANSCRIPT_MAX_BACKSCAN_BYTES: u64 = 64 * 1024 * 1024;
+
+fn recent_transcript_lines(transcript_path: &Path) -> Option<Vec<String>> {
+    recent_transcript_lines_with_limit(transcript_path, ACTIVE_TRANSCRIPT_TAIL_BYTES)
+}
+
+fn recent_transcript_lines_with_limit(
+    transcript_path: &Path,
+    tail_bytes: u64,
+) -> Option<Vec<String>> {
+    let mut file = File::open(transcript_path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if tail_bytes == 0 {
+        return Some(Vec::new());
+    }
+    if len <= tail_bytes {
+        let reader = BufReader::new(file);
+        return Some(reader.lines().map_while(Result::ok).collect());
+    }
+
+    let mut end = len;
+    let mut scanned = 0;
+    let mut segments: Vec<Vec<String>> = Vec::new();
+    while end > 0 && scanned < ACTIVE_TRANSCRIPT_MAX_BACKSCAN_BYTES {
+        let read_len = tail_bytes.min(end);
+        let start = end - read_len;
+        let mut bytes = vec![0; read_len as usize];
+        file.seek(SeekFrom::Start(start)).ok()?;
+        file.read_exact(&mut bytes).ok()?;
+        scanned += read_len;
+
+        let starts_mid_line = start > 0 && bytes.first().is_some_and(|byte| *byte != b'\n');
+        let ends_mid_line = end < len && bytes.last().is_some_and(|byte| *byte != b'\n');
+        let text = String::from_utf8_lossy(&bytes);
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        if starts_mid_line && !lines.is_empty() {
+            lines.remove(0);
+        }
+        if ends_mid_line {
+            lines.pop();
+        }
+        if !lines.is_empty() {
+            segments.push(lines);
+            break;
+        }
+        end = start;
+    }
+
+    let mut lines = Vec::new();
+    for segment in segments.into_iter().rev() {
+        lines.extend(segment);
+    }
+    Some(lines)
+}
 
 /// Session-specific state extracted from the session's own transcript file.
 /// Unlike the global scan, this reads only the target transcript for fast, authoritative data.
@@ -61,18 +116,12 @@ pub fn parse_session_state(transcript_path: &Path) -> SessionState {
     let mut last_cache_write_tokens = 0;
     let mut last_cache_read_tokens = 0;
 
-    let file = match File::open(transcript_path) {
-        Ok(f) => f,
-        Err(_) => return state,
+    let lines = match recent_transcript_lines(transcript_path) {
+        Some(lines) => lines,
+        None => return state,
     };
 
-    // Read all lines (transcript files are bounded by context window size)
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+    for line in lines {
         let t = line.trim();
         if t.is_empty() {
             continue;
@@ -491,20 +540,15 @@ pub fn calc_context_from_transcript_detail(
     model_id: &str,
     model_display_name: &str,
 ) -> Option<TranscriptContext> {
-    // Stream the file line-by-line to avoid loading entire transcripts into memory.
     // Keep the last assistant message with usage; context uses input-side tokens
-    // only, matching Claude Code's statusLine hook calculation.
-    let file = File::open(transcript_path).ok()?;
-    let reader = BufReader::new(file);
+    // only, matching Claude Code's statusLine hook calculation. Large transcripts
+    // can contain huge tool-result lines, so read a bounded tail for latest state.
+    let lines = recent_transcript_lines(transcript_path)?;
     let mut last_total_in: Option<u64> = None;
     let mut context_warning_pct: Option<u32> = None;
     let mut post_compact_estimate: Option<u64> = None;
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+    for line in lines {
         let t = line.trim();
         if t.is_empty() {
             continue;
@@ -785,7 +829,7 @@ pub fn scan_usage(
     // SDK/result transcripts can carry aggregate modelUsage without assistant usage lines.
     let mut result_usage_by_session_model: HashMap<String, Entry> = HashMap::new();
 
-    // Optimization: Skip files older than 48 hours by default
+    // Optimization: skip files older than the configured lookback window.
     let cutoff_time = if let Ok(hours_str) = env::var("CLAUDE_SCAN_LOOKBACK_HOURS") {
         if let Ok(hours) = hours_str.parse::<i64>() {
             Utc::now() - Duration::hours(hours)
@@ -1540,6 +1584,34 @@ mod tests {
             .collect::<String>();
         fs::write(&transcript, contents)?;
         Ok(dir)
+    }
+
+    #[test]
+    fn recent_transcript_lines_with_limit_drops_partial_prefix_line() -> Result<()> {
+        let dir = tempdir()?;
+        let transcript = dir.path().join("large.jsonl");
+        let old_line = format!("{{\"padding\":\"{}\"}}\n", "x".repeat(200));
+        let recent_line = r#"{"type":"assistant","message":{"role":"assistant"}}"#;
+        fs::write(&transcript, format!("{old_line}{recent_line}\n"))?;
+
+        let lines = recent_transcript_lines_with_limit(&transcript, 80).unwrap();
+
+        assert_eq!(lines, vec![recent_line.to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn recent_transcript_lines_with_limit_skips_huge_trailing_line() -> Result<()> {
+        let dir = tempdir()?;
+        let transcript = dir.path().join("large.jsonl");
+        let recent_line = r#"{"type":"assistant","message":{"role":"assistant"}}"#;
+        let huge_trailing_line = format!("{{\"toolUseResult\":\"{}\"}}\n", "x".repeat(300));
+        fs::write(&transcript, format!("{recent_line}\n{huge_trailing_line}"))?;
+
+        let lines = recent_transcript_lines_with_limit(&transcript, 80).unwrap();
+
+        assert_eq!(lines, vec![recent_line.to_string()]);
+        Ok(())
     }
 
     #[test]

@@ -13,7 +13,7 @@ use claude_statusline::cli::{Args, BurnScopeArg, WindowAnchorArg, WindowScopeArg
 use claude_statusline::display::color_shim::ColorizeShim;
 use claude_statusline::display::{print_header, print_json_output, print_text_output};
 use claude_statusline::gastown::get_gastown_info;
-use claude_statusline::models::{Entry, HookJson};
+use claude_statusline::models::{Entry, HookJson, RateLimitInfo};
 use claude_statusline::provenance::{CostProvenance, SessionCostSource, TodayCostSource};
 use claude_statusline::usage::{
     DEFAULT_SCAN_LOOKBACK_HOURS, calc_context_from_entries, calc_context_from_transcript,
@@ -22,6 +22,24 @@ use claude_statusline::usage::{
 use claude_statusline::usage_api::{UsageSummary, get_usage_summary, resolve_usage_egress};
 use claude_statusline::utils::{claude_paths, friendly_model_name, read_stdin};
 use claude_statusline::window::{BurnScope, WindowScope, calculate_window_metrics};
+
+const DB_SCAN_REFRESH_KEY: &str = "usage_scan:last_full_scan_at";
+const DB_SCAN_REFRESH_INTERVAL_SECONDS: i64 = 60;
+
+fn db_scan_recently_refreshed(now_ts: i64) -> bool {
+    claude_statusline::db::load_metadata(DB_SCAN_REFRESH_KEY)
+        .ok()
+        .flatten()
+        .and_then(|entry| entry.value.parse::<i64>().ok())
+        .is_some_and(|last_ts| {
+            let age = now_ts.saturating_sub(last_ts);
+            (0..DB_SCAN_REFRESH_INTERVAL_SECONDS).contains(&age)
+        })
+}
+
+fn mark_db_scan_refreshed(now_ts: i64) {
+    let _ = claude_statusline::db::store_metadata(DB_SCAN_REFRESH_KEY, &now_ts.to_string());
+}
 
 fn session_today_cost_for_db(
     session_id: &str,
@@ -72,30 +90,14 @@ fn main() -> Result<()> {
     // ("Opus 4.6") so every downstream consumer gets the right label.
     hook.model.display_name = friendly_model_name(&hook.model.id, &hook.model.display_name);
 
-    // Compute metrics (from logs)
     let paths = claude_paths(args.claude_config_dir.as_deref());
-    let (
-        mut session_cost,
-        session_today_cost,
-        mut today_cost,
-        entries,
-        latest_reset,
-        api_key_source,
-        rate_limit_info,
-    ) = scan_usage(
-        &paths,
-        &hook.session_id,
-        Some(hook.workspace.project_dir.as_str()),
-        Some(&hook.model.id),
-    )
-    .unwrap_or((0.0, 0.0, 0.0, Vec::new(), None, None, None));
+    let transcript_path = Path::new(&hook.transcript_path);
 
     // Parse THIS session's transcript directly for authoritative session state.
     // This reads the specific transcript file (not the global scan) for:
     // - actual model in use (may differ from hook if /model was used)
     // - fast mode status (speed field from most recent API call)
     // - session cost (from SDK result messages)
-    let transcript_path = Path::new(&hook.transcript_path);
     let session_state = parse_session_state(transcript_path);
     let prompt_cache_info = if !args.no_integrations_prompt_cache {
         session_state.prompt_cache.clone().map(|mut info| {
@@ -117,34 +119,116 @@ fn main() -> Result<()> {
     // The modern hook schema ships the authoritative fast_mode flag; OR in the
     // transcript signal as a defensive fallback for any mid-turn skew.
     let is_fast_mode = hook.fast_mode || session_state.speed.as_deref() == Some("fast");
-    let db_session_today_cost = session_today_cost_for_db(
-        &hook.session_id,
-        session_today_cost,
-        session_state.session_cost,
-        Some(hook.cost.total_cost_usd),
-        &entries,
-    );
+    let window_scope = match args.window_scope {
+        WindowScopeArg::Global => WindowScope::Global,
+        WindowScopeArg::Project => WindowScope::Project,
+    };
+    let burn_scope = match args.burn_scope {
+        BurnScopeArg::Session => BurnScope::Session,
+        BurnScopeArg::Global => BurnScope::Global,
+    };
+    let anchor_strategy = match args.window_anchor {
+        WindowAnchorArg::Provider => claude_statusline::window::WindowAnchor::Provider,
+        WindowAnchorArg::Log => claude_statusline::window::WindowAnchor::Log,
+    };
 
-    // Global usage tracking: SQLite-based aggregation across all sessions.
-    // Pass the best current-session today cost available so DB totals don't
-    // lag behind Claude Code's live hook when transcript usage is sparse.
+    let mut session_cost = 0.0f64;
+    let mut today_cost = 0.0f64;
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut latest_reset: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut api_key_source: Option<String> = None;
+    let mut rate_limit_info: Option<RateLimitInfo> = None;
     let mut sessions_count = 1;
     let mut today_cost_source = TodayCostSource::ScanFallback;
-    if !args.no_subsystem_db_cache {
+    let mut usage_entry_source = "scan";
+    let live_session_cost = session_state
+        .session_cost
+        .filter(|cost| *cost > 0.0)
+        .or_else(|| Some(hook.cost.total_cost_usd).filter(|cost| *cost > 0.0));
+    let db_fast_path_allowed =
+        !args.no_subsystem_db_cache && !args.json && !args.provider_key_source;
+    let scan_refresh_now = Utc::now().timestamp();
+    let can_use_db_fast_path = db_fast_path_allowed && db_scan_recently_refreshed(scan_refresh_now);
+    let mut needs_scan = !can_use_db_fast_path;
+
+    if can_use_db_fast_path {
         match claude_statusline::db::get_global_usage(
             &hook.session_id,
             &hook.workspace.project_dir,
             transcript_path,
-            Some(db_session_today_cost),
-            Some(&entries),
+            live_session_cost,
+            None,
         ) {
             Ok(global_usage) => {
+                session_cost = global_usage.session_cost;
                 today_cost = global_usage.global_today;
                 sessions_count = global_usage.sessions_count;
                 today_cost_source = TodayCostSource::DbGlobalUsage;
+                entries = global_usage.entries;
+                usage_entry_source = "db_cache";
             }
             Err(e) => {
                 eprintln!("DB cache error (using scan_usage fallback): {}", e);
+                needs_scan = true;
+            }
+        }
+    }
+
+    if needs_scan {
+        let scan_result = scan_usage(
+            &paths,
+            &hook.session_id,
+            Some(hook.workspace.project_dir.as_str()),
+            Some(&hook.model.id),
+        );
+        let scan_succeeded = scan_result.is_ok();
+        let (
+            scan_session_cost,
+            session_today_cost,
+            scan_today_cost,
+            scan_entries,
+            scan_latest_reset,
+            scan_api_key_source,
+            scan_rate_limit_info,
+        ) = scan_result.unwrap_or((0.0, 0.0, 0.0, Vec::new(), None, None, None));
+        session_cost = scan_session_cost;
+        today_cost = scan_today_cost;
+        entries = scan_entries;
+        latest_reset = scan_latest_reset;
+        api_key_source = scan_api_key_source;
+        rate_limit_info = scan_rate_limit_info;
+
+        let db_session_today_cost = session_today_cost_for_db(
+            &hook.session_id,
+            session_today_cost,
+            session_state.session_cost,
+            Some(hook.cost.total_cost_usd),
+            &entries,
+        );
+
+        // Global usage tracking: SQLite-based aggregation across all sessions.
+        // Pass the best current-session today cost available so DB totals don't
+        // lag behind Claude Code's live hook when transcript usage is sparse.
+        if !args.no_subsystem_db_cache {
+            match claude_statusline::db::get_global_usage(
+                &hook.session_id,
+                &hook.workspace.project_dir,
+                transcript_path,
+                Some(db_session_today_cost),
+                scan_succeeded.then_some(entries.as_slice()),
+            ) {
+                Ok(global_usage) => {
+                    today_cost = global_usage.global_today;
+                    sessions_count = global_usage.sessions_count;
+                    today_cost_source = TodayCostSource::DbGlobalUsage;
+                    usage_entry_source = "scan";
+                    if scan_succeeded {
+                        mark_db_scan_refreshed(scan_refresh_now);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("DB cache error (using scan_usage fallback): {}", e);
+                }
             }
         }
     }
@@ -294,18 +378,6 @@ fn main() -> Result<()> {
 
     // Calculate window metrics
     let now_utc = Utc::now();
-    let window_scope = match args.window_scope {
-        WindowScopeArg::Global => WindowScope::Global,
-        WindowScopeArg::Project => WindowScope::Project,
-    };
-    let burn_scope = match args.burn_scope {
-        BurnScopeArg::Session => BurnScope::Session,
-        BurnScopeArg::Global => BurnScope::Global,
-    };
-    let anchor_strategy = match args.window_anchor {
-        WindowAnchorArg::Provider => claude_statusline::window::WindowAnchor::Provider,
-        WindowAnchorArg::Log => claude_statusline::window::WindowAnchor::Log,
-    };
 
     // Usage + reset data priority:
     //   1. Hook rate_limits (from subscribers, no network call)
@@ -600,9 +672,10 @@ fn main() -> Result<()> {
                 session_cost_source.as_str()
             );
             eprintln!(
-                "Today: ${:.2} ({} entries scanned)",
+                "Today: ${:.2} ({} entries from {})",
                 today_cost,
-                entries.len()
+                entries.len(),
+                usage_entry_source
             );
             eprintln!(
                 "Window: ${:.2} (reset: {:?}, window_entries: {})",
@@ -625,14 +698,18 @@ fn main() -> Result<()> {
                 "Burn rates: session={:.1}/m, global={:.1}/m",
                 metrics.session_nc_tpm, metrics.global_nc_tpm
             );
-            let scan_lookback = std::env::var("CLAUDE_SCAN_LOOKBACK_HOURS")
-                .ok()
-                .filter(|value| value.parse::<i64>().is_ok())
-                .unwrap_or_else(|| DEFAULT_SCAN_LOOKBACK_HOURS.to_string());
-            eprintln!(
-                "Files scanned: cutoff={}h (env: CLAUDE_SCAN_LOOKBACK_HOURS)",
-                scan_lookback
-            );
+            if usage_entry_source == "scan" {
+                let scan_lookback = std::env::var("CLAUDE_SCAN_LOOKBACK_HOURS")
+                    .ok()
+                    .filter(|value| value.parse::<i64>().is_ok())
+                    .unwrap_or_else(|| DEFAULT_SCAN_LOOKBACK_HOURS.to_string());
+                eprintln!(
+                    "Files scanned: cutoff={}h (env: CLAUDE_SCAN_LOOKBACK_HOURS)",
+                    scan_lookback
+                );
+            } else {
+                eprintln!("Files scanned: skipped ({usage_entry_source})");
+            }
             #[cfg(feature = "git")]
             if let Some(ref git) = git_info {
                 eprintln!(

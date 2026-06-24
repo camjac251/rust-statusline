@@ -77,7 +77,9 @@ mod sql {
         CREATE INDEX IF NOT EXISTS idx_usage_events_today_session
             ON usage_events(today_date, session_id);
         CREATE INDEX IF NOT EXISTS idx_usage_events_session_date
-            ON usage_events(session_id, today_date);";
+            ON usage_events(session_id, today_date);
+        CREATE INDEX IF NOT EXISTS idx_usage_events_ts
+            ON usage_events(ts);";
 
     pub const ADD_METADATA_UPDATED_AT: &str = "ALTER TABLE metadata ADD COLUMN updated_at INTEGER";
     pub const CREATE_SESSIONS_TODAY_DATE_INDEX: &str =
@@ -187,6 +189,8 @@ mod sql {
         )";
     pub const CREATE_USAGE_EVENTS_TODAY_SESSION_INDEX: &str = "CREATE INDEX IF NOT EXISTS idx_usage_events_today_session ON usage_events(today_date, session_id)";
     pub const CREATE_USAGE_EVENTS_SESSION_DATE_INDEX: &str = "CREATE INDEX IF NOT EXISTS idx_usage_events_session_date ON usage_events(session_id, today_date)";
+    pub const CREATE_USAGE_EVENTS_TS_INDEX: &str =
+        "CREATE INDEX IF NOT EXISTS idx_usage_events_ts ON usage_events(ts)";
     pub const BACKFILL_USAGE_EVENTS_FROM_SESSIONS: &str = "INSERT OR IGNORE INTO usage_events (
             event_key,
             session_id,
@@ -240,7 +244,9 @@ mod sql {
              updated_at = excluded.updated_at";
     pub const SELECT_CACHED_SESSION: &str = "SELECT transcript_mtime, today_cost, today_date, transcript_path, entry_count, session_key FROM sessions WHERE session_id = ?";
     pub const DELETE_STALE_SESSIONS: &str = "DELETE FROM sessions WHERE today_date != ?";
-    pub const DELETE_STALE_USAGE_EVENTS: &str = "DELETE FROM usage_events WHERE today_date != ?";
+    pub const DELETE_STALE_USAGE_EVENTS: &str =
+        "DELETE FROM usage_events WHERE today_date NOT IN (?, ?)";
+    pub const DELETE_USAGE_EVENTS_FOR_DATE: &str = "DELETE FROM usage_events WHERE today_date = ?";
     pub const DELETE_USAGE_EVENTS_FOR_SESSION_DATE: &str =
         "DELETE FROM usage_events WHERE session_id = ? AND today_date = ?";
     pub const HAS_USAGE_EVENTS_FOR_SESSION_DATE: &str =
@@ -284,6 +290,20 @@ mod sql {
             GROUP BY session_id
         )
         SELECT COALESCE(SUM(today_cost), 0.0), COUNT(*) FROM session_totals";
+    pub const SELECT_RECENT_USAGE_EVENTS: &str = "SELECT
+            ts,
+            input_tokens,
+            output_tokens,
+            cache_create_tokens,
+            cache_read_tokens,
+            web_search_requests,
+            cost,
+            model,
+            session_id,
+            transcript_path
+        FROM usage_events
+        WHERE ts >= ?
+        ORDER BY ts";
     pub const GET_FRESH_API_CACHE: &str =
         "SELECT data FROM api_cache WHERE cache_key = ? AND expires_at > ?";
     pub const GET_STALE_API_CACHE: &str = "SELECT data FROM api_cache WHERE cache_key = ?";
@@ -313,6 +333,8 @@ pub struct GlobalUsage {
     pub global_today: f64,
     /// Number of sessions contributing to global total
     pub sessions_count: usize,
+    /// Recent normalized usage entries from the DB event ledger.
+    pub entries: Vec<Entry>,
 }
 
 /// Metadata value with optional timestamp
@@ -640,6 +662,7 @@ fn create_usage_events_schema(conn: &Connection) -> Result<()> {
     conn.execute(sql::CREATE_USAGE_EVENTS, [])?;
     conn.execute(sql::CREATE_USAGE_EVENTS_TODAY_SESSION_INDEX, [])?;
     conn.execute(sql::CREATE_USAGE_EVENTS_SESSION_DATE_INDEX, [])?;
+    conn.execute(sql::CREATE_USAGE_EVENTS_TS_INDEX, [])?;
     Ok(())
 }
 
@@ -693,6 +716,18 @@ fn table_column_is_primary_key(conn: &Connection, table: &str, column: &str) -> 
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+fn index_exists(conn: &Connection, index_name: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+        params![index_name],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|value| value.is_some())
+    .map_err(Into::into)
 }
 
 fn clear_global_sum_cache(conn: &Connection) -> Result<usize> {
@@ -776,6 +811,55 @@ fn logical_session_id(session_key: &str) -> &str {
 
 fn i64_from_u64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn u64_from_i64(value: i64) -> u64 {
+    u64::try_from(value.max(0)).unwrap_or(0)
+}
+
+fn project_from_transcript_path(transcript_path: &str) -> Option<String> {
+    let path = Path::new(transcript_path);
+    let mut components = path.components();
+    while let Some(component) = components.next() {
+        if component.as_os_str() == "projects" {
+            return components
+                .next()
+                .map(|project| project.as_os_str().to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+fn usage_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
+    let ts: i64 = row.get(0)?;
+    let transcript_path: String = row.get(9)?;
+    Ok(Entry {
+        ts: chrono::DateTime::<Utc>::from_timestamp(ts, 0).unwrap_or_else(Utc::now),
+        input: u64_from_i64(row.get(1)?),
+        output: u64_from_i64(row.get(2)?),
+        cache_create: u64_from_i64(row.get(3)?),
+        cache_read: u64_from_i64(row.get(4)?),
+        web_search_requests: u64_from_i64(row.get(5)?),
+        speed: None,
+        service_tier: None,
+        cost: row.get::<_, f64>(6)?.max(0.0),
+        model: row.get(7)?,
+        session_id: Some(row.get(8)?),
+        msg_id: None,
+        req_id: None,
+        project: project_from_transcript_path(&transcript_path),
+        agent_id: None,
+    })
+}
+
+fn recent_usage_entries(conn: &Connection, since_ts: i64) -> Result<Vec<Entry>> {
+    let mut stmt = conn.prepare(sql::SELECT_RECENT_USAGE_EVENTS)?;
+    let rows = stmt.query_map(params![since_ts], usage_entry_from_row)?;
+    let mut entries = Vec::new();
+    for row in rows {
+        entries.push(row?);
+    }
+    Ok(entries)
 }
 
 fn event_hash_key(prefix: &str, material: &str) -> String {
@@ -945,6 +1029,27 @@ fn usage_events_from_entries(
         .collect()
 }
 
+fn scan_transcript_path_for_entry(entry: &Entry) -> String {
+    entry
+        .project
+        .as_ref()
+        .map(|project| format!("projects/{project}/transcript.jsonl"))
+        .unwrap_or_else(|| "transcript.jsonl".to_string())
+}
+
+fn usage_event_from_scan_entry(today: &str, entry: &Entry) -> Option<UsageEvent> {
+    let session_id = entry.session_id.as_deref()?;
+    let transcript_path = scan_transcript_path_for_entry(entry);
+    usage_event_from_entry(session_id, &transcript_path, today, entry)
+}
+
+fn usage_events_from_scan_entries(today: &str, entries: &[Entry]) -> Vec<UsageEvent> {
+    entries
+        .iter()
+        .filter_map(|entry| usage_event_from_scan_entry(today, entry))
+        .collect()
+}
+
 fn summarize_usage_events(events: &[UsageEvent]) -> (f64, usize) {
     let entry_count = events
         .iter()
@@ -974,28 +1079,7 @@ fn has_usage_events_for_session_date(
     Ok(exists)
 }
 
-#[cfg(test)]
-fn replace_usage_events_for_session_date(
-    conn: &Connection,
-    session_id: &str,
-    today: &str,
-    events: &[UsageEvent],
-) -> Result<()> {
-    run_schema_change(conn, |conn| {
-        replace_usage_events_for_session_date_in_transaction(conn, session_id, today, events)
-    })
-}
-
-fn replace_usage_events_for_session_date_in_transaction(
-    conn: &Connection,
-    session_id: &str,
-    today: &str,
-    events: &[UsageEvent],
-) -> Result<()> {
-    conn.execute(
-        sql::DELETE_USAGE_EVENTS_FOR_SESSION_DATE,
-        params![session_id, today],
-    )?;
+fn insert_usage_events(conn: &Connection, events: &[UsageEvent]) -> Result<()> {
     let now = Utc::now().timestamp();
     let mut stmt = conn.prepare(sql::UPSERT_USAGE_EVENT)?;
     for event in events {
@@ -1018,6 +1102,44 @@ fn replace_usage_events_for_session_date_in_transaction(
         ])?;
     }
     Ok(())
+}
+
+fn replace_usage_events_for_date_from_scan(
+    conn: &Connection,
+    today: &str,
+    entries: &[Entry],
+) -> Result<bool> {
+    let events = usage_events_from_scan_entries(today, entries);
+    run_schema_change(conn, |conn| {
+        conn.execute(sql::DELETE_USAGE_EVENTS_FOR_DATE, params![today])?;
+        insert_usage_events(conn, &events)
+    })?;
+    Ok(true)
+}
+
+#[cfg(test)]
+fn replace_usage_events_for_session_date(
+    conn: &Connection,
+    session_id: &str,
+    today: &str,
+    events: &[UsageEvent],
+) -> Result<()> {
+    run_schema_change(conn, |conn| {
+        replace_usage_events_for_session_date_in_transaction(conn, session_id, today, events)
+    })
+}
+
+fn replace_usage_events_for_session_date_in_transaction(
+    conn: &Connection,
+    session_id: &str,
+    today: &str,
+    events: &[UsageEvent],
+) -> Result<()> {
+    conn.execute(
+        sql::DELETE_USAGE_EVENTS_FOR_SESSION_DATE,
+        params![session_id, today],
+    )?;
+    insert_usage_events(conn, events)
 }
 
 struct SessionUsageUpdate<'a> {
@@ -1383,7 +1505,7 @@ fn session_usage_for_today(
     let mut events = if let Some(entries) = session_entries {
         usage_events_from_entries(session_id, transcript_str, today, entries)
     } else {
-        Vec::new()
+        parse_transcript_today_events(session_id, transcript_path, today)?
     };
 
     if events.is_empty() {
@@ -1464,6 +1586,11 @@ pub fn get_global_usage(
 
     // Track whether we modified the DB (to invalidate global sum cache)
     let mut db_was_modified = false;
+    if let Some(entries) = session_entries {
+        if replace_usage_events_for_date_from_scan(&conn, &today, entries)? {
+            db_was_modified = true;
+        }
+    }
 
     let current_session_cost = if let Some(cached_session) = cached {
         // Only use cached cost if both mtime and date match (prevents using yesterday's cost after midnight)
@@ -1557,7 +1684,10 @@ pub fn get_global_usage(
     if conn.execute(sql::DELETE_STALE_SESSIONS, params![today])? > 0 {
         db_was_modified = true;
     }
-    if conn.execute(sql::DELETE_STALE_USAGE_EVENTS, params![today])? > 0 {
+    let yesterday = (Local::now() - chrono::TimeDelta::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    if conn.execute(sql::DELETE_STALE_USAGE_EVENTS, params![today, yesterday])? > 0 {
         db_was_modified = true;
     }
 
@@ -1602,10 +1732,14 @@ pub fn get_global_usage(
         (row.total_cost, row.sessions_count)
     };
 
+    let recent_since = now - chrono::TimeDelta::hours(48).num_seconds();
+    let entries = recent_usage_entries(&conn, recent_since)?;
+
     Ok(GlobalUsage {
         session_cost: current_session_cost,
         global_today,
         sessions_count,
+        entries,
     })
 }
 
@@ -1688,6 +1822,15 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn usage_event_project_from_claude_transcript_path() {
+        let project = project_from_transcript_path(
+            "fixtures/claude/projects/-workspace-example/session.jsonl",
+        );
+
+        assert_eq!(project.as_deref(), Some("-workspace-example"));
+    }
+
+    #[test]
     #[serial_test::serial]
     fn test_db_init() {
         let temp_dir = TempDir::new().unwrap();
@@ -1709,6 +1852,7 @@ mod tests {
         assert!(table_has_column(&conn, "sessions", "session_id").unwrap());
         assert!(table_column_is_primary_key(&conn, "sessions", "session_id").unwrap());
         assert!(table_has_column(&conn, "usage_events", "event_key").unwrap());
+        assert!(index_exists(&conn, "idx_usage_events_ts").unwrap());
         unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
     }
 
@@ -2356,8 +2500,17 @@ mod tests {
             .unwrap();
 
         assert!((usage.session_cost - 1.75).abs() < 1e-10);
-        assert!((usage.global_today - 1.75).abs() < 1e-10);
-        assert_eq!(usage.sessions_count, 1);
+        assert!((usage.global_today - 10.75).abs() < 1e-10);
+        assert_eq!(usage.sessions_count, 2);
+        assert_eq!(usage.entries.len(), 4);
+        assert_eq!(
+            usage.entries.iter().map(|entry| entry.input).sum::<u64>(),
+            151
+        );
+        assert_eq!(
+            usage.entries.iter().map(|entry| entry.output).sum::<u64>(),
+            301
+        );
         assert_eq!(event_rows, 3);
         assert_eq!(adjustment_rows, 1);
         assert!((cost - 1.75).abs() < 1e-10);
