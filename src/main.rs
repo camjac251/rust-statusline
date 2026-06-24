@@ -379,32 +379,34 @@ fn main() -> Result<()> {
     // Priority 2: OAuth API
     // When hook provided rate_limits, we still call the API to get extra_usage
     // and model-specific breakdowns that the hook doesn't include.
-    if usage_summary.is_none() {
-        // No hook data at all; API is the primary source
-        usage_summary = get_usage_summary(&paths, Some(&hook.model.id));
-        if let Some(summary) = usage_summary.as_ref() {
-            usage_percent_display = summary.window.utilization;
-            if let Some(reset) = summary.window.resets_at {
-                apply_reset(
-                    reset,
-                    now_utc,
-                    &mut reset_at_display,
-                    &mut window_anchor,
-                    &mut authoritative_remaining_minutes,
-                );
+    if !args.no_subsystem_usage_api {
+        if usage_summary.is_none() {
+            // No hook data at all; API is the primary source
+            usage_summary = get_usage_summary(&paths, Some(&hook.model.id));
+            if let Some(summary) = usage_summary.as_ref() {
+                usage_percent_display = summary.window.utilization;
+                if let Some(reset) = summary.window.resets_at {
+                    apply_reset(
+                        reset,
+                        now_utc,
+                        &mut reset_at_display,
+                        &mut window_anchor,
+                        &mut authoritative_remaining_minutes,
+                    );
+                }
             }
-        }
-    } else if let Some(api_summary) = get_usage_summary(&paths, Some(&hook.model.id)) {
-        // Hook provided utilization/reset; enrich with API-only fields
-        if let Some(ref mut summary) = usage_summary {
-            if summary.extra_usage.is_none() {
-                summary.extra_usage = api_summary.extra_usage;
-            }
-            if summary.seven_day_sonnet.utilization.is_none() {
-                summary.seven_day_sonnet = api_summary.seven_day_sonnet;
-            }
-            if summary.seven_day_opus.utilization.is_none() {
-                summary.seven_day_opus = api_summary.seven_day_opus;
+        } else if let Some(api_summary) = get_usage_summary(&paths, Some(&hook.model.id)) {
+            // Hook provided utilization/reset; enrich with API-only fields
+            if let Some(ref mut summary) = usage_summary {
+                if summary.extra_usage.is_none() {
+                    summary.extra_usage = api_summary.extra_usage;
+                }
+                if summary.seven_day_sonnet.utilization.is_none() {
+                    summary.seven_day_sonnet = api_summary.seven_day_sonnet;
+                }
+                if summary.seven_day_opus.utilization.is_none() {
+                    summary.seven_day_opus = api_summary.seven_day_opus;
+                }
             }
         }
     }

@@ -715,6 +715,29 @@ fn find_recent_jsonl_files(root: &Path, cutoff: SystemTime) -> Vec<PathBuf> {
         .collect()
 }
 
+fn remember_latest_reset(latest_reset: &mut Option<DateTime<Utc>>, candidate: DateTime<Utc>) {
+    if latest_reset.map(|x| candidate > x).unwrap_or(true) {
+        *latest_reset = Some(candidate);
+    }
+}
+
+fn usage_limit_reset_from_text(text: &str, base: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
+    if let Some(idx) = text.rfind('|') {
+        if let Ok(n) = text[idx + 1..].trim().parse::<i64>() {
+            if n > 0 {
+                let normalized_epoch = normalize_reset_anchor(n);
+                return DateTime::<Utc>::from_timestamp(normalized_epoch, 0)
+                    .map(normalize_reset_time);
+            }
+        }
+        None
+    } else if let Some(base) = base {
+        parse_am_pm_reset(base, text)
+    } else {
+        parse_am_pm_reset(Utc::now(), text)
+    }
+}
+
 #[allow(clippy::type_complexity)]
 pub fn scan_usage(
     paths: &[PathBuf],
@@ -776,150 +799,8 @@ pub fn scan_usage(
         if !root.is_dir() {
             continue;
         }
-        // Global reset anchor discovery across all recent project files under this root
-        // Uses walkdir with directory-level mtime filtering for efficiency
         let recent_files = find_recent_jsonl_files(&root, cutoff_system);
-        for path in &recent_files {
-            let file = match File::open(path) {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
-            let reader = BufReader::new(file);
-            for line in reader.lines() {
-                let line = match line {
-                    Ok(l) => l,
-                    Err(_) => continue,
-                };
-                let t = line.trim();
-                if t.is_empty() {
-                    continue;
-                }
-                let v: Value = match serde_json::from_str(t) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-
-                // Capture precise cost from SDK result messages for this session
-                if v.get("type").and_then(|s| s.as_str()) == Some("result") {
-                    let sid_v = v
-                        .get("sessionId")
-                        .or_else(|| v.get("session_id"))
-                        .and_then(|s| s.as_str());
-                    if let Some(sid_here) = sid_v {
-                        if sid_here == session_id {
-                            if let Some(cn) = v.get("total_cost_usd") {
-                                if let Some(n) = cn.as_f64() {
-                                    if n > session_cost_via_results {
-                                        session_cost_via_results = n;
-                                    }
-                                } else if let Some(s) = cn.as_str() {
-                                    if let Ok(n) = s.parse::<f64>() {
-                                        if n > session_cost_via_results {
-                                            session_cost_via_results = n;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                // Best-effort timestamp for limit parsing
-                let tsd_for_limits: Option<DateTime<Utc>> = v
-                    .get("timestamp")
-                    .and_then(|s| s.as_str())
-                    .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
-                    .map(|d| d.with_timezone(&Utc));
-
-                if v.get("isApiErrorMessage").and_then(|b| b.as_bool()) == Some(true) {
-                    if let Some(msg) = v.get("message") {
-                        if let Some(content) = msg.get("content") {
-                            if let Some(arr) = content.as_array() {
-                                for c in arr {
-                                    if let Some(text) = c.get("text").and_then(|s| s.as_str()) {
-                                        if text.contains("Claude AI usage limit reached") {
-                                            if let Some(idx) = text.rfind('|') {
-                                                if let Ok(n) = text[idx + 1..].trim().parse::<i64>()
-                                                {
-                                                    if n > 0 {
-                                                        let normalized_epoch =
-                                                            normalize_reset_anchor(n);
-                                                        if let Some(dt) =
-                                                            DateTime::<Utc>::from_timestamp(
-                                                                normalized_epoch,
-                                                                0,
-                                                            )
-                                                        {
-                                                            let dt = normalize_reset_time(dt);
-                                                            if latest_reset
-                                                                .map(|x| dt > x)
-                                                                .unwrap_or(true)
-                                                            {
-                                                                latest_reset = Some(dt);
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            } else if let Some(base) = tsd_for_limits {
-                                                if let Some(dt) = parse_am_pm_reset(base, text) {
-                                                    if latest_reset.map(|x| dt > x).unwrap_or(true)
-                                                    {
-                                                        latest_reset = Some(dt);
-                                                    }
-                                                }
-                                            } else if let Some(dt) =
-                                                parse_am_pm_reset(Utc::now(), text)
-                                            {
-                                                if latest_reset.map(|x| dt > x).unwrap_or(true) {
-                                                    latest_reset = Some(dt);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else if let Some(content) = v
-                    .get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_array())
-                {
-                    for c in content {
-                        if let Some(text) = c.get("text").and_then(|s| s.as_str()) {
-                            if text.to_lowercase().contains("usage limit") {
-                                if let Some(idx) = text.rfind('|') {
-                                    if let Ok(n) = text[idx + 1..].trim().parse::<i64>() {
-                                        if n > 0 {
-                                            let normalized_epoch = normalize_reset_anchor(n);
-                                            if let Some(dt) =
-                                                DateTime::<Utc>::from_timestamp(normalized_epoch, 0)
-                                            {
-                                                let dt = normalize_reset_time(dt);
-                                                if latest_reset.map(|x| dt > x).unwrap_or(true) {
-                                                    latest_reset = Some(dt);
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else if let Some(base) = tsd_for_limits {
-                                    if let Some(dt) = parse_am_pm_reset(base, text) {
-                                        if latest_reset.map(|x| dt > x).unwrap_or(true) {
-                                            latest_reset = Some(dt);
-                                        }
-                                    }
-                                } else if let Some(dt) = parse_am_pm_reset(Utc::now(), text) {
-                                    if latest_reset.map(|x| dt > x).unwrap_or(true) {
-                                        latest_reset = Some(dt);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // Reuse the recent_files list from reset anchor discovery (already filtered by mtime)
-        // This avoids a second expensive directory walk
+        // Parse each recent file once, collecting both reset anchors and usage.
         for path in &recent_files {
             let file = match File::open(path) {
                 Ok(f) => f,
@@ -945,8 +826,32 @@ pub fn scan_usage(
                     Ok(v) => v,
                     Err(_) => continue,
                 };
+                let tsd_for_limits: Option<DateTime<Utc>> = v
+                    .get("timestamp")
+                    .and_then(|s| s.as_str())
+                    .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+                    .map(|d| d.with_timezone(&Utc));
 
                 if v.get("type").and_then(|s| s.as_str()) == Some("result") {
+                    let sid_v = v
+                        .get("sessionId")
+                        .or_else(|| v.get("session_id"))
+                        .and_then(|s| s.as_str());
+                    if sid_v == Some(session_id)
+                        && let Some(cn) = v.get("total_cost_usd")
+                    {
+                        if let Some(n) = cn.as_f64() {
+                            if n > session_cost_via_results {
+                                session_cost_via_results = n;
+                            }
+                        } else if let Some(s) = cn.as_str()
+                            && let Ok(n) = s.parse::<f64>()
+                            && n > session_cost_via_results
+                        {
+                            session_cost_via_results = n;
+                        }
+                    }
+
                     let sid = v
                         .get("sessionId")
                         .or_else(|| v.get("session_id"))
@@ -1145,28 +1050,10 @@ pub fn scan_usage(
                                 for c in arr {
                                     if let Some(text) = c.get("text").and_then(|s| s.as_str()) {
                                         if text.contains("Claude AI usage limit reached") {
-                                            if let Some(idx) = text.rfind('|') {
-                                                if let Ok(n) = text[idx + 1..].trim().parse::<i64>()
-                                                {
-                                                    if n > 0 {
-                                                        let normalized_epoch =
-                                                            normalize_reset_anchor(n);
-                                                        if let Some(dt) =
-                                                            DateTime::<Utc>::from_timestamp(
-                                                                normalized_epoch,
-                                                                0,
-                                                            )
-                                                        {
-                                                            let dt = normalize_reset_time(dt);
-                                                            if latest_reset
-                                                                .map(|x| dt > x)
-                                                                .unwrap_or(true)
-                                                            {
-                                                                latest_reset = Some(dt);
-                                                            }
-                                                        }
-                                                    }
-                                                }
+                                            if let Some(dt) =
+                                                usage_limit_reset_from_text(text, tsd_for_limits)
+                                            {
+                                                remember_latest_reset(&mut latest_reset, dt);
                                             }
                                         }
                                     }
@@ -1184,38 +1071,10 @@ pub fn scan_usage(
                         for c in content {
                             if let Some(text) = c.get("text").and_then(|s| s.as_str()) {
                                 if text.to_lowercase().contains("usage limit") {
-                                    if let Some(idx) = text.rfind('|') {
-                                        if let Ok(n) = text[idx + 1..].trim().parse::<i64>() {
-                                            if n > 0 {
-                                                let normalized_epoch = normalize_reset_anchor(n);
-                                                if let Some(dt) = DateTime::<Utc>::from_timestamp(
-                                                    normalized_epoch,
-                                                    0,
-                                                ) {
-                                                    let dt = normalize_reset_time(dt);
-                                                    if latest_reset.map(|x| dt > x).unwrap_or(true)
-                                                    {
-                                                        latest_reset = Some(dt);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    } else if let Some(ts_s) =
-                                        v.get("timestamp").and_then(|s| s.as_str())
+                                    if let Some(dt) =
+                                        usage_limit_reset_from_text(text, tsd_for_limits)
                                     {
-                                        if let Ok(b) = DateTime::parse_from_rfc3339(ts_s)
-                                            .map(|d| d.with_timezone(&Utc))
-                                        {
-                                            if let Some(dt) = parse_am_pm_reset(b, text) {
-                                                if latest_reset.map(|x| dt > x).unwrap_or(true) {
-                                                    latest_reset = Some(dt);
-                                                }
-                                            }
-                                        }
-                                    } else if let Some(dt) = parse_am_pm_reset(Utc::now(), text) {
-                                        if latest_reset.map(|x| dt > x).unwrap_or(true) {
-                                            latest_reset = Some(dt);
-                                        }
+                                        remember_latest_reset(&mut latest_reset, dt);
                                     }
                                 }
                             }
@@ -2400,6 +2259,44 @@ mod tests {
         assert!((session_cost - 1.0).abs() < 1e-10);
         assert!((session_today_cost - 1.0).abs() < 1e-10);
         assert!((today_cost - 1.0).abs() < 1e-10);
+        Ok(())
+    }
+
+    #[test]
+    fn scan_usage_reads_api_error_am_pm_reset() -> Result<()> {
+        let session_id = format!(
+            "api-error-reset-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let timestamp = Local::now().to_rfc3339();
+        let timestamp_utc = DateTime::parse_from_rfc3339(&timestamp)?.with_timezone(&Utc);
+        let line = json!({
+            "type": "assistant",
+            "sessionId": session_id,
+            "timestamp": timestamp,
+            "isApiErrorMessage": true,
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Claude AI usage limit reached. Your limit resets 5pm"
+                    }
+                ]
+            }
+        });
+        let dir = write_transcript_line(&session_id, line)?;
+        let base = dir.path().to_path_buf();
+
+        let (_, _, _, _, latest_reset, _, _) = scan_usage(&[base], &session_id, None, None)?;
+
+        assert_eq!(
+            latest_reset,
+            parse_am_pm_reset(
+                timestamp_utc,
+                "Claude AI usage limit reached. Your limit resets 5pm",
+            )
+        );
         Ok(())
     }
 
