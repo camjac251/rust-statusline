@@ -16,7 +16,8 @@ use claude_statusline::gastown::get_gastown_info;
 use claude_statusline::models::{Entry, HookJson};
 use claude_statusline::provenance::{CostProvenance, SessionCostSource, TodayCostSource};
 use claude_statusline::usage::{
-    calc_context_from_entries, calc_context_from_transcript, parse_session_state, scan_usage,
+    DEFAULT_SCAN_LOOKBACK_HOURS, calc_context_from_entries, calc_context_from_transcript,
+    parse_session_state, scan_usage,
 };
 use claude_statusline::usage_api::{UsageSummary, get_usage_summary, resolve_usage_egress};
 use claude_statusline::utils::{claude_paths, friendly_model_name, read_stdin};
@@ -624,7 +625,14 @@ fn main() -> Result<()> {
                 "Burn rates: session={:.1}/m, global={:.1}/m",
                 metrics.session_nc_tpm, metrics.global_nc_tpm
             );
-            eprintln!("Files scanned: cutoff=48h (env: CLAUDE_SCAN_LOOKBACK_HOURS)");
+            let scan_lookback = std::env::var("CLAUDE_SCAN_LOOKBACK_HOURS")
+                .ok()
+                .filter(|value| value.parse::<i64>().is_ok())
+                .unwrap_or_else(|| DEFAULT_SCAN_LOOKBACK_HOURS.to_string());
+            eprintln!(
+                "Files scanned: cutoff={}h (env: CLAUDE_SCAN_LOOKBACK_HOURS)",
+                scan_lookback
+            );
             #[cfg(feature = "git")]
             if let Some(ref git) = git_info {
                 eprintln!(

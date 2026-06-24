@@ -29,6 +29,8 @@ use crate::models::{
 use crate::pricing::calculate_cost_for_usage_with_speed;
 use crate::utils::{context_limit_for_model_display, parse_iso_date, system_overhead_tokens};
 
+pub const DEFAULT_SCAN_LOOKBACK_HOURS: i64 = 24;
+
 /// Session-specific state extracted from the session's own transcript file.
 /// Unlike the global scan, this reads only the target transcript for fast, authoritative data.
 #[derive(Debug, Default)]
@@ -780,13 +782,6 @@ pub fn scan_usage(
     let mut last_seen_raw: HashMap<String, (u64, u64, u64, u64)> = HashMap::new();
     // Once an id shows non-monotonicity, mark it as delta mode to sum subsequent updates
     let mut force_delta_mode: HashMap<String, bool> = HashMap::new();
-    // Track agent/Task tool invocations for better cost analysis
-    let mut agent_invocations: HashMap<String, u32> = HashMap::new();
-    // Track tool_use blocks for correlation with tool_result (for accurate token counting)
-    let mut tool_use_tokens: HashMap<String, u64> = HashMap::new();
-    // Track compact summaries (when conversations get auto-compacted)
-    let mut _compact_summary_count = 0u32;
-    let mut _last_compact_time: Option<DateTime<Utc>> = None;
     // SDK/result transcripts can carry aggregate modelUsage without assistant usage lines.
     let mut result_usage_by_session_model: HashMap<String, Entry> = HashMap::new();
 
@@ -795,10 +790,10 @@ pub fn scan_usage(
         if let Ok(hours) = hours_str.parse::<i64>() {
             Utc::now() - Duration::hours(hours)
         } else {
-            Utc::now() - Duration::hours(48)
+            Utc::now() - Duration::hours(DEFAULT_SCAN_LOOKBACK_HOURS)
         }
     } else {
-        Utc::now() - Duration::hours(48)
+        Utc::now() - Duration::hours(DEFAULT_SCAN_LOOKBACK_HOURS)
     };
     // Convert to SystemTime for efficient walkdir filtering
     let cutoff_system = SystemTime::UNIX_EPOCH
@@ -937,124 +932,6 @@ pub fn scan_usage(
                     }
                 }
 
-                // Track Task/Agent tool invocations and tool_use blocks
-                if v.get("type").and_then(|s| s.as_str()) == Some("assistant") {
-                    if let Some(msg) = v.get("message") {
-                        if let Some(content) = msg.get("content") {
-                            if let Some(content_array) = content.as_array() {
-                                for block in content_array {
-                                    if block.get("type").and_then(|s| s.as_str())
-                                        == Some("tool_use")
-                                    {
-                                        // Track all tool_use blocks by ID for correlation
-                                        if let Some(tool_id) =
-                                            block.get("id").and_then(|s| s.as_str())
-                                        {
-                                            // Estimate tokens for tool use (name + input)
-                                            let name_tokens = block
-                                                .get("name")
-                                                .and_then(|s| s.as_str())
-                                                .map(|s| s.len() as u64 / 4)
-                                                .unwrap_or(0);
-                                            let input_tokens = block
-                                                .get("input")
-                                                .map(|v| v.to_string().len() as u64 / 4)
-                                                .unwrap_or(0);
-                                            tool_use_tokens.insert(
-                                                tool_id.to_string(),
-                                                name_tokens + input_tokens,
-                                            );
-                                        }
-
-                                        // Agent-invocation tools. `Task` spawns one subagent and
-                                        // carries `subagent_type` in input. `Workflow` runs a script
-                                        // that spawns N agents in `subagents/workflows/wf_<id>/`;
-                                        // the tool_use itself doesn't name a single subagent type,
-                                        // so we bucket those under `workflow` for counting.
-                                        let tool_name = block.get("name").and_then(|s| s.as_str());
-                                        match tool_name {
-                                            Some("Task") => {
-                                                if let Some(input) = block.get("input") {
-                                                    if let Some(agent_type) = input
-                                                        .get("subagent_type")
-                                                        .and_then(|s| s.as_str())
-                                                    {
-                                                        *agent_invocations
-                                                            .entry(agent_type.to_string())
-                                                            .or_insert(0) += 1;
-                                                    }
-                                                }
-                                            }
-                                            Some("Workflow") => {
-                                                *agent_invocations
-                                                    .entry("workflow".to_string())
-                                                    .or_insert(0) += 1;
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Track tool_result blocks and correlate with tool_use (for accurate context tracking)
-                if v.get("type").and_then(|s| s.as_str()) == Some("user") {
-                    if let Some(msg) = v.get("message") {
-                        if let Some(content) = msg.get("content") {
-                            if let Some(content_array) = content.as_array() {
-                                for block in content_array {
-                                    if block.get("type").and_then(|s| s.as_str())
-                                        == Some("tool_result")
-                                    {
-                                        if let Some(tool_use_id) =
-                                            block.get("tool_use_id").and_then(|s| s.as_str())
-                                        {
-                                            // Add tool result tokens to the original tool_use tracking
-                                            let result_tokens = block
-                                                .get("content")
-                                                .map(|v| v.to_string().len() as u64 / 4)
-                                                .unwrap_or(0);
-                                            if let Some(existing) =
-                                                tool_use_tokens.get_mut(tool_use_id)
-                                            {
-                                                *existing += result_tokens;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Detect compact summaries (conversation compaction events)
-                if v.get("isCompactSummary").and_then(|b| b.as_bool()) == Some(true) {
-                    _compact_summary_count += 1;
-                    if let Some(ts_str) = v.get("timestamp").and_then(|s| s.as_str()) {
-                        if let Ok(ts) = DateTime::parse_from_rfc3339(ts_str) {
-                            _last_compact_time = Some(ts.with_timezone(&Utc));
-                        }
-                    }
-                }
-
-                // Also check for compact summary indicators in system messages
-                if v.get("type").and_then(|s| s.as_str()) == Some("system") {
-                    if let Some(content) = v.get("content").and_then(|s| s.as_str()) {
-                        if content.contains("conversation has been compacted")
-                            || content.contains("auto-compact")
-                            || content.contains("context has been reset")
-                        {
-                            _compact_summary_count += 1;
-                            if let Some(ts_str) = v.get("timestamp").and_then(|s| s.as_str()) {
-                                if let Ok(ts) = DateTime::parse_from_rfc3339(ts_str) {
-                                    _last_compact_time = Some(ts.with_timezone(&Utc));
-                                }
-                            }
-                        }
-                    }
-                }
                 // detect reset time from API error line or other usage-limit messages with pipe+epoch
                 if v.get("isApiErrorMessage").and_then(|b| b.as_bool()) == Some(true) {
                     if let Some(msg) = v.get("message") {
