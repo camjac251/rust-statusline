@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## [2.5.3](https://github.com/camjac251/rust-statusline/compare/v2.5.2...v2.5.3) - 2026-06-24
+
+### Fixed
+
+- *(usage)* avoid duplicate transcript scans
+
+### Other
+
+- *(usage)* use cached events for totals
+- *(usage)* reduce default transcript scan cost
+- *(usage)* skip irrelevant transcript lines
+
 ## [2.5.2](https://github.com/camjac251/rust-statusline/compare/v2.5.1...v2.5.2) - 2026-06-23
 
 ### Fixed
