@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [2.5.5](https://github.com/camjac251/rust-statusline/compare/v2.5.4...v2.5.5) - 2026-06-26
+
+### Fixed
+
+- *(pricing)* bill 1h cache writes at the 1h rate
+
 ## [2.5.4](https://github.com/camjac251/rust-statusline/compare/v2.5.3...v2.5.4) - 2026-06-24
 
 ### Other
