@@ -2589,7 +2589,8 @@ mod tests {
         let (cost, count) = parse_transcript_today_cost(&transcript_path, &today).unwrap();
 
         assert_eq!(count, 1);
-        assert!((cost - 3.75).abs() < 1e-10);
+        // 1M 1h cache writes @ $6/M (Sonnet 4.6 1h write rate) = $6.00.
+        assert!((cost - 6.0).abs() < 1e-10);
     }
 
     #[test]

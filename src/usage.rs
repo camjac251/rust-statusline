@@ -2228,10 +2228,11 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].cache_create, 1_000_000);
-        assert!((entries[0].cost - 3.75).abs() < 1e-10);
-        assert!((session_cost - 3.75).abs() < 1e-10);
-        assert!((session_today_cost - 3.75).abs() < 1e-10);
-        assert!((today_cost - 3.75).abs() < 1e-10);
+        // 1M 1h cache writes @ $6/M (Sonnet 4.6 1h write rate) = $6.00.
+        assert!((entries[0].cost - 6.0).abs() < 1e-10);
+        assert!((session_cost - 6.0).abs() < 1e-10);
+        assert!((session_today_cost - 6.0).abs() < 1e-10);
+        assert!((today_cost - 6.0).abs() < 1e-10);
         Ok(())
     }
 

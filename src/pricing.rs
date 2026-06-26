@@ -407,10 +407,15 @@ fn flat_cost_for_usage(model_id: &str, usage: &Value, speed_override: Option<&st
     let input = usage_u64(usage, "input_tokens");
     let output = usage_u64(usage, "output_tokens");
     let cache_create = usage_u64(usage, "cache_creation_input_tokens");
-    let cache_create_nested =
-        usage_nested_u64(usage, "cache_creation", "ephemeral_1h_input_tokens")
-            + usage_nested_u64(usage, "cache_creation", "ephemeral_5m_input_tokens");
-    let cache_create_effective = cache_create.max(cache_create_nested);
+    let cache_create_1h = usage_nested_u64(usage, "cache_creation", "ephemeral_1h_input_tokens");
+    let cache_create_5m = usage_nested_u64(usage, "cache_creation", "ephemeral_5m_input_tokens");
+    let cache_create_effective = cache_create.max(cache_create_1h + cache_create_5m);
+    // Claude Code's calculateUSDCost splits the cache-write charge by TTL: the
+    // 1-hour bucket is billed at the 1h write rate and the remainder (5-minute
+    // writes, or a bare aggregate with no TTL breakdown) at the standard write
+    // rate, i.e. `o*rate_1h + (total - o)*rate_5m` where `o = min(1h, total)`.
+    let cache_create_1h_tokens = cache_create_1h.min(cache_create_effective);
+    let cache_create_5m_tokens = cache_create_effective - cache_create_1h_tokens;
     let cache_read = usage_u64(usage, "cache_read_input_tokens");
     let web_search_requests = usage
         .get("server_tool_use")
@@ -425,7 +430,8 @@ fn flat_cost_for_usage(model_id: &str, usage: &Value, speed_override: Option<&st
     );
     let token_cost = (input as f64) * p.in_per_tok
         + (output as f64) * p.out_per_tok
-        + (cache_create_effective as f64) * p.cache_create_per_tok
+        + (cache_create_1h_tokens as f64) * p.cache_create_1h_per_tok
+        + (cache_create_5m_tokens as f64) * p.cache_create_per_tok
         + (cache_read as f64) * p.cache_read_per_tok;
     let web_search_cost = (web_search_requests as f64) * web_search_per_request();
 
@@ -441,10 +447,11 @@ fn flat_cost_for_usage(model_id: &str, usage: &Value, speed_override: Option<&st
 /// Calculate Claude Code-compatible cost for a usage object.
 ///
 /// Mirrors `calculateUSDCost` plus `addToTotalSessionCost` in Claude Code:
-/// token/cache costs are model-priced, cache creation is charged from aggregate
-/// `cache_creation_input_tokens`, Opus 4.6 fast mode affects token/cache costs
-/// only, web search remains a flat per-request charge, and advisor iteration
-/// usage is charged recursively under its own model.
+/// token/cache costs are model-priced, cache creation splits by TTL (the
+/// `ephemeral_1h_input_tokens` bucket is billed at the 1h write rate and the
+/// remainder at the standard write rate), Opus 4.6 fast mode affects token/cache
+/// costs only, web search remains a flat per-request charge, and advisor
+/// iteration usage is charged recursively under its own model.
 pub fn calculate_cost_for_usage(model_id: &str, usage: &Value) -> f64 {
     calculate_cost_for_usage_with_speed(model_id, usage, None)
 }
@@ -678,8 +685,46 @@ mod tests {
             }
         });
 
+        // 1M 1h writes @ $6/M + 1M 5m writes @ $3.75/M = $9.75, matching the
+        // TTL split in Claude Code's calculateUSDCost.
         let cost = calculate_cost_for_usage("claude-sonnet-4-6", &usage);
-        assert!((cost - 7.5).abs() < 1e-10);
+        assert!((cost - 9.75).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cache_creation_all_1h_uses_1h_write_rate() {
+        // Real Claude Code sessions write cache with a 1-hour TTL, so the whole
+        // aggregate is billed at the 1h rate, not the default 5m rate.
+        let usage = serde_json::json!({
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 1_000_000,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 1_000_000
+            }
+        });
+
+        // Opus 4.8: 1M tokens @ $10/M (1h write rate) = $10.00.
+        let cost = calculate_cost_for_usage("claude-opus-4-8", &usage);
+        assert!((cost - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cache_creation_bare_aggregate_uses_default_write_rate() {
+        // No TTL breakdown -> charge the whole aggregate at the default (5m) rate,
+        // preserving behavior for older transcripts that omit `cache_creation`.
+        let usage = serde_json::json!({
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 1_000_000,
+            "cache_read_input_tokens": 0
+        });
+
+        // Opus 4.8: 1M tokens @ $6.25/M (default write rate) = $6.25.
+        let cost = calculate_cost_for_usage("claude-opus-4-8", &usage);
+        assert!((cost - 6.25).abs() < 1e-10);
     }
 
     #[test]
