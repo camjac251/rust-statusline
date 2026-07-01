@@ -56,6 +56,11 @@ macro_rules! apply_ansi {
     };
 }
 
+#[cfg(feature = "colors")]
+fn no_color_enabled() -> bool {
+    std::env::var_os("NO_COLOR").is_some()
+}
+
 impl ColorToken {
     pub const fn new(rgb: (u8, u8, u8), ansi: Ansi) -> Self {
         Self { rgb, ansi }
@@ -64,6 +69,9 @@ impl ColorToken {
     /// Apply color to text. Truecolor when `tc` is true, ANSI fallback otherwise.
     #[cfg(feature = "colors")]
     pub fn paint(&self, text: &str, tc: bool) -> String {
+        if no_color_enabled() {
+            return text.to_string();
+        }
         if tc {
             use owo_colors::OwoColorize;
             text.truecolor(self.rgb.0, self.rgb.1, self.rgb.2)
@@ -81,6 +89,9 @@ impl ColorToken {
     /// Apply color + bold to text.
     #[cfg(feature = "colors")]
     pub fn bold(&self, text: &str, tc: bool) -> String {
+        if no_color_enabled() {
+            return text.to_string();
+        }
         if tc {
             use owo_colors::OwoColorize;
             text.truecolor(self.rgb.0, self.rgb.1, self.rgb.2)
@@ -100,6 +111,9 @@ impl ColorToken {
     /// so we just apply it plain. In ANSI mode we add `.dimmed()`.
     #[cfg(feature = "colors")]
     pub fn dim(&self, text: &str, tc: bool) -> String {
+        if no_color_enabled() {
+            return text.to_string();
+        }
         if tc {
             use owo_colors::OwoColorize;
             text.truecolor(self.rgb.0, self.rgb.1, self.rgb.2)

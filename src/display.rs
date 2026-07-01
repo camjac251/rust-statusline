@@ -256,8 +256,11 @@ fn render_prompt_cache_segment(info: &PromptCacheInfo, tc: bool) -> String {
 }
 
 fn is_truecolor_enabled(args: &Args) -> bool {
+    if env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
     if args.truecolor {
-        return true; // Explicit flag always overrides
+        return true;
     }
     if let Ok(v) = env::var("CLAUDE_TRUECOLOR")
         && v.trim() == "1"
@@ -2629,6 +2632,48 @@ mod tests {
         assert!(line.contains("context:"));
         assert!(line.contains("1M"));
         assert!(line.contains("13%"));
+    }
+
+    #[test]
+    #[serial]
+    fn no_color_suppresses_statusline_escape_codes() {
+        let env = terminal_env_guard();
+        env.force_dimensions("320", "32");
+        env.set("NO_COLOR", "1");
+        env.set("TERM", "xterm-truecolor");
+        env.set("COLORTERM", "truecolor");
+        env.set("CLAUDE_TRUECOLOR", "1");
+
+        let line = render_rich_text_output(
+            &test_args(),
+            "claude-opus-4-7",
+            "Opus 4.7",
+            3.0,
+            11.99,
+            11.99,
+            Some(82.0),
+            None,
+            12.0,
+            None,
+            None,
+            0.0,
+            Some((133_800, 13)),
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            Some(1_000_000),
+            None,
+        );
+
+        assert!(line.contains("session:"));
+        assert!(
+            !line.contains('\x1b'),
+            "NO_COLOR output should not include ANSI escapes: {line:?}"
+        );
+        assert_eq!(line, strip_ansi(&line));
     }
 
     #[test]

@@ -3,14 +3,10 @@
 
 use anyhow::{Context, Result};
 use chrono::{Local, Utc};
-#[cfg(feature = "colors")]
-use owo_colors::OwoColorize;
 use std::path::Path;
 
 use claude_statusline::beads::get_beads_info;
 use claude_statusline::cli::{Args, BurnScopeArg, WindowAnchorArg, WindowScopeArg};
-#[cfg(not(feature = "colors"))]
-use claude_statusline::display::color_shim::ColorizeShim;
 use claude_statusline::display::{print_header, print_json_output, print_text_output};
 use claude_statusline::gastown::get_gastown_info;
 use claude_statusline::models::{Entry, HookJson, RateLimitInfo};
@@ -88,8 +84,8 @@ fn main() -> Result<()> {
     if stdin.is_empty() {
         println!(
             "Claude Code\n{} {}",
-            "❯".cyan(),
-            "[waiting for valid input]".dimmed()
+            claude_statusline::tokens::ACCENT.paint("❯", false),
+            claude_statusline::tokens::MUTED.dim("[waiting for valid input]", false)
         );
         return Ok(());
     }
@@ -696,7 +692,10 @@ fn main() -> Result<()> {
         // Debug output if requested
         if args.debug {
             eprintln!();
-            eprintln!("{}", "=== Debug Information ===".bright_black());
+            eprintln!(
+                "{}",
+                claude_statusline::tokens::MUTED.dim("=== Debug Information ===", false)
+            );
             eprintln!(
                 "Session: ${:.2} (from: {})",
                 session_cost,
@@ -767,7 +766,10 @@ fn main() -> Result<()> {
                 }
                 None => eprintln!("Usage API egress: {}", usage_egress.route),
             }
-            eprintln!("{}", "========================".bright_black());
+            eprintln!(
+                "{}",
+                claude_statusline::tokens::MUTED.dim("========================", false)
+            );
         }
     }
     Ok(())
