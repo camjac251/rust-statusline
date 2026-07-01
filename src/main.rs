@@ -153,10 +153,6 @@ fn main() -> Result<()> {
     let mut sessions_count = 1;
     let mut today_cost_source = TodayCostSource::ScanFallback;
     let mut usage_entry_source = "scan";
-    let live_session_cost = session_state
-        .session_cost
-        .filter(|cost| *cost > 0.0)
-        .or_else(|| Some(hook.cost.total_cost_usd).filter(|cost| *cost > 0.0));
     let db_fast_path_allowed =
         !args.no_subsystem_db_cache && !args.json && !args.provider_key_source;
     let scan_refresh_now = Utc::now().timestamp();
@@ -169,7 +165,7 @@ fn main() -> Result<()> {
             &hook.session_id,
             &hook.workspace.project_dir,
             transcript_path,
-            live_session_cost,
+            None,
             None,
         ) {
             Ok(global_usage) => {
@@ -194,7 +190,7 @@ fn main() -> Result<()> {
                 &hook.session_id,
                 &hook.workspace.project_dir,
                 transcript_path,
-                live_session_cost,
+                None,
                 None,
             ) {
                 Ok(global_usage) => {

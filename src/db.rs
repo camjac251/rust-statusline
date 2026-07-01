@@ -22,7 +22,7 @@ use std::time::Duration;
 
 const SCHEMA_VERSION: i64 = 4;
 const SCHEMA_VERSION_STR: &str = "4";
-const USAGE_CACHE_VERSION: &str = "3";
+const USAGE_CACHE_VERSION: &str = "4";
 const METADATA_KEY_SCHEMA_VERSION: &str = "schema_version";
 const METADATA_KEY_USAGE_CACHE_VERSION: &str = "usage_cache_version";
 const GLOBAL_SUM_CACHE_PREFIX: &str = "global_sum:";
@@ -1880,7 +1880,7 @@ mod tests {
                     value TEXT NOT NULL
                 );
                 INSERT INTO metadata (key, value) VALUES ('schema_version', '1');
-                INSERT INTO metadata (key, value) VALUES ('usage_cache_version', '3');",
+                INSERT INTO metadata (key, value) VALUES ('usage_cache_version', '4');",
             )
             .unwrap();
         legacy_conn
@@ -1972,7 +1972,7 @@ mod tests {
                 INSERT INTO metadata (key, value, updated_at)
                 VALUES ('schema_version', '2', 1);
                 INSERT INTO metadata (key, value, updated_at)
-                VALUES ('usage_cache_version', '3', 1);",
+                VALUES ('usage_cache_version', '4', 1);",
             )
             .unwrap();
         legacy_conn.pragma_update(None, "user_version", 2).unwrap();
