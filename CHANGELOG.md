@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## [2.5.6](https://github.com/camjac251/rust-statusline/compare/v2.5.5...v2.5.6) - 2026-07-01
+
+### Fixed
+
+- *(display)* honor NO_COLOR across statusline output
+- *(usage)* keep session totals out of daily cache
+
 ## [2.5.5](https://github.com/camjac251/rust-statusline/compare/v2.5.4...v2.5.5) - 2026-06-26
 
 ### Fixed
