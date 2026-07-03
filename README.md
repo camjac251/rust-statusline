@@ -96,7 +96,7 @@ Restart Claude Code. Done.
 | **session** | Cost of the current session (includes subagent costs) |
 | **today** | Aggregated cost across all concurrent sessions (via SQLite usage ledger) |
 | **window** | Cost within the current 5-hour usage window |
-| **usage%** | OAuth-reported utilization and projected usage |
+| **usage%** | OAuth-reported session, weekly, scoped model, and extra-usage utilization |
 | **burn** | Tokens per minute and cost per hour |
 | **context** | Token count and percentage of context window used |
 | **reset** | Time remaining until usage window reset |
@@ -131,6 +131,8 @@ flowchart LR
 ```
 
 Pricing is embedded at compile time from `pricing.json`. The OAuth API is optional -- if no credentials are available, the tool falls back to transcript-only metrics.
+
+Newer OAuth usage responses expose canonical rows through generic `limits[]` and `spend` fields. `claude_statusline` preserves those rows, uses them as fallbacks for session/weekly percentages, renders scoped weekly model rows such as `fable:24%`, and maps `spend` into the extra-usage credit token.
 
 ---
 
@@ -175,6 +177,8 @@ claude_statusline init [OPTIONS]
 
 **Display toggles** (text rendering only; JSON shape unchanged). Default-on tokens use `--no-<section>-<element>`; default-off opt-ins use `--<section>-<element>`.
 
+Scoped weekly model rows from the OAuth usage API render from the model metadata in `limits[]` (`fable:`, `mythos:`, `opus:`, `sonnet:`, `haiku:`, or a sanitized model label). The Opus and Sonnet hide flags also suppress matching scoped rows; other scoped families are shown when present.
+
 | Group | Flag | Default | Controls |
 |-------|------|---------|----------|
 | cost | `--no-cost-session` | on | `session:$X` token |
@@ -185,9 +189,9 @@ claude_statusline init [OPTIONS]
 | cost | `--no-cost-lines-delta` | on | `+a -b` lines token in header |
 | usage | `--no-usage-five-hour` | on | `usage:X%` + reset inline |
 | usage | `--no-usage-weekly` | on | `weekly:X%` / `7d:X%` token |
-| usage | `--no-usage-opus` | on | `opus:X%` token |
-| usage | `--no-usage-sonnet` | on | `sonnet:X%` token |
-| usage | `--no-usage-extra` | on | paid-overage token |
+| usage | `--no-usage-opus` | on | `opus:X%` legacy or scoped family token |
+| usage | `--no-usage-sonnet` | on | `sonnet:X%` legacy or scoped family token |
+| usage | `--no-usage-extra` | on | paid extra-usage credit token |
 | context | `--no-context-tokens` | on | token count side of `ctx:N/L` |
 | context | `--no-context-percent` | on | percent side of `ctx:N/L X%` |
 | context | `--no-context-compact-hint` | on | `compact:@NK ~Nm` chip |
@@ -419,6 +423,18 @@ Pass `--json` for machine-readable output. Key fields:
     "tokens_per_minute": 1500.0,
     "cost_per_hour": 1.50
   },
+  "usage_limits": {
+    "five_hour": { "utilization": 38.0, "resets_at": "2026-08-14T18:45:00+00:00" },
+    "seven_day": { "utilization": 14.0, "resets_at": "2026-08-18T07:00:00+00:00" },
+    "limits": [
+      { "kind": "weekly_scoped", "group": "weekly", "percent": 24.0, "scope": { "model": { "display_name": "Fable" } } }
+    ],
+    "spend": {
+      "used": { "amount_minor": 1234, "currency": "USD", "exponent": 2, "amount": 12.34 },
+      "limit": { "amount_minor": 98765, "currency": "USD", "exponent": 2, "amount": 987.65 },
+      "percent": 1.25
+    }
+  },
   "context": {
     "tokens": 12345,
     "percent": 6,
@@ -462,7 +478,7 @@ Pass `--json` for machine-readable output. Key fields:
 }
 ```
 
-Full schema includes `provider`, `plan`, `reset_at`, `session.subagents`, `prompt_cache`, `provenance`, `git.remote_url`, `git.worktree_count`, `git.is_linked_worktree`, nested `workspace.*`, `model.fast_mode`, optional `remote.session_id`, and token breakdowns per window. Fields are added over time; consumers should tolerate unknown keys.
+Full schema includes `provider`, `plan`, `reset_at`, `session.subagents`, `prompt_cache`, `usage_limits.limits`, `usage_limits.spend`, `provenance`, `git.remote_url`, `git.worktree_count`, `git.is_linked_worktree`, nested `workspace.*`, `model.fast_mode`, optional `remote.session_id`, and token breakdowns per window. Fields are added over time; consumers should tolerate unknown keys.
 
 ---
 
@@ -485,7 +501,7 @@ src/
 │   ├── beads.rs     # Beads models
 │   └── gastown.rs   # Gas Town models
 ├── usage.rs         # Transcript analysis, session/window/daily metrics, burn rates
-├── usage_api.rs     # OAuth usage API client with SQLite-cached responses
+├── usage_api.rs     # OAuth usage API client, scoped limits, spend, cached responses
 ├── pricing.rs       # Model pricing tables (compile-time from pricing.json)
 ├── provenance.rs    # Cost/pricing/context source metadata
 ├── db.rs            # SQLite persistent cache and usage event ledger (WAL mode)
@@ -520,7 +536,7 @@ cargo clippy --all-targets --all-features -- -D warnings  # lint
 cargo test --all-features --verbose                    # test
 ```
 
-CI runs all tests across Ubuntu, macOS, and Windows with stable and beta Rust, all feature combinations, and enforces a 7 MB binary size limit.
+CI runs tests across Ubuntu, macOS, and Windows with stable Rust, checks MSRV 1.88.0, exercises all feature combinations, and enforces a 7 MB binary size limit.
 
 ---
 
