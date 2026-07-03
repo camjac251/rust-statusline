@@ -1,9 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1240" height="80" viewBox="0 0 1240 80">
   <defs>
     <style>
-      @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&amp;display=swap');
       .bg { fill: #1a1b26; }
-      text { font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 13px; }
+      text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'DejaVu Sans Mono', monospace; font-size: 13px; }
       .muted { fill: #94A3B8; }
       .white { fill: #ffffff; }
       .blue { fill: #60A5FA; }
