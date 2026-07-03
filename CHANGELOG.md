@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## [2.5.7](https://github.com/camjac251/rust-statusline/compare/v2.5.6...v2.5.7) - 2026-07-03
+
+### Fixed
+
+- *(usage)* read scoped API limit rows
+
+### Other
+
+- *(display)* make usage assertions color-safe
+
 ## [2.5.6](https://github.com/camjac251/rust-statusline/compare/v2.5.5...v2.5.6) - 2026-07-01
 
 ### Fixed
