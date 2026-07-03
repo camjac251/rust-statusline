@@ -2786,11 +2786,12 @@ mod tests {
             None,
         );
 
-        assert!(line.contains("usage:37%"));
-        assert!(line.contains("7d:62%"));
-        assert!(line.contains("fable:24%"));
-        assert!(!line.contains("sonnet:"));
-        assert!(!line.contains("opus:"));
+        let plain = strip_ansi(&line);
+        assert!(plain.contains("usage:37%"), "{line}");
+        assert!(plain.contains("7d:62%"), "{line}");
+        assert!(plain.contains("fable:24%"), "{line}");
+        assert!(!plain.contains("sonnet:"), "{line}");
+        assert!(!plain.contains("opus:"), "{line}");
     }
 
     #[test]
@@ -2832,9 +2833,10 @@ mod tests {
             None,
         );
 
-        assert_eq!(line.matches("sonnet:").count(), 1, "{line}");
-        assert!(line.contains("sonnet:31%"), "{line}");
-        assert!(!line.contains("sonnet:9%"));
+        let plain = strip_ansi(&line);
+        assert_eq!(plain.matches("sonnet:").count(), 1, "{line}");
+        assert!(plain.contains("sonnet:31%"), "{line}");
+        assert!(!plain.contains("sonnet:9%"), "{line}");
     }
 
     #[test]

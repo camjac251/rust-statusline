@@ -20,5 +20,5 @@ pre-push:
       run: cargo clippy --all-targets --all-features -- -D warnings
       priority: 1
     test:
-      run: cargo test --all-features
+      run: env -u NO_COLOR TERM=xterm-256color COLORTERM=truecolor CLAUDE_TRUECOLOR=1 CARGO_TERM_COLOR=always cargo test --all-features
       priority: 2
