@@ -6,7 +6,7 @@ use crate::models::{BeadsInfo, GasTownInfo};
 use crate::models::{PromptCacheBucketKind, PromptCacheInfo};
 use crate::provenance::CostProvenance;
 use crate::tokens;
-use crate::usage_api::is_direct_claude_api;
+use crate::usage_api::{UsageApiLimit, is_direct_claude_api};
 use std::env;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -132,8 +132,83 @@ fn usage_limit_json(limit: &UsageLimit) -> serde_json::Value {
         "utilization": limit.utilization.map(|v| (v * 10.0).round() / 10.0),
         "used": limit.used,
         "remaining": limit.remaining,
+        "limit": limit.limit,
         "resets_at": limit.resets_at.map(|d| d.to_rfc3339()),
     })
+}
+
+fn is_scoped_weekly_usage_limit(limit: &UsageApiLimit) -> bool {
+    limit.kind.as_deref() == Some("weekly_scoped")
+        || (limit.group.as_deref() == Some("weekly") && limit.scope.is_some())
+}
+
+fn scoped_usage_model_text(limit: &UsageApiLimit) -> Option<String> {
+    let model = limit.scope.as_ref()?.model.as_ref()?;
+    let mut parts = Vec::new();
+    if let Some(id) = model.id.as_deref().filter(|id| !id.trim().is_empty()) {
+        parts.push(id.to_ascii_lowercase());
+    }
+    if let Some(display) = model
+        .display_name
+        .as_deref()
+        .filter(|display| !display.trim().is_empty())
+    {
+        parts.push(display.to_ascii_lowercase());
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+fn scoped_usage_family(limit: &UsageApiLimit) -> Option<&'static str> {
+    let text = scoped_usage_model_text(limit)?;
+    [
+        ("fable", "fable"),
+        ("mythos", "mythos"),
+        ("opus", "opus"),
+        ("sonnet", "sonnet"),
+        ("haiku", "haiku"),
+    ]
+    .iter()
+    .find_map(|(needle, family)| text.contains(needle).then_some(*family))
+}
+
+fn scoped_usage_label(limit: &UsageApiLimit) -> Option<String> {
+    if let Some(family) = scoped_usage_family(limit) {
+        return Some(format!("{family}:"));
+    }
+
+    let model = limit.scope.as_ref()?.model.as_ref()?;
+    let raw = model
+        .display_name
+        .as_deref()
+        .or(model.id.as_deref())?
+        .trim();
+    let label = raw.split_whitespace().find_map(|part| {
+        let cleaned = part
+            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+            .take(12)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        (!cleaned.is_empty()).then_some(cleaned)
+    })?;
+    Some(format!("{label}:"))
+}
+
+fn has_scoped_usage_family(summary: &UsageSummary, family: &str) -> bool {
+    summary.limits.iter().any(|limit| {
+        is_scoped_weekly_usage_limit(limit)
+            && limit.percent.is_some()
+            && scoped_usage_family(limit) == Some(family)
+    })
+}
+
+fn scoped_usage_enabled(limit: &UsageApiLimit, args: &Args) -> bool {
+    match scoped_usage_family(limit) {
+        Some("opus") => !args.no_usage_opus,
+        Some("sonnet") => !args.no_usage_sonnet,
+        _ => true,
+    }
 }
 
 fn active_effort_level(hook: &HookJson) -> Option<String> {
@@ -1771,92 +1846,112 @@ fn render_rich_text_output(
         ) {
             segments.push(usage_segment);
         }
+    }
 
-        if let Some(summary) = usage_limits {
-            if !args.no_usage_weekly
-                && let Some(pct) = summary.seven_day.utilization
-            {
-                let label = if long_labels { "weekly:" } else { "7d:" };
-                let mut text = format!("{}{}", muted_label(label, tc), colorize_percent(pct, args));
-                if let Some(reset) = summary.seven_day.resets_at {
-                    let local_reset = reset.with_timezone(&Local);
-                    let now = Local::now();
-                    let hours_until = (reset - now.with_timezone(&chrono::Utc)).num_hours();
-                    let reset_fmt = if hours_until < 24 {
-                        if use_12h {
-                            if local_reset.minute() == 0 {
-                                local_reset.format("%-I%p").to_string().to_lowercase()
-                            } else {
-                                local_reset.format("%-I:%M%p").to_string().to_lowercase()
-                            }
-                        } else if local_reset.minute() == 0 {
-                            local_reset.format("%H:00").to_string()
+    if is_claude && let Some(summary) = usage_limits {
+        if !args.no_usage_weekly
+            && let Some(pct) = summary.seven_day.utilization
+        {
+            let label = if long_labels { "weekly:" } else { "7d:" };
+            let mut text = format!("{}{}", muted_label(label, tc), colorize_percent(pct, args));
+            if let Some(reset) = summary.seven_day.resets_at {
+                let local_reset = reset.with_timezone(&Local);
+                let now = Local::now();
+                let hours_until = (reset - now.with_timezone(&chrono::Utc)).num_hours();
+                let reset_fmt = if hours_until < 24 {
+                    if use_12h {
+                        if local_reset.minute() == 0 {
+                            local_reset.format("%-I%p").to_string().to_lowercase()
                         } else {
-                            local_reset.format("%H:%M").to_string()
+                            local_reset.format("%-I:%M%p").to_string().to_lowercase()
                         }
+                    } else if local_reset.minute() == 0 {
+                        local_reset.format("%H:00").to_string()
                     } else {
-                        local_reset.format("%a").to_string()
-                    };
-                    let _ = write!(text, " {}", muted_label(&format!("({reset_fmt})"), tc));
-                }
-                segments.push(status_segment(text, 15));
+                        local_reset.format("%H:%M").to_string()
+                    }
+                } else {
+                    local_reset.format("%a").to_string()
+                };
+                let _ = write!(text, " {}", muted_label(&format!("({reset_fmt})"), tc));
             }
-            if !args.no_usage_opus
-                && let Some(pct) = summary.seven_day_opus.utilization
-            {
-                segments.push(status_segment(
-                    format!(
-                        "{}{}",
-                        muted_label("opus:", tc),
-                        colorize_percent(pct, args)
-                    ),
-                    14,
-                ));
-            }
-            if !args.no_usage_sonnet
-                && let Some(pct) = summary.seven_day_sonnet.utilization
-            {
-                segments.push(status_segment(
-                    format!(
-                        "{}{}",
-                        muted_label("sonnet:", tc),
-                        colorize_percent(pct, args)
-                    ),
-                    13,
-                ));
-            }
+            segments.push(status_segment(text, 15));
+        }
+        for limit in summary
+            .limits
+            .iter()
+            .filter(|limit| is_scoped_weekly_usage_limit(limit))
+            .filter(|limit| scoped_usage_enabled(limit, args))
+        {
+            let Some(pct) = limit.percent else {
+                continue;
+            };
+            let Some(label) = scoped_usage_label(limit) else {
+                continue;
+            };
+            segments.push(status_segment(
+                format!("{}{}", muted_label(&label, tc), colorize_percent(pct, args)),
+                14,
+            ));
+        }
 
-            if !args.no_usage_extra
-                && let Some(ref extra) = summary.extra_usage
-                && extra.is_enabled
-            {
-                let label = if long_labels { "extra:" } else { "ex:" };
-                let symbol = extra_usage_symbol(extra.currency.as_deref());
-                let spent = extra.used_credits.unwrap_or(0.0);
-                let limit = extra.monthly_limit.unwrap_or(0.0);
-                let spent_token = if limit > 0.0 {
-                    tokens::gradient(spent / limit * 100.0, 100.0)
-                } else {
-                    tokens::PRIMARY_DIM
-                };
-                let extra_segment = if limit > 0.0 {
-                    format!(
-                        "{}{}{}/{}",
-                        muted_label(label, tc),
-                        tokens::MUTED.paint(&symbol, tc),
-                        spent_token.paint(&format!("{:.0}", spent), tc),
-                        muted_label(&format!("{:.0}", limit), tc)
-                    )
-                } else {
-                    format!(
-                        "{}{}{}",
-                        muted_label(label, tc),
-                        tokens::MUTED.paint(&symbol, tc),
-                        spent_token.paint(&format!("{:.2}", spent), tc)
-                    )
-                };
-                segments.push(status_segment(extra_segment, 12));
-            }
+        if !has_scoped_usage_family(summary, "opus")
+            && !args.no_usage_opus
+            && let Some(pct) = summary.seven_day_opus.utilization
+        {
+            segments.push(status_segment(
+                format!(
+                    "{}{}",
+                    muted_label("opus:", tc),
+                    colorize_percent(pct, args)
+                ),
+                14,
+            ));
+        }
+        if !has_scoped_usage_family(summary, "sonnet")
+            && !args.no_usage_sonnet
+            && let Some(pct) = summary.seven_day_sonnet.utilization
+        {
+            segments.push(status_segment(
+                format!(
+                    "{}{}",
+                    muted_label("sonnet:", tc),
+                    colorize_percent(pct, args)
+                ),
+                13,
+            ));
+        }
+
+        if !args.no_usage_extra
+            && let Some(ref extra) = summary.extra_usage
+            && extra.is_enabled
+        {
+            let label = if long_labels { "extra:" } else { "ex:" };
+            let symbol = extra_usage_symbol(extra.currency.as_deref());
+            let spent = extra.used_credits.unwrap_or(0.0);
+            let limit = extra.monthly_limit.unwrap_or(0.0);
+            let spent_token = if limit > 0.0 {
+                tokens::gradient(spent / limit * 100.0, 100.0)
+            } else {
+                tokens::PRIMARY_DIM
+            };
+            let extra_segment = if limit > 0.0 {
+                format!(
+                    "{}{}{}/{}",
+                    muted_label(label, tc),
+                    tokens::MUTED.paint(&symbol, tc),
+                    spent_token.paint(&format!("{:.0}", spent), tc),
+                    muted_label(&format!("{:.0}", limit), tc)
+                )
+            } else {
+                format!(
+                    "{}{}{}",
+                    muted_label(label, tc),
+                    tokens::MUTED.paint(&symbol, tc),
+                    spent_token.paint(&format!("{:.2}", spent), tc)
+                )
+            };
+            segments.push(status_segment(extra_segment, 12));
         }
     }
 
@@ -2129,6 +2224,22 @@ mod tests {
             "COLORTERM",
             "CLAUDE_TRUECOLOR",
         ])
+    }
+
+    fn scoped_weekly_limit(display_name: &str, percent: f64) -> UsageApiLimit {
+        UsageApiLimit {
+            kind: Some("weekly_scoped".to_string()),
+            group: Some("weekly".to_string()),
+            percent: Some(percent),
+            scope: Some(crate::usage_api::UsageLimitScope {
+                model: Some(crate::usage_api::UsageLimitScopeModel {
+                    id: None,
+                    display_name: Some(display_name.to_string()),
+                }),
+                surface: None,
+            }),
+            ..UsageApiLimit::default()
+        }
     }
 
     #[test]
@@ -2589,6 +2700,7 @@ mod tests {
                 utilization: Some(0.0),
                 ..UsageLimit::default()
             },
+            limits: vec![scoped_weekly_limit("Fable", 24.0)],
             extra_usage: Some(crate::usage_api::ExtraUsage {
                 is_enabled: true,
                 monthly_limit: Some(60.0),
@@ -2627,11 +2739,102 @@ mod tests {
         assert!(line.contains("today:"));
         assert!(line.contains("win:"));
         assert!(line.contains("7d:"));
+        assert!(line.contains("fable:"));
         assert!(line.contains("sonnet:"));
         assert!(line.contains("ex:"));
         assert!(line.contains("context:"));
         assert!(line.contains("1M"));
         assert!(line.contains("13%"));
+    }
+
+    #[test]
+    #[serial]
+    fn rich_usage_row_renders_scoped_fable_without_sonnet() {
+        let env = terminal_env_guard();
+        env.force_dimensions("320", "32");
+
+        let summary = UsageSummary {
+            seven_day: UsageLimit {
+                utilization: Some(62.0),
+                ..UsageLimit::default()
+            },
+            limits: vec![scoped_weekly_limit("Fable", 24.0)],
+            ..UsageSummary::default()
+        };
+
+        let line = render_rich_text_output(
+            &test_args(),
+            "claude-fable-5",
+            "Fable 5",
+            0.0,
+            0.0,
+            0.0,
+            Some(37.0),
+            None,
+            0.0,
+            None,
+            None,
+            0.0,
+            Some((90_400, 13)),
+            0,
+            0,
+            0,
+            0,
+            0,
+            Some(&summary),
+            Some(1_000_000),
+            None,
+        );
+
+        assert!(line.contains("usage:37%"));
+        assert!(line.contains("7d:62%"));
+        assert!(line.contains("fable:24%"));
+        assert!(!line.contains("sonnet:"));
+        assert!(!line.contains("opus:"));
+    }
+
+    #[test]
+    #[serial]
+    fn rich_usage_row_deduplicates_scoped_sonnet_and_legacy_field() {
+        let env = terminal_env_guard();
+        env.force_dimensions("320", "32");
+
+        let summary = UsageSummary {
+            seven_day_sonnet: UsageLimit {
+                utilization: Some(9.0),
+                ..UsageLimit::default()
+            },
+            limits: vec![scoped_weekly_limit("Sonnet", 31.0)],
+            ..UsageSummary::default()
+        };
+
+        let line = render_rich_text_output(
+            &test_args(),
+            "claude-sonnet-4-5",
+            "Sonnet 4.5",
+            0.0,
+            0.0,
+            0.0,
+            None,
+            None,
+            0.0,
+            None,
+            None,
+            0.0,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            Some(&summary),
+            Some(200_000),
+            None,
+        );
+
+        assert_eq!(line.matches("sonnet:").count(), 1, "{line}");
+        assert!(line.contains("sonnet:31%"), "{line}");
+        assert!(!line.contains("sonnet:9%"));
     }
 
     #[test]
@@ -2924,7 +3127,9 @@ pub fn build_json_output(
                 "utilization": e.utilization,
                 "currency": e.currency,
                 "disabled_reason": e.disabled_reason
-            }))
+            })),
+            "limits": &summary.limits,
+            "spend": &summary.spend
         })
     });
 

@@ -498,14 +498,31 @@ fn main() -> Result<()> {
         } else if let Some(api_summary) = get_usage_summary(&paths, Some(&hook.model.id)) {
             // Hook provided utilization/reset; enrich with API-only fields
             if let Some(ref mut summary) = usage_summary {
+                summary.window.fill_missing_from(&api_summary.window);
+                summary.seven_day.fill_missing_from(&api_summary.seven_day);
                 if summary.extra_usage.is_none() {
-                    summary.extra_usage = api_summary.extra_usage;
+                    summary.extra_usage = api_summary.extra_usage.clone();
                 }
-                if summary.seven_day_sonnet.utilization.is_none() {
-                    summary.seven_day_sonnet = api_summary.seven_day_sonnet;
+                summary
+                    .seven_day_sonnet
+                    .fill_missing_from(&api_summary.seven_day_sonnet);
+                summary
+                    .seven_day_opus
+                    .fill_missing_from(&api_summary.seven_day_opus);
+                summary
+                    .seven_day_oauth_apps
+                    .fill_missing_from(&api_summary.seven_day_oauth_apps);
+                summary
+                    .seven_day_cowork
+                    .fill_missing_from(&api_summary.seven_day_cowork);
+                summary
+                    .cinder_cove
+                    .fill_missing_from(&api_summary.cinder_cove);
+                if summary.limits.is_empty() {
+                    summary.limits = api_summary.limits.clone();
                 }
-                if summary.seven_day_opus.utilization.is_none() {
-                    summary.seven_day_opus = api_summary.seven_day_opus;
+                if summary.spend.is_none() {
+                    summary.spend = api_summary.spend.clone();
                 }
             }
         }

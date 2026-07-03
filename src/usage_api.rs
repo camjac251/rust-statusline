@@ -197,7 +197,28 @@ pub struct UsageLimit {
     pub utilization: Option<f64>,
     pub used: Option<f64>,
     pub remaining: Option<f64>,
+    pub limit: Option<f64>,
     pub resets_at: Option<DateTime<Utc>>,
+}
+
+impl UsageLimit {
+    pub fn fill_missing_from(&mut self, other: &UsageLimit) {
+        if self.utilization.is_none() {
+            self.utilization = other.utilization;
+        }
+        if self.used.is_none() {
+            self.used = other.used;
+        }
+        if self.remaining.is_none() {
+            self.remaining = other.remaining;
+        }
+        if self.limit.is_none() {
+            self.limit = other.limit;
+        }
+        if self.resets_at.is_none() {
+            self.resets_at = other.resets_at;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -208,6 +229,54 @@ pub struct ExtraUsage {
     pub utilization: Option<f64>,
     pub currency: Option<String>,
     pub disabled_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UsageApiLimit {
+    pub kind: Option<String>,
+    pub group: Option<String>,
+    pub percent: Option<f64>,
+    pub severity: Option<String>,
+    pub resets_at: Option<DateTime<Utc>>,
+    pub scope: Option<UsageLimitScope>,
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UsageLimitScope {
+    pub model: Option<UsageLimitScopeModel>,
+    pub surface: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UsageLimitScopeModel {
+    pub id: Option<String>,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UsageMoney {
+    pub amount_minor: Option<i64>,
+    pub exponent: Option<i32>,
+    pub currency: Option<String>,
+    pub amount: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UsageSpend {
+    pub used: Option<UsageMoney>,
+    pub limit: Option<UsageMoney>,
+    pub percent: Option<f64>,
+    pub severity: Option<String>,
+    pub enabled: Option<bool>,
+    pub disabled_reason: Option<String>,
+    pub can_purchase_credits: Option<bool>,
+    pub can_toggle: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -223,6 +292,11 @@ pub struct UsageSummary {
     /// `resets_at` is the credit's expiry rather than a window reset.
     pub cinder_cove: UsageLimit,
     pub extra_usage: Option<ExtraUsage>,
+    /// Generic limit rows from the live OAuth usage response. Newer endpoint
+    /// shapes put canonical session/weekly/scoped percentages here.
+    pub limits: Vec<UsageApiLimit>,
+    /// Newer extra-usage spend object with explicit money units.
+    pub spend: Option<UsageSpend>,
     /// True when serving expired cached data after an API failure
     pub stale: bool,
 }
@@ -241,10 +315,45 @@ struct ExtraUsageDto {
 #[derive(Debug, Deserialize)]
 struct UsageLimitDto {
     utilization: Option<f64>,
+    #[serde(alias = "used_dollars")]
     used: Option<f64>,
+    #[serde(alias = "remaining_dollars")]
     remaining: Option<f64>,
+    #[serde(alias = "limit_dollars")]
+    limit: Option<f64>,
     #[serde(default, deserialize_with = "deserialize_optional_datetime")]
     resets_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageApiLimitDto {
+    kind: Option<String>,
+    group: Option<String>,
+    percent: Option<f64>,
+    severity: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_datetime")]
+    resets_at: Option<DateTime<Utc>>,
+    scope: Option<UsageLimitScope>,
+    is_active: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageMoneyDto {
+    amount_minor: Option<i64>,
+    exponent: Option<i32>,
+    currency: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageSpendDto {
+    used: Option<UsageMoneyDto>,
+    limit: Option<UsageMoneyDto>,
+    percent: Option<f64>,
+    severity: Option<String>,
+    enabled: Option<bool>,
+    disabled_reason: Option<String>,
+    can_purchase_credits: Option<bool>,
+    can_toggle: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,6 +374,10 @@ struct UsageResponseDto {
     cinder_cove: Option<UsageLimitDto>,
     #[serde(default)]
     extra_usage: Option<ExtraUsageDto>,
+    #[serde(default)]
+    limits: Vec<UsageApiLimitDto>,
+    #[serde(default)]
+    spend: Option<UsageSpendDto>,
 }
 
 pub fn get_usage_summary(claude_paths: &[PathBuf], model_id: Option<&str>) -> Option<UsageSummary> {
@@ -356,14 +469,127 @@ fn fetch_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
     }
 
     let dto: UsageResponseDto = response.body_mut().read_json().ok()?;
-    Some(UsageSummary {
-        window: dto.five_hour.map(UsageLimit::from).unwrap_or_default(),
-        seven_day: dto.seven_day.map(UsageLimit::from).unwrap_or_default(),
-        seven_day_opus: dto.seven_day_opus.map(UsageLimit::from).unwrap_or_default(),
-        seven_day_sonnet: dto
-            .seven_day_sonnet
-            .map(UsageLimit::from)
-            .unwrap_or_default(),
+    Some(usage_summary_from_dto(dto))
+}
+
+impl From<UsageLimitDto> for UsageLimit {
+    fn from(value: UsageLimitDto) -> Self {
+        let utilization = value
+            .utilization
+            .or_else(|| usage_percent_from_dollars(value.used, value.limit));
+        let remaining = value
+            .remaining
+            .or_else(|| remaining_from_dollars(value.used, value.limit));
+        UsageLimit {
+            utilization,
+            used: value.used,
+            remaining,
+            limit: value.limit,
+            resets_at: value.resets_at.map(crate::usage::normalize_reset_time),
+        }
+    }
+}
+
+impl From<UsageApiLimitDto> for UsageApiLimit {
+    fn from(value: UsageApiLimitDto) -> Self {
+        UsageApiLimit {
+            kind: value.kind,
+            group: value.group,
+            percent: value.percent,
+            severity: value.severity,
+            resets_at: value.resets_at.map(crate::usage::normalize_reset_time),
+            scope: value.scope,
+            is_active: value.is_active,
+        }
+    }
+}
+
+impl From<UsageMoneyDto> for UsageMoney {
+    fn from(value: UsageMoneyDto) -> Self {
+        let amount = match (value.amount_minor, value.exponent) {
+            (Some(minor), Some(exponent)) => Some(minor as f64 / 10_f64.powi(exponent)),
+            _ => None,
+        };
+        UsageMoney {
+            amount_minor: value.amount_minor,
+            exponent: value.exponent,
+            currency: value.currency,
+            amount,
+        }
+    }
+}
+
+impl From<UsageSpendDto> for UsageSpend {
+    fn from(value: UsageSpendDto) -> Self {
+        UsageSpend {
+            used: value.used.map(UsageMoney::from),
+            limit: value.limit.map(UsageMoney::from),
+            percent: value.percent,
+            severity: value.severity,
+            enabled: value.enabled,
+            disabled_reason: value.disabled_reason,
+            can_purchase_credits: value.can_purchase_credits,
+            can_toggle: value.can_toggle,
+        }
+    }
+}
+
+impl From<ExtraUsageDto> for ExtraUsage {
+    fn from(value: ExtraUsageDto) -> Self {
+        ExtraUsage {
+            is_enabled: value.is_enabled,
+            // API returns cents, convert to dollars.
+            monthly_limit: value.monthly_limit.map(|v| v / 100.0),
+            used_credits: value.used_credits.map(|v| v / 100.0),
+            utilization: value.utilization,
+            currency: value.currency,
+            disabled_reason: value.disabled_reason,
+        }
+    }
+}
+
+fn usage_summary_from_dto(dto: UsageResponseDto) -> UsageSummary {
+    let limits = dto
+        .limits
+        .into_iter()
+        .map(UsageApiLimit::from)
+        .collect::<Vec<_>>();
+    let spend = dto.spend.map(UsageSpend::from);
+
+    let mut window = dto.five_hour.map(UsageLimit::from).unwrap_or_default();
+    fill_from_api_limit(&mut window, find_session_limit(&limits));
+
+    let mut seven_day = dto.seven_day.map(UsageLimit::from).unwrap_or_default();
+    fill_from_api_limit(&mut seven_day, find_weekly_all_limit(&limits));
+
+    let mut seven_day_opus = dto.seven_day_opus.map(UsageLimit::from).unwrap_or_default();
+    fill_from_api_limit(
+        &mut seven_day_opus,
+        find_scoped_weekly_limit(&limits, "opus"),
+    );
+
+    let mut seven_day_sonnet = dto
+        .seven_day_sonnet
+        .map(UsageLimit::from)
+        .unwrap_or_default();
+    fill_from_api_limit(
+        &mut seven_day_sonnet,
+        find_scoped_weekly_limit(&limits, "sonnet"),
+    );
+
+    let mut extra_usage = dto.extra_usage.map(ExtraUsage::from);
+    if let Some(spend_extra) = spend.as_ref().and_then(extra_usage_from_spend) {
+        match extra_usage.as_mut() {
+            Some(extra) => fill_extra_usage_from_spend(extra, &spend_extra),
+            None => extra_usage = Some(spend_extra),
+        }
+    }
+
+    UsageSummary {
+        window,
+        seven_day,
+        seven_day_opus,
+        seven_day_sonnet,
         seven_day_oauth_apps: dto
             .seven_day_oauth_apps
             .map(UsageLimit::from)
@@ -373,27 +599,119 @@ fn fetch_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
             .map(UsageLimit::from)
             .unwrap_or_default(),
         cinder_cove: dto.cinder_cove.map(UsageLimit::from).unwrap_or_default(),
-        extra_usage: dto.extra_usage.map(|e| ExtraUsage {
-            is_enabled: e.is_enabled,
-            // API returns cents, convert to dollars
-            monthly_limit: e.monthly_limit.map(|v| v / 100.0),
-            used_credits: e.used_credits.map(|v| v / 100.0),
-            utilization: e.utilization,
-            currency: e.currency,
-            disabled_reason: e.disabled_reason,
-        }),
+        extra_usage,
+        limits,
+        spend,
         stale: false,
+    }
+}
+
+fn usage_percent_from_dollars(used: Option<f64>, limit: Option<f64>) -> Option<f64> {
+    match (used, limit) {
+        (Some(used), Some(limit)) if limit > 0.0 => Some(used / limit * 100.0),
+        _ => None,
+    }
+}
+
+fn remaining_from_dollars(used: Option<f64>, limit: Option<f64>) -> Option<f64> {
+    match (used, limit) {
+        (Some(used), Some(limit)) => Some((limit - used).max(0.0)),
+        _ => None,
+    }
+}
+
+fn fill_from_api_limit(target: &mut UsageLimit, source: Option<&UsageApiLimit>) {
+    let Some(source) = source else {
+        return;
+    };
+    if target.utilization.is_none() {
+        target.utilization = source.percent;
+    }
+    if target.resets_at.is_none() {
+        target.resets_at = source.resets_at;
+    }
+}
+
+fn find_session_limit(limits: &[UsageApiLimit]) -> Option<&UsageApiLimit> {
+    limits.iter().find(|limit| {
+        limit.kind.as_deref() == Some("session") || limit.group.as_deref() == Some("session")
     })
 }
 
-impl From<UsageLimitDto> for UsageLimit {
-    fn from(value: UsageLimitDto) -> Self {
-        UsageLimit {
-            utilization: value.utilization,
-            used: value.used,
-            remaining: value.remaining,
-            resets_at: value.resets_at.map(crate::usage::normalize_reset_time),
-        }
+fn find_weekly_all_limit(limits: &[UsageApiLimit]) -> Option<&UsageApiLimit> {
+    limits.iter().find(|limit| {
+        limit.kind.as_deref() == Some("weekly_all")
+            || (limit.group.as_deref() == Some("weekly") && limit.scope.is_none())
+    })
+}
+
+fn find_scoped_weekly_limit<'a>(
+    limits: &'a [UsageApiLimit],
+    family: &str,
+) -> Option<&'a UsageApiLimit> {
+    limits.iter().find(|limit| {
+        let is_scoped_weekly = limit.kind.as_deref() == Some("weekly_scoped")
+            || (limit.group.as_deref() == Some("weekly") && limit.scope.is_some());
+        is_scoped_weekly && limit_scope_contains(limit, family)
+    })
+}
+
+fn limit_scope_contains(limit: &UsageApiLimit, needle: &str) -> bool {
+    let needle = needle.to_ascii_lowercase();
+    let Some(model) = limit.scope.as_ref().and_then(|scope| scope.model.as_ref()) else {
+        return false;
+    };
+
+    model
+        .id
+        .as_deref()
+        .is_some_and(|id| id.to_ascii_lowercase().contains(&needle))
+        || model
+            .display_name
+            .as_deref()
+            .is_some_and(|display| display.to_ascii_lowercase().contains(&needle))
+}
+
+fn extra_usage_from_spend(spend: &UsageSpend) -> Option<ExtraUsage> {
+    let used = spend.used.as_ref();
+    let limit = spend.limit.as_ref();
+    let has_extra_usage_data = spend.enabled.is_some()
+        || spend.percent.is_some()
+        || spend.disabled_reason.is_some()
+        || used.is_some()
+        || limit.is_some();
+    if !has_extra_usage_data {
+        return None;
+    }
+
+    Some(ExtraUsage {
+        is_enabled: spend.enabled.unwrap_or(false),
+        monthly_limit: limit.and_then(|money| money.amount),
+        used_credits: used.and_then(|money| money.amount),
+        utilization: spend.percent,
+        currency: used
+            .and_then(|money| money.currency.clone())
+            .or_else(|| limit.and_then(|money| money.currency.clone())),
+        disabled_reason: spend.disabled_reason.clone(),
+    })
+}
+
+fn fill_extra_usage_from_spend(target: &mut ExtraUsage, source: &ExtraUsage) {
+    target.is_enabled = target.is_enabled || source.is_enabled;
+    if target.monthly_limit.is_none() {
+        target.monthly_limit = source.monthly_limit;
+    }
+    if target.used_credits.is_none() {
+        target.used_credits = source.used_credits;
+    }
+    if target.utilization.is_none() {
+        target.utilization = source.utilization;
+    }
+    if target.currency.is_none() {
+        target.currency = source.currency.clone();
+    }
+    if target.disabled_reason.is_none() {
+        target.disabled_reason = source.disabled_reason.clone();
     }
 }
 
@@ -663,11 +981,17 @@ KYWlso+DPM561Zw=
 
     #[test]
     fn usage_response_parses_raw_api_shape() {
-        // Mirrors the live /api/oauth/usage body, including null codename
-        // fields the statusline does not model.
+        // Mirrors the /api/oauth/usage response shape with synthetic values,
+        // including null codename fields the statusline does not model.
         let raw = r#"{
-            "five_hour": {"utilization": 20.0, "resets_at": "2026-06-09T21:20:01.037017+00:00"},
-            "seven_day": {"utilization": 5.0, "resets_at": "2026-06-16T07:00:01.037038+00:00"},
+            "five_hour": {
+                "utilization": 42.3,
+                "resets_at": "2026-08-14T18:45:00.000000+00:00",
+                "limit_dollars": 123.45,
+                "used_dollars": 67.89,
+                "remaining_dollars": 55.56
+            },
+            "seven_day": {"utilization": 73.2, "resets_at": "2026-08-18T07:00:00.000000+00:00"},
             "seven_day_oauth_apps": null,
             "seven_day_opus": null,
             "seven_day_sonnet": {"utilization": 0.0, "resets_at": null},
@@ -676,30 +1000,157 @@ KYWlso+DPM561Zw=
             "tangelo": null,
             "iguana_necktie": null,
             "omelette_promotional": null,
-            "cinder_cove": {"utilization": 12.0, "resets_at": "2026-07-01T00:00:00+00:00"},
+            "cinder_cove": {"utilization": 8.6, "resets_at": "2026-09-01T00:00:00+00:00"},
             "extra_usage": {
                 "is_enabled": true,
-                "monthly_limit": 30000,
-                "used_credits": 1200.0,
-                "utilization": 4.0,
+                "monthly_limit": 98765,
+                "used_credits": 4321.0,
+                "utilization": 4.4,
                 "currency": "USD",
                 "disabled_reason": null
-            }
+            },
+            "spend": {
+                "used": {"amount_minor": 4321, "currency": "USD", "exponent": 2},
+                "limit": {"amount_minor": 98765, "currency": "USD", "exponent": 2},
+                "percent": 4.4,
+                "severity": "normal",
+                "enabled": true,
+                "disabled_reason": null,
+                "can_purchase_credits": false,
+                "can_toggle": false
+            },
+            "limits": [
+                {
+                    "kind": "session",
+                    "group": "session",
+                    "percent": 42.3,
+                    "severity": "normal",
+                    "resets_at": "2026-08-14T18:45:00.000000+00:00",
+                    "scope": null,
+                    "is_active": false
+                },
+                {
+                    "kind": "weekly_all",
+                    "group": "weekly",
+                    "percent": 73.2,
+                    "severity": "normal",
+                    "resets_at": "2026-08-18T07:00:00.000000+00:00",
+                    "scope": null,
+                    "is_active": true
+                }
+            ]
         }"#;
 
         let dto: UsageResponseDto = serde_json::from_str(raw).expect("parse raw usage response");
-        assert_eq!(
-            dto.five_hour.as_ref().and_then(|l| l.utilization),
-            Some(20.0)
-        );
-        assert!(dto.seven_day_opus.is_none());
+        let summary = usage_summary_from_dto(dto);
+        assert_eq!(summary.window.utilization, Some(42.3));
+        assert_eq!(summary.window.used, Some(67.89));
+        assert_eq!(summary.window.remaining, Some(55.56));
+        assert_eq!(summary.window.limit, Some(123.45));
+        assert!(summary.seven_day_opus.utilization.is_none());
 
-        let cinder = UsageLimit::from(dto.cinder_cove.expect("cinder_cove"));
-        assert_eq!(cinder.utilization, Some(12.0));
+        let cinder = summary.cinder_cove;
+        assert_eq!(cinder.utilization, Some(8.6));
         assert!(cinder.resets_at.is_some());
 
-        let extra = dto.extra_usage.expect("extra_usage");
+        let extra = summary.extra_usage.expect("extra_usage");
         assert_eq!(extra.currency.as_deref(), Some("USD"));
         assert_eq!(extra.disabled_reason, None);
+        assert_eq!(extra.monthly_limit, Some(987.65));
+        assert_eq!(summary.limits.len(), 2);
+        assert_eq!(
+            summary
+                .spend
+                .as_ref()
+                .and_then(|spend| spend.limit.as_ref())
+                .and_then(|money| money.amount),
+            Some(987.65)
+        );
+    }
+
+    #[test]
+    fn usage_response_uses_limits_and_spend_as_fallbacks() {
+        let raw = r#"{
+            "five_hour": null,
+            "seven_day": null,
+            "seven_day_opus": null,
+            "seven_day_sonnet": null,
+            "extra_usage": null,
+            "spend": {
+                "used": {"amount_minor": 1234, "currency": "USD", "exponent": 2},
+                "limit": {"amount_minor": 98765, "currency": "USD", "exponent": 2},
+                "percent": 1.25,
+                "severity": "normal",
+                "enabled": true,
+                "disabled_reason": null
+            },
+            "limits": [
+                {
+                    "kind": "session",
+                    "group": "session",
+                    "percent": 37,
+                    "severity": "normal",
+                    "resets_at": "2026-10-06T15:30:00.000000+00:00",
+                    "scope": null,
+                    "is_active": false
+                },
+                {
+                    "kind": "weekly_all",
+                    "group": "weekly",
+                    "percent": 62,
+                    "severity": "normal",
+                    "resets_at": "2026-10-13T07:00:00.000000+00:00",
+                    "scope": null,
+                    "is_active": true
+                },
+                {
+                    "kind": "weekly_scoped",
+                    "group": "weekly",
+                    "percent": 24,
+                    "severity": "normal",
+                    "resets_at": "2026-10-13T07:00:00.000000+00:00",
+                    "scope": {
+                        "model": {"id": null, "display_name": "Fable"},
+                        "surface": null
+                    },
+                    "is_active": false
+                }
+            ]
+        }"#;
+
+        let dto: UsageResponseDto = serde_json::from_str(raw).expect("parse fallback response");
+        let summary = usage_summary_from_dto(dto);
+
+        assert_eq!(summary.window.utilization, Some(37.0));
+        assert!(summary.window.resets_at.is_some());
+        assert_eq!(summary.seven_day.utilization, Some(62.0));
+        assert_eq!(
+            find_scoped_weekly_limit(&summary.limits, "fable").and_then(|limit| limit.percent),
+            Some(24.0)
+        );
+        assert!(find_scoped_weekly_limit(&summary.limits, "sonnet").is_none());
+        assert_eq!(
+            summary
+                .limits
+                .iter()
+                .find(|limit| limit.kind.as_deref() == Some("weekly_scoped"))
+                .and_then(|limit| limit.scope.as_ref())
+                .and_then(|scope| scope.model.as_ref())
+                .and_then(|model| model.display_name.as_deref()),
+            Some("Fable")
+        );
+        assert_eq!(summary.seven_day_opus.utilization, None);
+        assert_eq!(summary.seven_day_sonnet.utilization, None);
+
+        assert_eq!(
+            summary.spend.as_ref().and_then(|spend| spend.percent),
+            Some(1.25)
+        );
+        let extra = summary.extra_usage.expect("spend-backed extra usage");
+        assert!(extra.is_enabled);
+        assert_eq!(extra.used_credits, Some(12.34));
+        assert_eq!(extra.monthly_limit, Some(987.65));
+        assert_eq!(extra.utilization, Some(1.25));
+        assert_eq!(extra.currency.as_deref(), Some("USD"));
     }
 }
