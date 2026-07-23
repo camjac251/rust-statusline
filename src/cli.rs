@@ -343,6 +343,20 @@ pub struct Args {
         env = "CLAUDE_STATUSLINE_INTEGRATIONS_NO_PROMPT_CACHE"
     )]
     pub no_integrations_prompt_cache: bool,
+    /// Hide the workflow-progress header segment (running workflow agents-done/total)
+    #[arg(
+        long = "no-integrations-workflows",
+        global = true,
+        env = "CLAUDE_STATUSLINE_INTEGRATIONS_NO_WORKFLOWS"
+    )]
+    pub no_integrations_workflows: bool,
+    /// Hide the remote-agent task-count header segment
+    #[arg(
+        long = "no-integrations-remote-tasks",
+        global = true,
+        env = "CLAUDE_STATUSLINE_INTEGRATIONS_NO_REMOTE_TASKS"
+    )]
+    pub no_integrations_remote_tasks: bool,
 
     // ---- display.provider.* ----
     /// Show the API key source hint in the provider header segment

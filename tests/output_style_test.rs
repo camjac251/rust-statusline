@@ -104,6 +104,7 @@ fn test_output_style_in_json() {
         None,  // subagent_breakdown
         None,  // cost_provenance
         None,  // prompt_cache
+        None,  // session_activity
     );
 
     // Verify output_style is present in JSON
@@ -187,6 +188,7 @@ fn test_output_style_in_json() {
         None,  // subagent_breakdown
         None,  // cost_provenance
         None,  // prompt_cache
+        None,  // session_activity
     );
 
     // The modern hook schema always includes output_style; "default" is the empty-state name.
@@ -273,6 +275,7 @@ fn test_multiple_output_styles() {
             None,  // subagent_breakdown
             None,  // cost_provenance
             None,  // prompt_cache
+            None,  // session_activity
         );
 
         assert_eq!(

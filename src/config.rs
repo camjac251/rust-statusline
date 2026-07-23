@@ -85,6 +85,8 @@ pub struct DisplayFileConfig {
     pub integrations_beads_alerts: Option<bool>,
     pub integrations_gastown: Option<bool>,
     pub integrations_prompt_cache: Option<bool>,
+    pub integrations_workflows: Option<bool>,
+    pub integrations_remote_tasks: Option<bool>,
     // provider.*
     pub provider_key_source: Option<bool>,
     pub provider_name: Option<bool>,
@@ -394,6 +396,18 @@ fn apply_config(args: &mut Args, matches: &clap::ArgMatches, config: &FileConfig
         config.display.integrations_prompt_cache,
         &mut args.no_integrations_prompt_cache,
     );
+    apply_display_toggle(
+        matches,
+        "no_integrations_workflows",
+        config.display.integrations_workflows,
+        &mut args.no_integrations_workflows,
+    );
+    apply_display_toggle(
+        matches,
+        "no_integrations_remote_tasks",
+        config.display.integrations_remote_tasks,
+        &mut args.no_integrations_remote_tasks,
+    );
 
     apply_display_opt_in(
         matches,
@@ -590,6 +604,18 @@ fn apply_preset_minimal(args: &mut Args, matches: &clap::ArgMatches) {
         &mut args.no_integrations_prompt_cache,
         true,
     );
+    set_if_unset_neg(
+        matches,
+        "no_integrations_workflows",
+        &mut args.no_integrations_workflows,
+        true,
+    );
+    set_if_unset_neg(
+        matches,
+        "no_integrations_remote_tasks",
+        &mut args.no_integrations_remote_tasks,
+        true,
+    );
     // Subsystems: skip the expensive ones not needed for minimal
     set_if_unset_neg(
         matches,
@@ -745,6 +771,12 @@ fn parse_config_str(input: &str) -> Result<FileConfig> {
             }
             "integrations.prompt_cache" => {
                 config.display.integrations_prompt_cache = Some(parse_bool(value)?)
+            }
+            "integrations.workflows" => {
+                config.display.integrations_workflows = Some(parse_bool(value)?)
+            }
+            "integrations.remote_tasks" => {
+                config.display.integrations_remote_tasks = Some(parse_bool(value)?)
             }
             // display.provider.*
             "provider.key_source" => config.display.provider_key_source = Some(parse_bool(value)?),

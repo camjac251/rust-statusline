@@ -2,7 +2,7 @@ use chrono::{DateTime, Local, Timelike};
 
 use crate::beads::format_bead_display;
 use crate::gastown::format_gastown_display;
-use crate::models::{BeadsInfo, GasTownInfo};
+use crate::models::{BeadsInfo, GasTownInfo, SessionActivity};
 use crate::models::{PromptCacheBucketKind, PromptCacheInfo};
 use crate::provenance::CostProvenance;
 use crate::tokens;
@@ -22,6 +22,7 @@ const SYM_ARROW_RIGHT: &str = "→"; // Projection arrow
 const SYM_ARROW_UP: &str = "↑"; // Ahead indicator
 const SYM_ARROW_DOWN: &str = "↓"; // Behind indicator
 const SYM_DOLLAR: &str = "$"; // Cost indicator
+const SYM_RUNNING: &str = "●"; // Active/running indicator
 
 // Terminal width thresholds for responsive formatting
 const WIDTH_NARROW: u16 = 140;
@@ -1323,6 +1324,7 @@ fn render_header_line(
     gastown_info: Option<&GasTownInfo>,
     context_limit_override: Option<u64>,
     is_fast_mode: bool,
+    session_activity: Option<&SessionActivity>,
 ) -> Option<String> {
     let profile = render_profile();
     if profile.mode == RenderMode::Compact {
@@ -1484,6 +1486,47 @@ fn render_header_line(
         }
     }
 
+    let long_labels = matches!(args.labels, LabelsArg::Long);
+
+    // Workflow-progress segment: only a running workflow is shown, so a finished
+    // run in the session leaves no noise behind.
+    if !args.no_integrations_workflows
+        && let Some(run) = session_activity
+            .and_then(|activity| activity.workflows.iter().find(|run| run.is_running()))
+    {
+        let label = if long_labels { "workflow:" } else { "wf:" };
+        let name_max = match profile.width {
+            TerminalWidth::Narrow => 14,
+            TerminalWidth::Medium => 20,
+            TerminalWidth::Wide => 28,
+        };
+        let name = truncate_label(run.workflow_name.as_deref().unwrap_or("workflow"), name_max);
+        let progress = format!("{}/{}", run.agents_done(), run.agents_total());
+        let body = format!(
+            "{}{} {} {}",
+            muted_label(label, tc),
+            tokens::ACCENT.paint(&name, tc),
+            tokens::PRIMARY_DIM.paint(&progress, tc),
+            tokens::SUCCESS.paint(SYM_RUNNING, tc),
+        );
+        header_parts.push(status_segment(wrap_header_segment(body, tc), 20));
+    }
+
+    // Remote-agent task-count segment (present only when at least one is active)
+    if !args.no_integrations_remote_tasks
+        && let Some(count) = session_activity
+            .map(|a| a.remote_tasks.len())
+            .filter(|n| *n > 0)
+    {
+        let label = if long_labels { "remote:" } else { "rt:" };
+        let body = format!(
+            "{}{}",
+            muted_label(label, tc),
+            tokens::ACCENT.paint(&count.to_string(), tc),
+        );
+        header_parts.push(status_segment(wrap_header_segment(body, tc), 18));
+    }
+
     // Agent segment (if running as a subagent via --agent)
     if !args.no_workspace_agent
         && let Some(ref agent) = hook.agent
@@ -1600,6 +1643,7 @@ pub fn print_header(
     gastown_info: Option<&GasTownInfo>,
     context_limit_override: Option<u64>,
     is_fast_mode: bool,
+    session_activity: Option<&SessionActivity>,
 ) {
     if let Some(line) = render_header_line(
         hook,
@@ -1611,6 +1655,7 @@ pub fn print_header(
         gastown_info,
         context_limit_override,
         is_fast_mode,
+        session_activity,
     ) {
         println!("{}", line);
     }
@@ -1631,6 +1676,7 @@ fn render_compact_text_output(
     lines_delta: Option<(i64, i64)>,
     usage_limits: Option<&UsageSummary>,
     context_limit_override: Option<u64>,
+    session_activity: Option<&SessionActivity>,
 ) -> String {
     let profile = render_profile();
     let tc = is_truecolor_enabled(args);
@@ -1715,6 +1761,47 @@ fn render_compact_text_output(
             args,
             0.0,
             false,
+        ));
+    }
+
+    if !args.no_integrations_workflows
+        && let Some(run) = session_activity
+            .and_then(|activity| activity.workflows.iter().find(|run| run.is_running()))
+    {
+        let name = truncate_label(run.workflow_name.as_deref().unwrap_or("workflow"), 16);
+        let progress = format!("{}/{}", run.agents_done(), run.agents_total());
+        segments.push(adaptive_segment(
+            vec![
+                format!(
+                    "{}{} {} {}",
+                    muted_label("wf:", tc),
+                    tokens::ACCENT.paint(&name, tc),
+                    tokens::PRIMARY_DIM.paint(&progress, tc),
+                    tokens::SUCCESS.paint(SYM_RUNNING, tc),
+                ),
+                format!(
+                    "{}{} {}",
+                    muted_label("wf:", tc),
+                    tokens::PRIMARY_DIM.paint(&progress, tc),
+                    tokens::SUCCESS.paint(SYM_RUNNING, tc),
+                ),
+            ],
+            20,
+        ));
+    }
+
+    if !args.no_integrations_remote_tasks
+        && let Some(count) = session_activity
+            .map(|activity| activity.remote_tasks.len())
+            .filter(|count| *count > 0)
+    {
+        segments.push(status_segment(
+            format!(
+                "{}{}",
+                muted_label("rt:", tc),
+                tokens::ACCENT.paint(&count.to_string(), tc),
+            ),
+            15,
         ));
     }
 
@@ -2030,6 +2117,7 @@ pub fn print_text_output(
     context_limit_override: Option<u64>,
     cost_provenance: Option<&CostProvenance>,
     prompt_cache: Option<&PromptCacheInfo>,
+    session_activity: Option<&SessionActivity>,
 ) {
     let profile = render_profile();
     let mut line = if profile.mode == RenderMode::Compact {
@@ -2047,6 +2135,7 @@ pub fn print_text_output(
             lines_delta,
             usage_limits,
             context_limit_override,
+            session_activity,
         )
     } else {
         let _ = lines_delta;
@@ -2111,6 +2200,14 @@ mod tests {
     use crate::models::hook::{
         HookContextWindow, HookCost, HookJson, HookModel, HookThinking, HookWorkspace, OutputStyle,
     };
+    use crate::models::{RemoteTask, WorkflowProgressEntry, WorkflowRun};
+
+    fn agent_progress(state: &str) -> WorkflowProgressEntry {
+        WorkflowProgressEntry {
+            kind: Some("workflow_agent".to_string()),
+            state: Some(state.to_string()),
+        }
+    }
 
     fn test_args() -> Args {
         Args::parse_from(["claude_statusline"])
@@ -2324,6 +2421,7 @@ mod tests {
             Some((8, 3)),
             None,
             Some(200_000),
+            None,
         );
 
         assert!(!line.contains('\n'));
@@ -2375,6 +2473,7 @@ mod tests {
             Some((8, 3)),
             None,
             Some(200_000),
+            None,
         );
         let profile = render_profile();
         let plain = strip_ansi(&line);
@@ -2396,6 +2495,72 @@ mod tests {
         assert!(plain.contains("ctx:") || plain.contains("6%"));
         assert!(!plain.contains("dirs:"));
         assert!(!plain.contains("very-long-worktree"));
+    }
+
+    #[test]
+    #[serial]
+    fn compact_line_shows_running_workflow_and_remote_tasks() {
+        let env = terminal_env_guard();
+        env.force_dimensions("120", "32");
+        env.set("NO_COLOR", "1");
+
+        let hook = test_hook(vec![], None);
+        let mut args = test_args();
+        args.no_workspace_cwd = true;
+        args.no_workspace_model = true;
+        args.no_cost_session = true;
+        args.no_usage_five_hour = true;
+        args.no_context_tokens = true;
+        args.no_context_percent = true;
+        let activity = SessionActivity {
+            workflows: vec![
+                WorkflowRun {
+                    run_id: "completed".to_string(),
+                    workflow_name: Some("finished".to_string()),
+                    status: Some("completed".to_string()),
+                    start_time: Some(2_000),
+                    total_tokens: Some(200),
+                    agent_count: Some(1),
+                    workflow_progress: vec![agent_progress("done")],
+                },
+                WorkflowRun {
+                    run_id: "active".to_string(),
+                    workflow_name: Some("active".to_string()),
+                    status: Some("running".to_string()),
+                    start_time: Some(1_000),
+                    total_tokens: Some(100),
+                    agent_count: Some(2),
+                    workflow_progress: vec![agent_progress("done"), agent_progress("running")],
+                },
+            ],
+            remote_tasks: vec![RemoteTask {
+                task_id: "task-1".to_string(),
+                remote_task_type: Some("cloud".to_string()),
+                title: Some("build".to_string()),
+            }],
+        };
+
+        let line = render_compact_text_output(
+            &hook,
+            None,
+            &args,
+            false,
+            0.0,
+            None,
+            0.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&activity),
+        );
+        let plain = strip_ansi(&line);
+
+        assert!(plain.contains("wf:active 1/2"), "line: {plain}");
+        assert!(plain.contains("rt:1"), "line: {plain}");
+        assert!(!plain.contains("finished"), "line: {plain}");
     }
 
     #[test]
@@ -2548,6 +2713,7 @@ mod tests {
             None,
             None,
             Some(200_000),
+            None,
         );
         let profile = render_profile();
         let plain = strip_ansi(&line);
@@ -2597,6 +2763,7 @@ mod tests {
             None,
             None,
             Some(200_000),
+            None,
         );
         let plain = strip_ansi(&line);
 
@@ -2636,6 +2803,7 @@ mod tests {
             None,
             Some(200_000),
             false,
+            None,
         )
         .unwrap_or_default();
 
@@ -2677,12 +2845,100 @@ mod tests {
             None,
             Some(200_000),
             false,
+            None,
         )
         .unwrap_or_default();
 
         assert!(line.contains(".claude/worktrees"));
         assert!(!line.contains("wt:"));
         assert!(!line.contains("dirs:"));
+    }
+
+    #[test]
+    #[serial]
+    fn rich_header_shows_running_workflow_and_remote_task_tokens() {
+        let env = terminal_env_guard();
+        env.force_dimensions("320", "32");
+
+        let hook = test_hook(vec![], None);
+        let activity = SessionActivity {
+            workflows: vec![WorkflowRun {
+                run_id: "run1".to_string(),
+                workflow_name: Some("review".to_string()),
+                status: Some("running".to_string()),
+                start_time: Some(1000),
+                total_tokens: Some(500),
+                agent_count: Some(6),
+                workflow_progress: vec![
+                    agent_progress("done"),
+                    agent_progress("done"),
+                    agent_progress("done"),
+                    agent_progress("running"),
+                ],
+            }],
+            remote_tasks: vec![RemoteTask {
+                task_id: "t1".to_string(),
+                remote_task_type: Some("cloud".to_string()),
+                title: Some("build".to_string()),
+            }],
+        };
+
+        let line = render_header_line(
+            &hook,
+            None,
+            &test_args(),
+            None,
+            None,
+            None,
+            None,
+            Some(200_000),
+            false,
+            Some(&activity),
+        )
+        .unwrap_or_default();
+        let plain = strip_ansi(&line);
+
+        assert!(plain.contains("wf:review"), "line: {plain}");
+        assert!(plain.contains("3/6"), "line: {plain}");
+        assert!(plain.contains("rt:1"), "line: {plain}");
+    }
+
+    #[test]
+    #[serial]
+    fn rich_header_hides_completed_workflow() {
+        let env = terminal_env_guard();
+        env.force_dimensions("320", "32");
+
+        let hook = test_hook(vec![], None);
+        let activity = SessionActivity {
+            workflows: vec![WorkflowRun {
+                run_id: "run1".to_string(),
+                workflow_name: Some("review".to_string()),
+                status: Some("completed".to_string()),
+                start_time: Some(1000),
+                total_tokens: Some(500),
+                agent_count: Some(6),
+                workflow_progress: vec![],
+            }],
+            remote_tasks: vec![],
+        };
+
+        let line = render_header_line(
+            &hook,
+            None,
+            &test_args(),
+            None,
+            None,
+            None,
+            None,
+            Some(200_000),
+            false,
+            Some(&activity),
+        )
+        .unwrap_or_default();
+        let plain = strip_ansi(&line);
+
+        assert!(!plain.contains("wf:"), "line: {plain}");
     }
 
     #[test]
@@ -2989,6 +3245,7 @@ pub fn build_json_output(
     subagent_breakdown: Option<serde_json::Value>,
     cost_provenance: Option<&CostProvenance>,
     prompt_cache: Option<&PromptCacheInfo>,
+    session_activity: Option<&SessionActivity>,
 ) -> serde_json::Value {
     // Provider from env or deduced from model id
     let provider_env = env::var("CLAUDE_PROVIDER").ok().map(|s| {
@@ -3320,7 +3577,26 @@ pub fn build_json_output(
                 "current": q.current.clone(),
                 "pending": q.pending
             }))
-        }))
+        })),
+        "workflows": session_activity
+            .map(|a| a.workflows.as_slice())
+            .filter(|workflows| !workflows.is_empty())
+            .map(|workflows| workflows.iter().map(|run| serde_json::json!({
+                "run_id": run.run_id.clone(),
+                "name": run.workflow_name.clone(),
+                "status": run.status.clone(),
+                "agents_done": run.agents_done(),
+                "agents_total": run.agents_total(),
+                "total_tokens": run.total_tokens
+            })).collect::<Vec<_>>()),
+        "remote_tasks": session_activity
+            .map(|a| a.remote_tasks.as_slice())
+            .filter(|tasks| !tasks.is_empty())
+            .map(|tasks| tasks.iter().map(|task| serde_json::json!({
+                "task_id": task.task_id.clone(),
+                "task_type": task.remote_task_type.clone(),
+                "title": task.title.clone()
+            })).collect::<Vec<_>>())
     });
 
     // Inject subagent cost breakdown into the session object if available
@@ -3417,6 +3693,7 @@ pub fn print_json_output(
     subagent_breakdown: Option<serde_json::Value>,
     cost_provenance: Option<&CostProvenance>,
     prompt_cache: Option<&PromptCacheInfo>,
+    session_activity: Option<&SessionActivity>,
 ) -> anyhow::Result<()> {
     let mut json = build_json_output(
         hook,
@@ -3461,6 +3738,7 @@ pub fn print_json_output(
         subagent_breakdown,
         cost_provenance,
         prompt_cache,
+        session_activity,
     );
     apply_json_toggles(&mut json, args);
     println!("{}", serde_json::to_string(&json)?);

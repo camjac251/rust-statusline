@@ -28,6 +28,9 @@ pub mod beads;
 /// Gas Town multi-agent orchestration integration
 pub mod gastown;
 
+/// Workflow-progress and remote-agent task discovery for the current session
+pub mod workflow;
+
 /// SQLite-based persistent caching for global usage tracking
 pub mod db;
 
@@ -64,6 +67,9 @@ pub mod usage_api;
 
 /// Utility functions for paths, formatting, and time
 pub mod utils;
+
+/// Agent-panel task payload parsing and per-task JSONL row rendering
+pub mod subagent_statusline;
 
 /// Centralized color token system
 pub mod tokens;

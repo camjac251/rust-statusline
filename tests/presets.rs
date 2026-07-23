@@ -63,6 +63,8 @@ fn preset_minimal_hides_secondary_tokens_and_skips_expensive_subsystems() {
     assert!(args.no_integrations_beads_alerts);
     assert!(args.no_integrations_gastown);
     assert!(args.no_integrations_prompt_cache);
+    assert!(args.no_integrations_workflows);
+    assert!(args.no_integrations_remote_tasks);
 
     // Subsystems: skip expensive ones
     assert!(args.no_subsystem_beads);
