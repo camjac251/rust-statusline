@@ -11,6 +11,9 @@ use claude_statusline::display::{print_header, print_json_output, print_text_out
 use claude_statusline::gastown::get_gastown_info;
 use claude_statusline::models::{Entry, HookJson, RateLimitInfo};
 use claude_statusline::provenance::{CostProvenance, SessionCostSource, TodayCostSource};
+use claude_statusline::subagent_statusline::{
+    SubagentStatusInput, render_subagent_statusline, subagent_status_json,
+};
 use claude_statusline::usage::{
     DEFAULT_SCAN_LOOKBACK_HOURS, calc_context_from_entries, parse_active_transcript_state,
     scan_usage,
@@ -18,6 +21,7 @@ use claude_statusline::usage::{
 use claude_statusline::usage_api::{UsageSummary, get_usage_summary, resolve_usage_egress};
 use claude_statusline::utils::{claude_paths, friendly_model_name, read_stdin};
 use claude_statusline::window::{BurnScope, WindowScope, calculate_window_metrics};
+use claude_statusline::workflow::get_session_activity;
 
 const DB_SCAN_REFRESH_KEY: &str = "usage_scan:last_full_scan_at";
 const DB_SCAN_LOCK_KEY: &str = "usage_scan:full_scan_lock";
@@ -90,7 +94,33 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut hook: HookJson = serde_json::from_slice(&stdin).context("parse hook json")?;
+    let hook_value: serde_json::Value =
+        serde_json::from_slice(&stdin).context("parse hook json")?;
+    if hook_value
+        .get("tasks")
+        .is_some_and(serde_json::Value::is_array)
+    {
+        let subagent_status: SubagentStatusInput =
+            serde_json::from_value(hook_value).context("parse subagent statusline json")?;
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string(&subagent_status_json(&subagent_status))
+                    .context("serialize subagent tasks json")?
+            );
+            return Ok(());
+        }
+        let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+        for row in render_subagent_statusline(&subagent_status, now_ms, args.truecolor) {
+            println!(
+                "{}",
+                serde_json::to_string(&row).context("serialize subagent statusline row")?
+            );
+        }
+        return Ok(());
+    }
+
+    let mut hook: HookJson = serde_json::from_value(hook_value).context("parse hook json")?;
 
     // Normalize display_name: when Claude Code sends the raw model ID as the
     // display name (e.g. "claude-opus-4-6"), convert it to a friendly form
@@ -369,6 +399,10 @@ fn main() -> Result<()> {
         get_gastown_info(Path::new(gt_dir))
     };
 
+    // Workflow-progress and remote-agent tasks for this hook session, discovered
+    // from the session dir beside the transcript.
+    let session_activity = get_session_activity(transcript_path);
+
     // The modern hook schema ships context_window_size and lines added/removed.
     let context_limit_override =
         Some(hook.context_window.context_window_size).filter(|&size| size > 0);
@@ -392,6 +426,7 @@ fn main() -> Result<()> {
             gastown_info.as_ref(),
             context_limit_override,
             is_fast_mode,
+            session_activity.as_ref(),
         );
     }
 
@@ -577,38 +612,14 @@ fn main() -> Result<()> {
         }
     }
     if args.json {
-        // Machine-readable output for statusline consumption
-        // Compute per-subagent cost breakdown for this session
-        let subagent_breakdown = {
-            let mut by_agent: std::collections::HashMap<String, (f64, u64, u64)> =
-                std::collections::HashMap::new();
-            for e in &entries {
-                if e.session_id.as_deref() == Some(&hook.session_id) {
-                    if let Some(ref aid) = e.agent_id {
-                        let entry = by_agent.entry(aid.clone()).or_insert((0.0, 0, 0));
-                        entry.0 += e.cost;
-                        entry.1 += e.input + e.cache_create + e.cache_read;
-                        entry.2 += e.output;
-                    }
-                }
-            }
-            if by_agent.is_empty() {
-                None
-            } else {
-                let arr: Vec<serde_json::Value> = by_agent
-                    .into_iter()
-                    .map(|(aid, (cost, input, output))| {
-                        serde_json::json!({
-                            "agent_id": aid,
-                            "cost_usd": (cost * 10000.0).round() / 10000.0,
-                            "input_tokens": input,
-                            "output_tokens": output,
-                        })
-                    })
-                    .collect();
-                Some(serde_json::Value::Array(arr))
-            }
-        };
+        // Machine-readable output for statusline consumption.
+        // Per-subagent cost breakdown for this session, enriched from the
+        // agent-<id>.meta.json sidecars beside each subagent transcript.
+        let subagent_breakdown = claude_statusline::models::build_subagent_breakdown(
+            &entries,
+            &hook.session_id,
+            &hook.transcript_path,
+        );
 
         print_json_output(
             &args,
@@ -654,6 +665,7 @@ fn main() -> Result<()> {
             subagent_breakdown,
             Some(&cost_provenance),
             prompt_cache_info.as_ref(),
+            session_activity.as_ref(),
         )?;
     } else {
         // Compute session-level cost per hour from Claude's provided cost
@@ -704,6 +716,7 @@ fn main() -> Result<()> {
             context_limit_override,
             Some(&cost_provenance),
             prompt_cache_info.as_ref(),
+            session_activity.as_ref(),
         );
 
         // Debug output if requested

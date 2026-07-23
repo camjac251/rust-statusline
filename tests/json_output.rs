@@ -35,6 +35,7 @@ fn default_output_style() -> OutputStyle {
     }
 }
 use claude_statusline::models::{PromptCacheBucketInfo, PromptCacheBucketKind, PromptCacheInfo};
+use claude_statusline::models::{RemoteTask, SessionActivity, WorkflowProgressEntry, WorkflowRun};
 use claude_statusline::provenance::{
     CostProvenance, PricingSource, SessionCostSource, TodayCostSource,
 };
@@ -119,6 +120,7 @@ fn json_output_shape_minimal() {
         None,                    // subagent_breakdown
         None,                    // cost_provenance
         None,                    // prompt_cache
+        None,                    // session_activity
     );
 
     // High-level keys exist
@@ -251,6 +253,7 @@ fn json_output_1m_context_limit_when_display_has_1m_tag() {
         None,  // subagent_breakdown
         None,  // cost_provenance
         None,  // prompt_cache
+        None,  // session_activity
     );
 
     // 1M context (full limit, percentage calculated against this)
@@ -335,6 +338,7 @@ fn json_output_context_limit_override_from_hook() {
         None,  // subagent_breakdown
         None,  // cost_provenance
         None,  // prompt_cache
+        None,  // session_activity
     );
     assert_eq!(json_no_override["context"]["limit"], 200_000);
 
@@ -382,6 +386,7 @@ fn json_output_context_limit_override_from_hook() {
         None,            // subagent_breakdown
         None,            // cost_provenance
         None,            // prompt_cache
+        None,            // session_activity
     );
     assert_eq!(json_with_override["context"]["limit"], 1_048_576);
     assert_eq!(json_with_override["context"]["limit_full"], 1_048_576);
@@ -465,6 +470,7 @@ fn json_output_reports_output_reserve_used_after_usable_limit() {
         None,
         None,
         false,
+        None,
         None,
         None,
         None,
@@ -576,6 +582,7 @@ fn json_output_includes_provenance_and_prompt_cache() {
         None,
         Some(&provenance),
         Some(&prompt_cache),
+        None,
     );
 
     assert_eq!(json["session"]["cost_source"], "transcript_result");
@@ -591,4 +598,295 @@ fn json_output_includes_provenance_and_prompt_cache() {
     assert_eq!(json["prompt_cache"]["cache_read_input_tokens"], 8000);
     assert!(json["context"]["usable_limit"].is_number());
     assert!(json["context"]["usable_percent"].is_number());
+}
+
+#[test]
+fn json_output_injects_enriched_subagent_breakdown() {
+    let hook = HookJson {
+        session_id: "s1".to_string(),
+        transcript_path: "/tmp/transcript.jsonl".to_string(),
+        model: HookModel {
+            id: "claude-sonnet-4-6".to_string(),
+            display_name: "Claude Sonnet 4.6".to_string(),
+        },
+        workspace: HookWorkspace {
+            current_dir: "/tmp/project".to_string(),
+            project_dir: "/tmp/project".to_string(),
+            added_dirs: Vec::new(),
+            git_worktree: None,
+            repo: None,
+        },
+        version: "test".to_string(),
+        output_style: default_output_style(),
+        cost: default_hook_cost(),
+        context_window: default_hook_context_window(),
+        exceeds_200k_tokens: false,
+        fast_mode: false,
+        effort: None,
+        thinking: HookThinking { enabled: false },
+        rate_limits: None,
+        session_name: None,
+        vim: None,
+        agent: None,
+        worktree: None,
+        remote: None,
+        pr: None,
+    };
+
+    let breakdown = serde_json::json!([
+        {
+            "agent_id": "aaa111",
+            "cost_usd": 0.12,
+            "input_tokens": 5000,
+            "output_tokens": 200,
+            "agent_type": "code-reviewer",
+            "name": "reviewer",
+            "model": "claude-opus-4-6",
+            "spawn_depth": 1,
+            "parent_agent_id": "root-agent"
+        },
+        {
+            "agent_id": "bbb222",
+            "cost_usd": 0.03,
+            "input_tokens": 1000,
+            "output_tokens": 50,
+            "agent_type": "workflow-subagent",
+            "spawn_depth": 2,
+            "workflow_run_id": "wf_run42"
+        }
+    ]);
+
+    let json: Value = build_json_output(
+        &hook,
+        0.42,
+        3.13,
+        1,
+        1.23,
+        123456.0,
+        100000.0,
+        90000,
+        10000,
+        20000,
+        13456,
+        0,
+        0,
+        0,
+        0,
+        0,
+        None,
+        None,
+        None,
+        0.0,
+        None,
+        None,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        Some((12345, 6)),
+        Some("transcript"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        Some(breakdown), // subagent_breakdown
+        None,
+        None,
+        None,
+    );
+
+    let subagents = json["session"]["subagents"]
+        .as_array()
+        .expect("session.subagents should be a non-empty array");
+    assert_eq!(subagents.len(), 2);
+
+    assert_eq!(subagents[0]["agent_id"], "aaa111");
+    assert_eq!(subagents[0]["cost_usd"], 0.12);
+    assert_eq!(subagents[0]["input_tokens"], 5000);
+    assert_eq!(subagents[0]["agent_type"], "code-reviewer");
+    assert_eq!(subagents[0]["name"], "reviewer");
+    assert_eq!(subagents[0]["spawn_depth"], 1);
+    assert_eq!(subagents[0]["parent_agent_id"], "root-agent");
+    assert!(subagents[0].get("workflow_run_id").is_none());
+
+    assert_eq!(subagents[1]["agent_id"], "bbb222");
+    assert_eq!(subagents[1]["agent_type"], "workflow-subagent");
+    assert_eq!(subagents[1]["workflow_run_id"], "wf_run42");
+}
+
+#[test]
+fn json_output_includes_workflows_and_remote_tasks() {
+    let hook = HookJson {
+        session_id: "s1".to_string(),
+        transcript_path: "/tmp/transcript.jsonl".to_string(),
+        model: HookModel {
+            id: "claude-sonnet-4-6".to_string(),
+            display_name: "Claude Sonnet 4.6".to_string(),
+        },
+        workspace: HookWorkspace {
+            current_dir: "/tmp/project".to_string(),
+            project_dir: "/tmp/project".to_string(),
+            added_dirs: Vec::new(),
+            git_worktree: None,
+            repo: None,
+        },
+        version: "test".to_string(),
+        output_style: default_output_style(),
+        cost: default_hook_cost(),
+        context_window: default_hook_context_window(),
+        exceeds_200k_tokens: false,
+        fast_mode: false,
+        effort: None,
+        thinking: HookThinking { enabled: false },
+        rate_limits: None,
+        session_name: None,
+        vim: None,
+        agent: None,
+        worktree: None,
+        remote: None,
+        pr: None,
+    };
+
+    let activity = SessionActivity {
+        workflows: vec![WorkflowRun {
+            run_id: "run1".to_string(),
+            workflow_name: Some("review".to_string()),
+            status: Some("running".to_string()),
+            start_time: Some(1000),
+            total_tokens: Some(1234),
+            agent_count: Some(6),
+            workflow_progress: vec![
+                WorkflowProgressEntry {
+                    kind: Some("workflow_agent".to_string()),
+                    state: Some("done".to_string()),
+                },
+                WorkflowProgressEntry {
+                    kind: Some("workflow_agent".to_string()),
+                    state: Some("done".to_string()),
+                },
+                WorkflowProgressEntry {
+                    kind: Some("workflow_agent".to_string()),
+                    state: Some("running".to_string()),
+                },
+            ],
+        }],
+        remote_tasks: vec![RemoteTask {
+            task_id: "t1".to_string(),
+            remote_task_type: Some("cloud".to_string()),
+            title: Some("build".to_string()),
+        }],
+    };
+
+    let json: Value = build_json_output(
+        &hook,
+        0.0,
+        0.0,
+        1,
+        0.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        None,
+        None,
+        None,
+        0.0,
+        None,
+        None,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        Some((100_000, 50)),
+        Some("hook"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+        Some(&activity),
+    );
+
+    assert_eq!(json["workflows"][0]["run_id"], "run1");
+    assert_eq!(json["workflows"][0]["name"], "review");
+    assert_eq!(json["workflows"][0]["status"], "running");
+    assert_eq!(json["workflows"][0]["agents_done"], 2);
+    assert_eq!(json["workflows"][0]["agents_total"], 6);
+    assert_eq!(json["workflows"][0]["total_tokens"], 1234);
+
+    assert_eq!(json["remote_tasks"][0]["task_id"], "t1");
+    assert_eq!(json["remote_tasks"][0]["task_type"], "cloud");
+    assert_eq!(json["remote_tasks"][0]["title"], "build");
+
+    // Absent activity leaves both fields null.
+    let json_absent: Value = build_json_output(
+        &hook,
+        0.0,
+        0.0,
+        1,
+        0.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        None,
+        None,
+        None,
+        0.0,
+        None,
+        None,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        Some((100_000, 50)),
+        Some("hook"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(json_absent["workflows"].is_null());
+    assert!(json_absent["remote_tasks"].is_null());
 }

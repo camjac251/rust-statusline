@@ -7,6 +7,8 @@ pub mod hook;
 pub mod message;
 pub mod prompt_cache;
 pub mod ratelimit;
+pub mod subagent;
+pub mod workflow;
 
 pub use beads::{Bead, BeadStatus, BeadsCounts, BeadsInfo, PriorityCounts, TypeCounts};
 pub use block::{Block, TokenCounts};
@@ -19,3 +21,5 @@ pub use hook::HookJson;
 pub use message::{MessageUsage, TranscriptLine};
 pub use prompt_cache::{PromptCacheBucketInfo, PromptCacheBucketKind, PromptCacheInfo};
 pub use ratelimit::RateLimitInfo;
+pub use subagent::{SubagentMeta, build_subagent_breakdown};
+pub use workflow::{RemoteTask, SessionActivity, WorkflowProgressEntry, WorkflowRun};
