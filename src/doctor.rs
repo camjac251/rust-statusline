@@ -21,6 +21,8 @@ struct SettingsHealth {
     status_line_present: bool,
     command: Option<String>,
     refresh_interval: Option<u64>,
+    subagent_status_line_present: bool,
+    subagent_command: Option<String>,
     ok: bool,
 }
 
@@ -223,7 +225,7 @@ fn print_report(report: &DoctorReport) {
         );
     }
     println!(
-        "settings: {} statusLine={} command={} refreshInterval={}",
+        "settings: {} statusLine={} command={} refreshInterval={} subagentStatusLine={} subagentCommand={}",
         report.settings.path,
         report.settings.status_line_present,
         report.settings.command.as_deref().unwrap_or("n/a"),
@@ -231,7 +233,9 @@ fn print_report(report: &DoctorReport) {
             .settings
             .refresh_interval
             .map(|v| v.to_string())
-            .unwrap_or_else(|| "n/a".to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+        report.settings.subagent_status_line_present,
+        report.settings.subagent_command.as_deref().unwrap_or("n/a")
     );
     println!(
         "db: {} ok={} wal={} schema={} user_version={} cache_version={}",
@@ -315,6 +319,7 @@ fn run_init(args: &Args, init: &InitArgs) -> Result<()> {
                 "settings_path": settings_path,
                 "dry_run": init.dry_run,
                 "statusLine": updated.get("statusLine"),
+                "subagentStatusLine": updated.get("subagentStatusLine"),
             }))?
         );
     } else if init.dry_run {
@@ -336,6 +341,7 @@ fn run_init(args: &Args, init: &InitArgs) -> Result<()> {
             println!("updated {}", settings_path.display());
             println!("statusLine.command = {}", command);
             println!("statusLine.refreshInterval = {}", init.refresh_interval);
+            println!("subagentStatusLine.command = {}", command);
         }
     }
 
@@ -371,6 +377,16 @@ fn build_updated_settings(
         ));
     }
 
+    if obj
+        .get("subagentStatusLine")
+        .is_some_and(|value| !value.is_object())
+        && !force
+    {
+        return Err(anyhow!(
+            "settings.subagentStatusLine exists but is not an object; rerun init with --force to replace it"
+        ));
+    }
+
     let mut status_line = obj
         .get("statusLine")
         .and_then(|value| value.as_object())
@@ -384,6 +400,20 @@ fn build_updated_settings(
         Value::Number(refresh_interval.into()),
     );
     obj.insert("statusLine".to_string(), Value::Object(status_line));
+
+    // Claude Code's subagentStatusLine schema admits only type and command
+    // (no padding or refreshInterval keys).
+    let mut subagent_status_line = obj
+        .get("subagentStatusLine")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+    subagent_status_line.insert("type".to_string(), Value::String("command".to_string()));
+    subagent_status_line.insert("command".to_string(), Value::String(command.to_string()));
+    obj.insert(
+        "subagentStatusLine".to_string(),
+        Value::Object(subagent_status_line),
+    );
 
     Ok(root)
 }
@@ -409,13 +439,24 @@ fn inspect_settings(args: &Args) -> Result<SettingsHealth> {
     let refresh_interval = status
         .and_then(|status| status.get("refreshInterval"))
         .and_then(|value| value.as_u64());
+    let subagent = value
+        .as_ref()
+        .and_then(|root| root.get("subagentStatusLine"))
+        .and_then(|status| status.as_object());
+    let subagent_command = subagent
+        .and_then(|status| status.get("command"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
 
+    // subagentStatusLine is optional, so its absence never degrades ok.
     Ok(SettingsHealth {
         path: path.display().to_string(),
         exists,
         status_line_present: status.is_some(),
         command,
         refresh_interval,
+        subagent_status_line_present: subagent.is_some(),
+        subagent_command,
         ok: status.is_some(),
     })
 }
@@ -473,5 +514,110 @@ mod tests {
         assert_eq!(updated["statusLine"]["command"], "claude_statusline --json");
         assert_eq!(updated["statusLine"]["padding"], 0);
         assert_eq!(updated["statusLine"]["refreshInterval"], 7);
+    }
+
+    #[test]
+    fn init_installs_subagent_status_line_with_only_type_and_command() {
+        let dir = tempdir().expect("tempdir");
+        let settings_path = dir.path().join("settings.json");
+
+        let updated = build_updated_settings(&settings_path, "claude_statusline", 5, false)
+            .expect("settings update");
+
+        let subagent = updated["subagentStatusLine"]
+            .as_object()
+            .expect("subagentStatusLine object");
+        assert_eq!(subagent["type"], "command");
+        assert_eq!(subagent["command"], "claude_statusline");
+        assert_eq!(subagent.len(), 2, "only type and command are written");
+    }
+
+    #[test]
+    fn init_preserves_extra_keys_on_existing_subagent_status_line() {
+        let dir = tempdir().expect("tempdir");
+        let settings_path = dir.path().join("settings.json");
+        fs::write(
+            &settings_path,
+            r#"{"subagentStatusLine":{"command":"old-command","env":{"FOO":"1"}}}"#,
+        )
+        .expect("write settings");
+
+        let updated = build_updated_settings(&settings_path, "claude_statusline", 5, false)
+            .expect("settings update");
+
+        assert_eq!(updated["subagentStatusLine"]["type"], "command");
+        assert_eq!(
+            updated["subagentStatusLine"]["command"],
+            "claude_statusline"
+        );
+        assert_eq!(updated["subagentStatusLine"]["env"]["FOO"], "1");
+    }
+
+    #[test]
+    fn inspect_settings_reads_subagent_status_line_command() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("settings.json"),
+            r#"{
+                "statusLine": {"type": "command", "command": "claude_statusline", "refreshInterval": 5},
+                "subagentStatusLine": {"type": "command", "command": "claude_statusline --truecolor"}
+            }"#,
+        )
+        .expect("write settings");
+        let args = Args::parse_effective_from([
+            "claude_statusline",
+            "--no-config",
+            "--claude-config-dir",
+            dir.path().to_str().expect("utf8 path"),
+        ]);
+
+        let health = inspect_settings(&args).expect("inspect settings");
+        assert!(health.status_line_present);
+        assert!(health.subagent_status_line_present);
+        assert_eq!(
+            health.subagent_command.as_deref(),
+            Some("claude_statusline --truecolor")
+        );
+        assert!(health.ok);
+    }
+
+    #[test]
+    fn inspect_settings_stays_ok_without_subagent_status_line() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("settings.json"),
+            r#"{"statusLine": {"type": "command", "command": "claude_statusline"}}"#,
+        )
+        .expect("write settings");
+        let args = Args::parse_effective_from([
+            "claude_statusline",
+            "--no-config",
+            "--claude-config-dir",
+            dir.path().to_str().expect("utf8 path"),
+        ]);
+
+        let health = inspect_settings(&args).expect("inspect settings");
+        assert!(!health.subagent_status_line_present);
+        assert!(health.subagent_command.is_none());
+        assert!(health.ok);
+    }
+
+    #[test]
+    fn init_refuses_non_object_subagent_status_line_without_force() {
+        let dir = tempdir().expect("tempdir");
+        let settings_path = dir.path().join("settings.json");
+        fs::write(&settings_path, r#"{"subagentStatusLine":"legacy"}"#).expect("write settings");
+
+        let err = build_updated_settings(&settings_path, "claude_statusline", 5, false)
+            .expect_err("non-object subagentStatusLine must be rejected");
+        assert!(err.to_string().contains("subagentStatusLine"));
+
+        let updated = build_updated_settings(&settings_path, "claude_statusline", 5, true)
+            .expect("force replaces non-object value");
+        assert_eq!(updated["subagentStatusLine"]["type"], "command");
+        assert_eq!(
+            updated["subagentStatusLine"]["command"],
+            "claude_statusline"
+        );
     }
 }

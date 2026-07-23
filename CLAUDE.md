@@ -55,6 +55,8 @@ Pipeline: stdin JSON hook -> transcript parsing -> pricing -> display (text or J
 | `models/ratelimit.rs` | Rate limit info |
 | `models/beads.rs` | Beads models |
 | `models/gastown.rs` | Gas Town models |
+| `models/subagent.rs` | Subagent sidecar metadata and enriched per-agent usage rows |
+| `models/workflow.rs` | Workflow run-state and remote-agent task models |
 | `usage.rs` | Transcript analysis, session/window/daily metrics, burn rates |
 | `usage_api.rs` | OAuth usage API client with SQLite-cached responses; honors proxy env and `NODE_EXTRA_CA_CERTS`, reports egress route |
 | `pricing.rs` | Model pricing tables (compile-time from `pricing.json`) |
@@ -66,6 +68,8 @@ Pipeline: stdin JSON hook -> transcript parsing -> pricing -> display (text or J
 | `utils.rs` | Time formatting, path resolution, helpers |
 | `beads.rs` | Beads issue tracker integration |
 | `gastown.rs` | Gas Town multi-agent orchestration support |
+| `workflow.rs` | Workflow-progress and remote-agent task discovery (session-scoped) |
+| `subagent_statusline.rs` | Live agent-panel task payload parsing and JSONL row rendering |
 
 ### Feature flags
 
@@ -75,13 +79,13 @@ Pipeline: stdin JSON hook -> transcript parsing -> pricing -> display (text or J
 
 ### Key integration points
 
-- Single-line JSON on stdin matching `HookMessage` (see `models/hook.rs`)
+- Single-line JSON on stdin matching `HookMessage` (see `models/hook.rs`), or a `subagentStatusLine` task payload auto-detected by its `tasks` array; agent-panel mode answers with per-task `{id, content}` JSONL (or a structured `{tasks: [...]}` object with `--json`); rows derive a tokens-per-minute burn chip from `tokenSamples` (one sample per five-second tick) on the richest width variant, and `--json` rows carry `tokens_per_minute` when derivable
 - Transcript files in `~/.config/claude` and `~/.claude`
 - Pricing embedded from `pricing.json`, overridable via `CLAUDE_PRICE_*` env vars
 - Config files are optional: explicit `--config`, project `.claude-statusline.toml`, then `~/.config/claude-statusline/config.toml`; precedence is defaults < config < env < CLI
-- `doctor` reports Claude paths, `settings.json`, DB/WAL health, OAuth cache/token availability, the usage API egress route (direct or proxy, from `HTTPS_PROXY`/`NO_PROXY`, plus `NODE_EXTRA_CA_CERTS` trust), config load status, and pricing source without reading hook stdin
+- `doctor` reports Claude paths, `settings.json` (`statusLine` plus the optional `subagentStatusLine`, whose absence never degrades `ok`), DB/WAL health, OAuth cache/token availability, the usage API egress route (direct or proxy, from `HTTPS_PROXY`/`NO_PROXY`, plus `NODE_EXTRA_CA_CERTS` trust), config load status, and pricing source without reading hook stdin
 - Usage API HTTP honors `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` (via ureq env defaults, inherited from Claude Code's environment) and `NODE_EXTRA_CA_CERTS` (system roots + extra bundle via `rustls-native-certs`); `resolve_usage_egress` powers the route shown by `doctor`/`--debug`
-- `init` writes/updates the Claude Code `statusLine` command, padding, and `refreshInterval`
+- `init` writes/updates the Claude Code `statusLine` command, padding, and `refreshInterval`, plus the `subagentStatusLine` block (`type` and `command` only), preserving extra keys on existing objects and refusing non-object values without `--force`
 - OAuth usage API for utilization percentages and reset times (fallback; hook data is preferred)
 - Subagent transcripts in `subagents/agent-*.jsonl` are included in cost calculations
 - JSON output includes provenance fields for session cost, today cost, pricing source, context source, and prompt cache countdown state

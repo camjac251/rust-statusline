@@ -77,13 +77,17 @@ Add to `~/.claude/settings.json`:
     "command": "claude_statusline",
     "padding": 0,
     "refreshInterval": 5
+  },
+  "subagentStatusLine": {
+    "type": "command",
+    "command": "claude_statusline"
   }
 }
 ```
 
-`padding` and `refreshInterval` are Claude Code settings. `claude_statusline` just renders the current snapshot when Claude Code invokes it.
+`padding` and `refreshInterval` are Claude Code settings for the footer. `subagentStatusLine` is optional and customizes rows in the agent panel. Claude Code sends all eligible local-agent tasks to the command every five seconds; `claude_statusline` detects that payload automatically and returns the required per-task JSONL decorations.
 
-Claude Code truncates long footer output, so `claude_statusline` prefers a more compact, Claude-safe layout unless there is clear room for the richer two-line view. When Claude Code provides `COLUMNS` and `LINES`, those dimensions drive the layout: important segments reduce through shorter labels first, compact mode can show the project folder when useful, model names collapse to readable family names, and low-priority workspace/detail segments drop when that keeps the line more readable.
+Claude Code truncates long footer output, so `claude_statusline` prefers a more compact, Claude-safe layout unless there is clear room for the richer two-line view. When Claude Code provides `COLUMNS` and `LINES`, those dimensions drive the layout: important segments reduce through shorter labels first, compact mode can show the project folder when useful, model names collapse to readable family names, and low-priority workspace/detail segments drop when that keeps the line more readable. Agent-panel rows use the per-row `columns` budget from Claude Code and reduce through shorter variants before truncating; the tokens-per-minute burn chip rides only the richest variant, so it is the first thing width reduction drops.
 
 Restart Claude Code. Done.
 
@@ -102,6 +106,7 @@ Restart Claude Code. Done.
 | **reset** | Time remaining until usage window reset |
 | **git** | Branch, commit, dirty state, ahead/behind |
 | **workspace** | Added workspace dirs and linked worktree hints from Claude Code |
+| **agents** | Live agent-panel rows with status, model, context usage, burn rate, elapsed time, and current task |
 
 ---
 
@@ -110,6 +115,7 @@ Restart Claude Code. Done.
 ```mermaid
 flowchart LR
     CC[Claude Code] -->|stdin JSON| SL[claude_statusline]
+    SL -->|agent task payload| SA[Agent Row Renderer]
 
     subgraph Pipeline
         direction TB
@@ -128,9 +134,12 @@ flowchart LR
     DB --> OUT[Display]
     OUT -->|colorized text| STDOUT[stdout]
     OUT -->|--json| JSON[structured JSON]
+    SA -->|JSONL decorations| STDOUT
 ```
 
 Pricing is embedded at compile time from `pricing.json`. The OAuth API is optional -- if no credentials are available, the tool falls back to transcript-only metrics.
+
+When stdin contains Claude Code's `subagentStatusLine` task payload, the binary switches to agent-panel mode without a separate flag. It emits one `{id, content}` JSON object per task as JSONL and does not perform transcript, Git, database, or API work. Each row can carry a burn chip (e.g. `12.3K/m`) derived from the payload's token samples, which arrive one per five-second tick; tasks with fewer than two samples or no token growth omit it. With `--json`, this mode emits a single structured `{"tasks": [...]}` object with the parsed task rows (snake_case keys, absent optional fields omitted) instead of the JSONL decorations; rows include a numeric `tokens_per_minute` field when the burn rate is derivable.
 
 Newer OAuth usage responses expose canonical rows through generic `limits[]` and `spend` fields. `claude_statusline` preserves those rows, uses them as fallbacks for session/weekly percentages, renders scoped weekly model rows such as `fable:24%`, and maps `spend` into the extra-usage credit token.
 
@@ -210,6 +219,8 @@ Scoped weekly model rows from the OAuth usage API render from the model metadata
 | integrations | `--no-integrations-beads-alerts` | on | beads P0 + blocked alert segment |
 | integrations | `--no-integrations-gastown` | on | gastown header segment |
 | integrations | `--no-integrations-prompt-cache` | on | prompt-cache countdown token |
+| integrations | `--no-integrations-workflows` | on | running-workflow `wf:name done/total` segment |
+| integrations | `--no-integrations-remote-tasks` | on | remote-agent task-count `rt:N` segment |
 | provider | `--provider-key-source` | off | `key:X` hint |
 | provider | `--provider-name` | off | `prov:Y` hint |
 
@@ -253,7 +264,7 @@ claude_statusline init --dry-run
 claude_statusline init --refresh-interval 5
 ```
 
-`doctor` checks Claude config paths, `settings.json`, SQLite cache health, OAuth cache/token availability, the usage API egress route (direct, or through a proxy resolved from `HTTPS_PROXY`/`NO_PROXY`, plus any `NODE_EXTRA_CA_CERTS` trust), config loading, and pricing lookup provenance without reading statusline stdin.
+`doctor` checks Claude config paths, `settings.json` (both the `statusLine` and optional `subagentStatusLine` entries), SQLite cache health, OAuth cache/token availability, the usage API egress route (direct, or through a proxy resolved from `HTTPS_PROXY`/`NO_PROXY`, plus any `NODE_EXTRA_CA_CERTS` trust), config loading, and pricing lookup provenance without reading statusline stdin. A missing `subagentStatusLine` is reported on the settings line but never counts against `ok`.
 
 The `usage_api` lines show where the OAuth usage call goes (an excerpt):
 
@@ -266,7 +277,7 @@ The route reads `direct` when no proxy applies. Credentials embedded in the prox
 
 **Proxy and TLS.** The usage API call follows the same proxy as Claude Code. It reads `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` (upper or lower case) from the inherited environment, so whatever you set in your shell or in `settings.json` `env` applies with no extra configuration. For a TLS-intercepting proxy, point `NODE_EXTRA_CA_CERTS` at the proxy's CA bundle (PEM); it is trusted in addition to the system roots. Run `doctor` to confirm the resolved route.
 
-`init` writes the Claude Code `statusLine` block to `settings.json`:
+`init` writes the Claude Code `statusLine` and `subagentStatusLine` blocks to `settings.json` (the `subagentStatusLine` schema takes only `type` and `command`; extra keys on existing objects are preserved either way):
 
 ```json
 {
@@ -275,6 +286,10 @@ The route reads `direct` when no proxy applies. Credentials embedded in the prox
     "command": "claude_statusline",
     "padding": 0,
     "refreshInterval": 5
+  },
+  "subagentStatusLine": {
+    "type": "command",
+    "command": "claude_statusline"
   }
 }
 ```
@@ -357,6 +372,8 @@ beads = true
 beads_alerts = true
 gastown = true
 prompt_cache = true
+workflows = true
+remote_tasks = true
 
 [display.provider]
 key_source = false
@@ -412,7 +429,27 @@ Pass `--json` for machine-readable output. Key fields:
     "cost_usd": 0.42,
     "cost_source": "transcript_result",
     "subagents": [
-      { "agent_id": "a1234567890abcdef", "cost_usd": 0.15, "input_tokens": 50000, "output_tokens": 2000 }
+      {
+        "agent_id": "a1234567890abcdef",
+        "cost_usd": 0.15,
+        "input_tokens": 50000,
+        "output_tokens": 2000,
+        "agent_type": "code-reviewer",
+        "name": "reviewer",
+        "model": "claude-opus-4-6",
+        "description": "review the diff",
+        "spawn_depth": 1,
+        "parent_agent_id": "root-agent"
+      },
+      {
+        "agent_id": "b0987654321fedcba",
+        "cost_usd": 0.03,
+        "input_tokens": 1000,
+        "output_tokens": 50,
+        "agent_type": "workflow-subagent",
+        "spawn_depth": 2,
+        "workflow_run_id": "wf_run42"
+      }
     ]
   },
   "today": { "cost_usd": 3.14, "cost_source": "db_global_usage" },
@@ -472,13 +509,21 @@ Pass `--json` for machine-readable output. Key fields:
     "ahead": 0,
     "behind": 0
   },
+  "workflows": [
+    { "run_id": "wf_run42", "name": "review", "status": "running", "agents_done": 3, "agents_total": 6, "total_tokens": 128000 }
+  ],
+  "remote_tasks": [
+    { "task_id": "task-1", "task_type": "cloud", "title": "build the thing" }
+  ],
   "remote": {
     "session_id": "remote-abc"
   }
 }
 ```
 
-Full schema includes `provider`, `plan`, `reset_at`, `session.subagents`, `prompt_cache`, `usage_limits.limits`, `usage_limits.spend`, `provenance`, `git.remote_url`, `git.worktree_count`, `git.is_linked_worktree`, nested `workspace.*`, `model.fast_mode`, optional `remote.session_id`, and token breakdowns per window. Fields are added over time; consumers should tolerate unknown keys.
+Both `workflows` and `remote_tasks` are discovered from the current hook session's directory (beside the transcript) and are `null` when the session has none.
+
+Full schema includes `provider`, `plan`, `reset_at`, `session.subagents`, `prompt_cache`, `usage_limits.limits`, `usage_limits.spend`, `provenance`, `git.remote_url`, `git.worktree_count`, `git.is_linked_worktree`, `workflows`, `remote_tasks`, nested `workspace.*`, `model.fast_mode`, optional `remote.session_id`, and token breakdowns per window. Fields are added over time; consumers should tolerate unknown keys.
 
 ---
 
@@ -499,7 +544,11 @@ src/
 │   ├── git.rs       # Git status
 │   ├── ratelimit.rs # Rate limit info
 │   ├── beads.rs     # Beads models
-│   └── gastown.rs   # Gas Town models
+│   ├── gastown.rs   # Gas Town models
+│   ├── subagent.rs  # Enriched per-agent usage rows
+│   └── workflow.rs  # Workflow and remote-task models
+├── subagent_statusline.rs # Live agent-panel row rendering
+├── workflow.rs      # Session workflow and remote-task discovery
 ├── usage.rs         # Transcript analysis, session/window/daily metrics, burn rates
 ├── usage_api.rs     # OAuth usage API client, scoped limits, spend, cached responses
 ├── pricing.rs       # Model pricing tables (compile-time from pricing.json)
