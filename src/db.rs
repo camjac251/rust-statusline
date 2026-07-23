@@ -64,6 +64,7 @@ mod sql {
             ts INTEGER NOT NULL,
             today_date TEXT NOT NULL CHECK (length(today_date) = 10),
             model TEXT,
+            agent_id TEXT,
             input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
             output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
             cache_create_tokens INTEGER NOT NULL CHECK (cache_create_tokens >= 0),
@@ -177,6 +178,7 @@ mod sql {
             ts INTEGER NOT NULL,
             today_date TEXT NOT NULL CHECK (length(today_date) = 10),
             model TEXT,
+            agent_id TEXT,
             input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
             output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
             cache_create_tokens INTEGER NOT NULL CHECK (cache_create_tokens >= 0),
@@ -191,6 +193,7 @@ mod sql {
     pub const CREATE_USAGE_EVENTS_SESSION_DATE_INDEX: &str = "CREATE INDEX IF NOT EXISTS idx_usage_events_session_date ON usage_events(session_id, today_date)";
     pub const CREATE_USAGE_EVENTS_TS_INDEX: &str =
         "CREATE INDEX IF NOT EXISTS idx_usage_events_ts ON usage_events(ts)";
+    pub const ADD_USAGE_EVENTS_AGENT_ID: &str = "ALTER TABLE usage_events ADD COLUMN agent_id TEXT";
     pub const BACKFILL_USAGE_EVENTS_FROM_SESSIONS: &str = "INSERT OR IGNORE INTO usage_events (
             event_key,
             session_id,
@@ -258,6 +261,7 @@ mod sql {
             ts,
             today_date,
             model,
+            agent_id,
             input_tokens,
             output_tokens,
             cache_create_tokens,
@@ -268,13 +272,14 @@ mod sql {
             created_at,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(event_key) DO UPDATE SET
             session_id = excluded.session_id,
             transcript_path = excluded.transcript_path,
             ts = excluded.ts,
             today_date = excluded.today_date,
             model = excluded.model,
+            agent_id = excluded.agent_id,
             input_tokens = excluded.input_tokens,
             output_tokens = excluded.output_tokens,
             cache_create_tokens = excluded.cache_create_tokens,
@@ -300,7 +305,8 @@ mod sql {
             cost,
             model,
             session_id,
-            transcript_path
+            transcript_path,
+            agent_id
         FROM usage_events
         WHERE ts >= ?
         ORDER BY ts";
@@ -400,6 +406,7 @@ struct UsageEvent {
     ts: i64,
     today_date: String,
     model: Option<String>,
+    agent_id: Option<String>,
     input_tokens: u64,
     output_tokens: u64,
     cache_create_tokens: u64,
@@ -660,6 +667,9 @@ fn create_session_indexes(conn: &Connection) -> Result<()> {
 
 fn create_usage_events_schema(conn: &Connection) -> Result<()> {
     conn.execute(sql::CREATE_USAGE_EVENTS, [])?;
+    if !table_has_column(conn, "usage_events", "agent_id")? {
+        conn.execute(sql::ADD_USAGE_EVENTS_AGENT_ID, [])?;
+    }
     conn.execute(sql::CREATE_USAGE_EVENTS_TODAY_SESSION_INDEX, [])?;
     conn.execute(sql::CREATE_USAGE_EVENTS_SESSION_DATE_INDEX, [])?;
     conn.execute(sql::CREATE_USAGE_EVENTS_TS_INDEX, [])?;
@@ -848,7 +858,7 @@ fn usage_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
         msg_id: None,
         req_id: None,
         project: project_from_transcript_path(&transcript_path),
-        agent_id: None,
+        agent_id: row.get(10)?,
     })
 }
 
@@ -903,6 +913,7 @@ fn synthetic_usage_event(
         ts: now,
         today_date: today.to_string(),
         model: None,
+        agent_id: None,
         input_tokens: 0,
         output_tokens: 0,
         cache_create_tokens: 0,
@@ -966,6 +977,7 @@ fn usage_event_from_entry(
         ts: entry.ts.timestamp(),
         today_date: today.to_string(),
         model: entry.model.clone(),
+        agent_id: entry.agent_id.clone(),
         input_tokens: entry.input,
         output_tokens: entry.output,
         cache_create_tokens: entry.cache_create,
@@ -1090,6 +1102,7 @@ fn insert_usage_events(conn: &Connection, events: &[UsageEvent]) -> Result<()> {
             event.ts,
             &event.today_date,
             event.model.as_deref(),
+            event.agent_id.as_deref(),
             i64_from_u64(event.input_tokens),
             i64_from_u64(event.output_tokens),
             i64_from_u64(event.cache_create_tokens),
@@ -1182,6 +1195,7 @@ fn transcript_cost_event(
     agg_key: &str,
     ts: i64,
     cost: f64,
+    agent_id: Option<&str>,
 ) -> UsageEvent {
     UsageEvent {
         event_key: event_key("transcript_cost", session_id, today, agg_key, "cost_usd"),
@@ -1190,6 +1204,7 @@ fn transcript_cost_event(
         ts,
         today_date: today.to_string(),
         model: None,
+        agent_id: agent_id.map(str::to_string),
         input_tokens: 0,
         output_tokens: 0,
         cache_create_tokens: 0,
@@ -1208,6 +1223,7 @@ struct TranscriptUsageEventInput<'a> {
     fingerprint: &'a str,
     ts: i64,
     model_id: &'a str,
+    agent_id: Option<&'a str>,
     input: u64,
     output: u64,
     cache_create: u64,
@@ -1230,6 +1246,7 @@ fn transcript_usage_event(input: TranscriptUsageEventInput<'_>) -> UsageEvent {
         ts: input.ts,
         today_date: input.today.to_string(),
         model: Some(input.model_id.to_string()),
+        agent_id: input.agent_id.map(str::to_string),
         input_tokens: input.input,
         output_tokens: input.output,
         cache_create_tokens: input.cache_create,
@@ -1240,25 +1257,29 @@ fn transcript_usage_event(input: TranscriptUsageEventInput<'_>) -> UsageEvent {
     }
 }
 
-/// Parse transcript file into normalized cost events for today's usage.
-fn parse_transcript_today_events(
+#[derive(Default)]
+struct TranscriptEventAccumulator {
+    events: HashMap<String, UsageEvent>,
+    last_seen_raw: HashMap<String, (u64, u64, u64, u64)>,
+    force_delta_mode: HashMap<String, bool>,
+}
+
+/// Fold a single transcript file's lines into today's normalized cost events.
+///
+/// Accumulating into `acc` lets a session's main transcript and its subagent
+/// transcripts aggregate together while dedup keys stay per request/message.
+fn accumulate_transcript_today_events(
+    reader: impl std::io::BufRead,
     session_id: &str,
-    transcript_path: &Path,
+    transcript_str: &str,
     today: &str,
-) -> Result<Vec<UsageEvent>> {
+    acc: &mut TranscriptEventAccumulator,
+) -> Result<()> {
     use serde_json::Value;
-    use std::fs::File;
-    use std::io::{BufRead, BufReader};
 
-    let file = File::open(transcript_path)?;
-    let reader = BufReader::new(file);
-    let transcript_str = transcript_path
-        .to_str()
-        .context("Invalid transcript path")?;
-
-    let mut aggregated_events: HashMap<String, UsageEvent> = HashMap::new();
-    let mut last_seen_raw: HashMap<String, (u64, u64, u64, u64)> = HashMap::new();
-    let mut force_delta_mode: HashMap<String, bool> = HashMap::new();
+    let aggregated_events = &mut acc.events;
+    let last_seen_raw = &mut acc.last_seen_raw;
+    let force_delta_mode = &mut acc.force_delta_mode;
 
     for line in reader.lines() {
         let line = line?;
@@ -1271,6 +1292,17 @@ fn parse_transcript_today_events(
             Ok(v) => v,
             Err(_) => continue,
         };
+
+        if v.get("forkedFrom").is_some_and(|fork| !fork.is_null()) {
+            continue;
+        }
+        if v.get("sessionId")
+            .or_else(|| v.get("session_id"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value.starts_with("session_"))
+        {
+            continue;
+        }
 
         let timestamp_str = v.get("timestamp").and_then(|t| t.as_str());
 
@@ -1303,6 +1335,7 @@ fn parse_transcript_today_events(
             .or_else(|| v.get("request_id"))
             .and_then(|r| r.as_str())
             .map(|s| s.to_string());
+        let agent_id = v.get("agentId").and_then(|s| s.as_str());
 
         if let Some(cost_val) = v.get("costUSD").or_else(|| v.get("cost_usd"))
             && let Some(cost) = cost_val
@@ -1316,8 +1349,15 @@ fn parse_transcript_today_events(
             } else {
                 format!("C:{}|{}", timestamp_str.unwrap_or_default(), cost)
             };
-            let event =
-                transcript_cost_event(session_id, transcript_str, today, &agg_key, ts, cost);
+            let event = transcript_cost_event(
+                session_id,
+                transcript_str,
+                today,
+                &agg_key,
+                ts,
+                cost,
+                agent_id,
+            );
             match aggregated_events.get_mut(&agg_key) {
                 Some(current) if cost > current.cost => {
                     *current = event;
@@ -1412,6 +1452,7 @@ fn parse_transcript_today_events(
                     fingerprint: &composite,
                     ts,
                     model_id,
+                    agent_id,
                     input,
                     output,
                     cache_create,
@@ -1479,7 +1520,88 @@ fn parse_transcript_today_events(
         }
     }
 
-    Ok(aggregated_events.into_values().collect())
+    Ok(())
+}
+
+/// Parse a session's transcript(s) into normalized cost events for today.
+///
+/// Reads the main transcript plus any subagent transcripts for the session so
+/// the DB fallback path bills subagent usage to the session, matching the scan
+/// path that already walks every transcript file.
+fn parse_transcript_today_events(
+    session_id: &str,
+    transcript_path: &Path,
+    today: &str,
+) -> Result<Vec<UsageEvent>> {
+    use std::fs::File;
+    use std::io::BufReader;
+
+    let mut acc = TranscriptEventAccumulator::default();
+
+    let main_transcript_str = transcript_path
+        .to_str()
+        .context("Invalid transcript path")?;
+    accumulate_transcript_today_events(
+        BufReader::new(File::open(transcript_path)?),
+        session_id,
+        main_transcript_str,
+        today,
+        &mut acc,
+    )?;
+
+    for subagent_path in session_subagent_transcripts(transcript_path) {
+        let Ok(file) = File::open(&subagent_path) else {
+            continue;
+        };
+        let Some(path_str) = subagent_path.to_str() else {
+            continue;
+        };
+        accumulate_transcript_today_events(
+            BufReader::new(file),
+            session_id,
+            path_str,
+            today,
+            &mut acc,
+        )?;
+    }
+
+    Ok(acc.events.into_values().collect())
+}
+
+/// Discover the subagent transcripts for the session whose main transcript is
+/// `transcript_path`.
+///
+/// The main transcript lives at `<project>/<session>.jsonl`, and its subagent
+/// transcripts sit under `<project>/<session>/subagents/`, with workflow-run
+/// agents nested further inside `subagents/workflows/wf_*/`. The walk is
+/// recursive to reach those.
+fn session_subagent_transcripts(transcript_path: &Path) -> Vec<PathBuf> {
+    let (Some(parent), Some(stem)) = (transcript_path.parent(), transcript_path.file_stem()) else {
+        return Vec::new();
+    };
+    let subagents_dir = parent.join(stem).join("subagents");
+    let mut files = Vec::new();
+    collect_jsonl_transcripts(&subagents_dir, &mut files);
+    files
+}
+
+/// Recursively collect `.jsonl` transcript files under `dir`, skipping workflow
+/// `journal.jsonl` bookkeeping files, which are not usage transcripts. A missing
+/// or unreadable directory yields nothing.
+fn collect_jsonl_transcripts(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_jsonl_transcripts(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "jsonl")
+            && path.file_name().is_some_and(|name| name != "journal.jsonl")
+        {
+            out.push(path);
+        }
+    }
 }
 
 /// Parse transcript file to calculate today's cost.
@@ -2520,6 +2642,321 @@ mod tests {
         assert_eq!(cache_read, 35);
         assert_eq!(searches, 3);
         unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn schema_migration_adds_agent_id_column_and_preserves_rows() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("legacy_events.db");
+        let legacy_conn = Connection::open(&db_path).unwrap();
+        legacy_conn
+            .execute_batch(
+                "CREATE TABLE metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at INTEGER
+                );
+                INSERT INTO metadata (key, value) VALUES ('schema_version', '4');
+                INSERT INTO metadata (key, value) VALUES ('usage_cache_version', '4');
+                CREATE TABLE usage_events (
+                    event_key TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    transcript_path TEXT NOT NULL,
+                    ts INTEGER NOT NULL,
+                    today_date TEXT NOT NULL,
+                    model TEXT,
+                    input_tokens INTEGER NOT NULL,
+                    output_tokens INTEGER NOT NULL,
+                    cache_create_tokens INTEGER NOT NULL,
+                    cache_read_tokens INTEGER NOT NULL,
+                    web_search_requests INTEGER NOT NULL,
+                    cost REAL NOT NULL,
+                    source TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );",
+            )
+            .unwrap();
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        legacy_conn
+            .execute(
+                "INSERT INTO usage_events (
+                    event_key,
+                    session_id,
+                    transcript_path,
+                    ts,
+                    today_date,
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    cache_create_tokens,
+                    cache_read_tokens,
+                    web_search_requests,
+                    cost,
+                    source,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    "legacy-event",
+                    "legacy-session",
+                    "/tmp/transcript.jsonl",
+                    1_700_000_000_i64,
+                    today,
+                    "claude-sonnet-4-6",
+                    100_i64,
+                    50_i64,
+                    0_i64,
+                    0_i64,
+                    0_i64,
+                    3.5_f64,
+                    "scan_entry",
+                    1_i64,
+                    1_i64
+                ],
+            )
+            .unwrap();
+        drop(legacy_conn);
+
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
+
+        let conn = open_db().unwrap();
+
+        assert!(table_has_column(&conn, "usage_events", "agent_id").unwrap());
+        let (cost, agent_id): (f64, Option<String>) = conn
+            .query_row(
+                "SELECT cost, agent_id FROM usage_events WHERE event_key = ?",
+                params!["legacy-event"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!((cost - 3.5).abs() < 1e-10);
+        assert_eq!(agent_id, None);
+        unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn usage_events_round_trip_persists_agent_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("agent_round_trip.db");
+        // SAFETY: Test runs serially, no concurrent env access
+        unsafe { env::set_var("CLAUDE_STATUSLINE_DB_PATH", db_path.to_str().unwrap()) };
+
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let ts = Utc::now();
+        let entries = vec![
+            Entry {
+                ts,
+                input: 100,
+                output: 50,
+                cache_create: 0,
+                cache_read: 0,
+                web_search_requests: 0,
+                speed: None,
+                service_tier: None,
+                cost: 1.0,
+                model: Some("claude-sonnet-4-6".to_string()),
+                session_id: Some("agent-session".to_string()),
+                msg_id: Some("msg-main".to_string()),
+                req_id: Some("req-main".to_string()),
+                project: Some("project".to_string()),
+                agent_id: None,
+            },
+            Entry {
+                ts,
+                input: 200,
+                output: 80,
+                cache_create: 0,
+                cache_read: 0,
+                web_search_requests: 0,
+                speed: None,
+                service_tier: None,
+                cost: 2.0,
+                model: Some("claude-sonnet-4-6".to_string()),
+                session_id: Some("agent-session".to_string()),
+                msg_id: Some("msg-sub".to_string()),
+                req_id: Some("req-sub".to_string()),
+                project: Some("project".to_string()),
+                agent_id: Some("wfagent99".to_string()),
+            },
+        ];
+
+        let conn = open_db().unwrap();
+        let events = usage_events_from_entries(
+            "agent-session",
+            "projects/project/transcript.jsonl",
+            &today,
+            &entries,
+        );
+        replace_usage_events_for_session_date(&conn, "agent-session", &today, &events).unwrap();
+
+        let persisted_agent_id: Option<String> = conn
+            .query_row(
+                "SELECT agent_id FROM usage_events WHERE session_id = ? AND agent_id IS NOT NULL",
+                params!["agent-session"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted_agent_id.as_deref(), Some("wfagent99"));
+
+        let rehydrated = recent_usage_entries(&conn, 0).unwrap();
+        let subagent = rehydrated
+            .iter()
+            .find(|entry| entry.agent_id.as_deref() == Some("wfagent99"))
+            .expect("subagent entry rehydrated with agent_id");
+        assert_eq!(subagent.input, 200);
+        assert!(
+            rehydrated
+                .iter()
+                .any(|entry| entry.agent_id.is_none() && entry.input == 100),
+            "main-thread entry rehydrates with no agent_id"
+        );
+        unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
+    }
+
+    #[test]
+    fn parse_transcript_today_events_includes_nested_subagent_transcripts() {
+        let temp_dir = TempDir::new().unwrap();
+        let session = "sess-parse-agent";
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let ts = Local::now().to_rfc3339();
+
+        let project_dir = temp_dir.path().join("projects").join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let main_transcript = project_dir.join(format!("{session}.jsonl"));
+        let main_line = serde_json::json!({
+            "timestamp": ts,
+            "sessionId": session,
+            "requestId": "req-main",
+            "message": {
+                "id": "msg-main",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+        std::fs::write(&main_transcript, format!("{main_line}\n")).unwrap();
+
+        let workflow_dir = project_dir
+            .join(session)
+            .join("subagents")
+            .join("workflows")
+            .join("wf_abc123");
+        std::fs::create_dir_all(&workflow_dir).unwrap();
+        let agent_line = serde_json::json!({
+            "timestamp": ts,
+            "sessionId": session,
+            "requestId": "req-sub",
+            "agentId": "wfagent42",
+            "message": {
+                "id": "msg-sub",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 1000,
+                    "output_tokens": 200,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+        std::fs::write(
+            workflow_dir.join("agent-wfagent42.jsonl"),
+            format!("{agent_line}\n"),
+        )
+        .unwrap();
+
+        // A workflow journal.jsonl carries a usage-shaped line that must be skipped.
+        let journal_line = serde_json::json!({
+            "timestamp": ts,
+            "sessionId": session,
+            "requestId": "req-journal",
+            "message": {
+                "id": "msg-journal",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 999_999,
+                    "output_tokens": 999_999,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+        std::fs::write(
+            workflow_dir.join("journal.jsonl"),
+            format!("{journal_line}\n"),
+        )
+        .unwrap();
+
+        let forked_line = serde_json::json!({
+            "timestamp": ts,
+            "sessionId": session,
+            "requestId": "req-forked",
+            "forkedFrom": { "sessionId": "origin", "messageUuid": "msg-origin" },
+            "message": {
+                "id": "msg-forked",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 50_000,
+                    "output_tokens": 5_000,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+        std::fs::write(
+            workflow_dir.join("agent-forked.jsonl"),
+            format!("{forked_line}\n"),
+        )
+        .unwrap();
+
+        let remote_line = serde_json::json!({
+            "timestamp": ts,
+            "sessionId": "session_01remote",
+            "requestId": "req-remote",
+            "message": {
+                "id": "msg-remote",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 60_000,
+                    "output_tokens": 6_000,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+        std::fs::write(
+            workflow_dir.join("agent-remote.jsonl"),
+            format!("{remote_line}\n"),
+        )
+        .unwrap();
+
+        let events = parse_transcript_today_events(session, &main_transcript, &today).unwrap();
+
+        assert_eq!(
+            events.len(),
+            2,
+            "main transcript plus one subagent transcript"
+        );
+        let subagent = events
+            .iter()
+            .find(|event| event.agent_id.as_deref() == Some("wfagent42"))
+            .expect("subagent event carries its agent_id");
+        assert_eq!(subagent.input_tokens, 1000);
+        assert_eq!(subagent.output_tokens, 200);
+        let total_input: u64 = events.iter().map(|event| event.input_tokens).sum();
+        assert_eq!(total_input, 1100, "journal usage is excluded");
+        assert!(
+            events.iter().all(|event| event.input_tokens != 999_999),
+            "journal.jsonl must not be parsed"
+        );
     }
 
     #[test]
