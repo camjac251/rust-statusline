@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## [2.6.0](https://github.com/camjac251/rust-statusline/compare/v2.5.7...v2.6.0) - 2026-07-23
+
+### Added
+
+- *(subagent)* agent-panel statusline mode
+- *(display)* workflow progress and remote-task segments
+- *(json)* enrich session.subagents from meta sidecars
+- *(db)* track agent_id in the usage event ledger
+
+### Fixed
+
+- *(doctor)* warn when statusLine has no refreshInterval
+- *(usage)* skip fork replays, journals, and remote sessions
+
+### Other
+
+- use system font stack in preview
+- refresh usage preview
+
 ## [2.5.7](https://github.com/camjac251/rust-statusline/compare/v2.5.6...v2.5.7) - 2026-07-03
 
 ### Fixed
