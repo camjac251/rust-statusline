@@ -32,6 +32,18 @@ pub const DEFAULT_SCAN_LOOKBACK_HOURS: i64 = 24;
 const ACTIVE_TRANSCRIPT_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 const ACTIVE_TRANSCRIPT_MAX_BACKSCAN_BYTES: u64 = 64 * 1024 * 1024;
 
+#[derive(serde::Deserialize)]
+struct TranscriptScanRecord {
+    #[serde(rename = "forkedFrom")]
+    forked_from: Option<serde_json::Map<String, Value>>,
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    #[serde(rename = "session_id")]
+    snake_case_session_id: Option<String>,
+    #[serde(flatten)]
+    fields: serde_json::Map<String, Value>,
+}
+
 fn recent_transcript_lines(transcript_path: &Path) -> Option<Vec<String>> {
     recent_transcript_lines_with_limit(transcript_path, ACTIVE_TRANSCRIPT_TAIL_BYTES)
 }
@@ -768,6 +780,11 @@ fn find_recent_jsonl_files(root: &Path, cutoff: SystemTime) -> Vec<PathBuf> {
             if entry.file_type().is_dir() {
                 return true;
             }
+            // Workflow runs write `journal.jsonl` run-bookkeeping files that are
+            // not usage transcripts; skip them so the aggregator never parses them.
+            if entry.file_name() == "journal.jsonl" {
+                return false;
+            }
             // For files, only include .jsonl files
             entry.path().extension().is_some_and(|ext| ext == "jsonl")
         })
@@ -900,10 +917,26 @@ pub fn scan_usage(
                 if !line_may_affect_usage_scan(t) {
                     continue;
                 }
-                let v: Value = match serde_json::from_str(t) {
-                    Ok(v) => v,
+                let TranscriptScanRecord {
+                    forked_from,
+                    session_id: camel_case_session_id,
+                    snake_case_session_id,
+                    fields: v,
+                } = match serde_json::from_str(t) {
+                    Ok(record) => record,
                     Err(_) => continue,
                 };
+                if forked_from.is_some() {
+                    continue;
+                }
+                let transcript_session_id = camel_case_session_id
+                    .as_deref()
+                    .or(snake_case_session_id.as_deref());
+                // Remote transcripts duplicate usage billed to a remote session and cannot
+                // match a local hook session.
+                if transcript_session_id.is_some_and(|id| id.starts_with("session_")) {
+                    continue;
+                }
                 let tsd_for_limits: Option<DateTime<Utc>> = v
                     .get("timestamp")
                     .and_then(|s| s.as_str())
@@ -911,10 +944,7 @@ pub fn scan_usage(
                     .map(|d| d.with_timezone(&Utc));
 
                 if v.get("type").and_then(|s| s.as_str()) == Some("result") {
-                    let sid_v = v
-                        .get("sessionId")
-                        .or_else(|| v.get("session_id"))
-                        .and_then(|s| s.as_str());
+                    let sid_v = transcript_session_id;
                     if sid_v == Some(session_id)
                         && let Some(cn) = v.get("total_cost_usd")
                     {
@@ -930,11 +960,7 @@ pub fn scan_usage(
                         }
                     }
 
-                    let sid = v
-                        .get("sessionId")
-                        .or_else(|| v.get("session_id"))
-                        .and_then(|s| s.as_str())
-                        .map(|s| s.to_string());
+                    let sid = transcript_session_id.map(str::to_string);
                     let tsd = v
                         .get("timestamp")
                         .and_then(|s| s.as_str())
@@ -1110,12 +1136,7 @@ pub fn scan_usage(
                     .get("agentId")
                     .and_then(|s| s.as_str())
                     .map(|s| s.to_string());
-                // Accept either key spelling for session identifier
-                let sid = v
-                    .get("sessionId")
-                    .or_else(|| v.get("session_id"))
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string());
+                let sid = transcript_session_id.map(str::to_string);
                 let mid = msg
                     .get("id")
                     .and_then(|s| s.as_str())
@@ -2602,6 +2623,203 @@ mod tests {
             .expect("workflow agent entry should carry its agent_id");
         assert_eq!(wf_agent_entry.input, 1000);
         assert_eq!(wf_agent_entry.output, 200);
+        Ok(())
+    }
+
+    /// A forked session lives in its own transcript file and replays the origin
+    /// session's history, each replayed entry carrying a top-level `forkedFrom`
+    /// marker. Those replays duplicate usage already recorded in the origin file.
+    /// The replay here carries a distinct requestId so incidental requestId dedup
+    /// would not merge it; the aggregator must skip it on the `forkedFrom` marker
+    /// alone, leaving the usage counted once and attributed to the origin session.
+    #[test]
+    fn scan_usage_skips_forked_replay_entries_and_attributes_cost_to_origin() -> Result<()> {
+        let origin_session = format!(
+            "origin-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let fork_session = format!(
+            "fork-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+
+        let origin_line = json!({
+            "type": "assistant",
+            "sessionId": origin_session,
+            "requestId": "req-origin",
+            "timestamp": Local::now().to_rfc3339(),
+            "message": {
+                "role": "assistant",
+                "id": "msg-origin",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 1000,
+                    "output_tokens": 200,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+
+        let dir = write_transcript_lines(&origin_session, &[origin_line])?;
+        let base = dir.path().to_path_buf();
+
+        // Drop a forked transcript alongside the origin. The replayed entry uses a
+        // distinct requestId and message id so only the `forkedFrom` marker can
+        // guard against the duplicate.
+        let fork_path = base
+            .join("projects")
+            .join("project")
+            .join(format!("{}.jsonl", fork_session));
+        let forked_line = json!({
+            "type": "assistant",
+            "sessionId": fork_session,
+            "requestId": "req-fork-replay",
+            "forkedFrom": { "sessionId": origin_session, "messageUuid": "msg-origin" },
+            "timestamp": Local::now().to_rfc3339(),
+            "message": {
+                "role": "assistant",
+                "id": "msg-fork-replay",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 1000,
+                    "output_tokens": 200,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+        fs::write(&fork_path, format!("{}\n", forked_line))?;
+
+        let (session_cost, _, today_cost, entries, _, _, _) =
+            scan_usage(&[base], &origin_session, None, None)?;
+
+        // The replay is dropped, leaving only the origin entry.
+        assert_eq!(
+            entries.len(),
+            1,
+            "forked replay must not add a second entry"
+        );
+        assert_eq!(
+            entries[0].session_id.as_deref(),
+            Some(origin_session.as_str()),
+            "surviving entry belongs to the origin session"
+        );
+
+        let origin_cost = entries[0].cost;
+        assert!(origin_cost > 0.0, "origin entry should carry a cost");
+        assert!(
+            (today_cost - origin_cost).abs() < 1e-10,
+            "today cost counts the usage once"
+        );
+        assert!(
+            (session_cost - origin_cost).abs() < 1e-10,
+            "origin session owns the cost"
+        );
+        Ok(())
+    }
+
+    /// Workflow runs write a `journal.jsonl` of run bookkeeping next to the agent
+    /// transcripts. It is not a usage transcript, so file discovery must exclude
+    /// it while still returning the ordinary transcript and the agent transcripts.
+    #[test]
+    fn find_recent_jsonl_files_excludes_workflow_journal() -> Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path().join("projects");
+        let session_dir = root.join("project").join("session");
+        let workflow_dir = session_dir
+            .join("subagents")
+            .join("workflows")
+            .join("wf_test123");
+        fs::create_dir_all(&workflow_dir)?;
+
+        let transcript = session_dir.join("session.jsonl");
+        fs::write(&transcript, "{}\n")?;
+        let journal = workflow_dir.join("journal.jsonl");
+        fs::write(&journal, "{}\n")?;
+        let agent = workflow_dir.join("agent-aabb1122.jsonl");
+        fs::write(&agent, "{}\n")?;
+
+        let files = find_recent_jsonl_files(&root, SystemTime::UNIX_EPOCH);
+
+        assert!(
+            files.contains(&transcript),
+            "ordinary transcript should be discovered"
+        );
+        assert!(
+            files.contains(&agent),
+            "workflow agent transcript should be discovered"
+        );
+        assert!(
+            !files.contains(&journal),
+            "journal.jsonl should be excluded"
+        );
+        Ok(())
+    }
+
+    /// Remote-agent transcripts use a `session_...` id and their usage is billed
+    /// to that remote session, never a local hook session. If such a transcript is
+    /// ever mirrored under `projects/`, its usage must be dropped rather than
+    /// inflate today/window totals.
+    #[test]
+    fn scan_usage_excludes_remote_format_session_entries() -> Result<()> {
+        let local_session = format!(
+            "local-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let remote_session = "session_01remotexyz";
+
+        let local_line = json!({
+            "type": "assistant",
+            "sessionId": local_session,
+            "timestamp": Local::now().to_rfc3339(),
+            "message": {
+                "role": "assistant",
+                "id": "msg-local",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 1000,
+                    "output_tokens": 200,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+        let remote_line = json!({
+            "type": "assistant",
+            "sessionId": remote_session,
+            "timestamp": Local::now().to_rfc3339(),
+            "message": {
+                "role": "assistant",
+                "id": "msg-remote",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 9_000_000,
+                    "output_tokens": 9_000_000,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        });
+
+        let dir = write_transcript_lines(&local_session, &[local_line, remote_line])?;
+        let base = dir.path().to_path_buf();
+
+        let (_, _, today_cost, entries, _, _, _) = scan_usage(&[base], &local_session, None, None)?;
+
+        // Only the local entry survives; the remote-format entry is dropped.
+        assert_eq!(entries.len(), 1, "remote-format entry must be excluded");
+        assert_eq!(
+            entries[0].session_id.as_deref(),
+            Some(local_session.as_str())
+        );
+        assert_eq!(entries[0].input, 1000);
+
+        let local_cost = entries[0].cost;
+        assert!(
+            (today_cost - local_cost).abs() < 1e-10,
+            "remote usage must not inflate today's cost"
+        );
         Ok(())
     }
 
