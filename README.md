@@ -264,7 +264,7 @@ claude_statusline init --dry-run
 claude_statusline init --refresh-interval 5
 ```
 
-`doctor` checks Claude config paths, `settings.json` (both the `statusLine` and optional `subagentStatusLine` entries), SQLite cache health, OAuth cache/token availability, the usage API egress route (direct, or through a proxy resolved from `HTTPS_PROXY`/`NO_PROXY`, plus any `NODE_EXTRA_CA_CERTS` trust), config loading, and pricing lookup provenance without reading statusline stdin. A missing `subagentStatusLine` is reported on the settings line but never counts against `ok`.
+`doctor` checks Claude config paths, `settings.json` (both the `statusLine` and optional `subagentStatusLine` entries), SQLite cache health, OAuth cache/token availability, the usage API egress route (direct, or through a proxy resolved from `HTTPS_PROXY`/`NO_PROXY`, plus any `NODE_EXTRA_CA_CERTS` trust), config loading, and pricing lookup provenance without reading statusline stdin. A missing `subagentStatusLine` is reported on the settings line but never counts against `ok`. When `statusLine` is present but has no `refreshInterval`, `doctor` warns: Claude Code does not re-run the command on terminal resize, so the footer keeps stale, re-truncated output and timed metrics do not refresh between messages until the next message; `init` sets it.
 
 The `usage_api` lines show where the OAuth usage call goes (an excerpt):
 

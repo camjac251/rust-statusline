@@ -27,10 +27,15 @@ const SYM_RUNNING: &str = "●"; // Active/running indicator
 // Terminal width thresholds for responsive formatting
 const WIDTH_NARROW: u16 = 140;
 const WIDTH_MEDIUM: u16 = 200;
-// Account for Claude CLI padding/margins (status line container has padding)
+// Claude Code sets COLUMNS to the full terminal width, but its footer box
+// spends ~5 of those columns on structural overhead (left/right padding and
+// the column gap) plus any configured statusLine padding.
 const TERMINAL_MARGIN: u16 = 15;
-// Claude Code's footer shares space with hints/notifications, so fit to a
-// smaller budget than the full terminal width to avoid Ink truncation.
+// Beyond the structural overhead, the footer's right side holds auto-update
+// notices and mode labels that shrink the statusline column, and Claude Code
+// does not re-run the command on terminal resize. This reserve keeps output
+// clear of Ink's per-line ellipsis in the common case and absorbs a shrink
+// between refreshes.
 const CLAUDE_FOOTER_RESERVE: u16 = 44;
 const SHORT_TERMINAL_ROWS: u16 = 24;
 const DROP_BEFORE_SHRINK_MARGIN: u8 = 40;

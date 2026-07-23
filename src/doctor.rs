@@ -138,6 +138,12 @@ fn build_report(args: &Args) -> Result<DoctorReport> {
         warnings.push(
             "Claude settings.json has no statusLine entry; run init to install it".to_string(),
         );
+    } else if settings.refresh_interval.is_none() {
+        warnings.push(
+            "statusLine has no refreshInterval; Claude Code will not re-run the command on \
+             terminal resize or refresh timed metrics between messages; run init to set it"
+                .to_string(),
+        );
     }
     if !db.ok {
         warnings.push("SQLite cache is not healthy".to_string());
@@ -579,6 +585,58 @@ mod tests {
             Some("claude_statusline --truecolor")
         );
         assert!(health.ok);
+    }
+
+    #[test]
+    fn report_warns_when_status_line_lacks_refresh_interval() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("settings.json"),
+            r#"{"statusLine": {"type": "command", "command": "claude_statusline"}}"#,
+        )
+        .expect("write settings");
+        let args = Args::parse_effective_from([
+            "claude_statusline",
+            "--no-config",
+            "--claude-config-dir",
+            dir.path().to_str().expect("utf8 path"),
+        ]);
+
+        let report = build_report(&args).expect("build report");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("refreshInterval")),
+            "expected a refreshInterval warning, got {:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn report_does_not_warn_about_refresh_interval_when_present() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("settings.json"),
+            r#"{"statusLine": {"type": "command", "command": "claude_statusline", "refreshInterval": 5}}"#,
+        )
+        .expect("write settings");
+        let args = Args::parse_effective_from([
+            "claude_statusline",
+            "--no-config",
+            "--claude-config-dir",
+            dir.path().to_str().expect("utf8 path"),
+        ]);
+
+        let report = build_report(&args).expect("build report");
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.contains("refreshInterval")),
+            "did not expect a refreshInterval warning, got {:?}",
+            report.warnings
+        );
     }
 
     #[test]
