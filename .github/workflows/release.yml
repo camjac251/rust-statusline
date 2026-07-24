@@ -33,7 +33,7 @@ jobs:
           app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -58,7 +58,7 @@ jobs:
       releases_created: ${{ steps.release-plz.outputs.releases_created }}
       tag: ${{ steps.extract.outputs.tag }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -115,7 +115,7 @@ jobs:
             arch: windows-arm64
             ext: .exe
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release.outputs.tag || inputs.tag }}
 
@@ -198,7 +198,7 @@ jobs:
           owner: camjac251
           repositories: homebrew-tap
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           repository: camjac251/homebrew-tap
           token: ${{ steps.app-token.outputs.token }}
