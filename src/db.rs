@@ -3290,12 +3290,19 @@ mod tests {
 
         let _ = std::fs::remove_file(&db_path);
 
-        assert!(try_set_api_cache("lock_key_unique", "1", 1).unwrap());
-        assert!(!try_set_api_cache("lock_key_unique", "2", 1).unwrap());
+        // Lock held: the second writer must lose while the entry is still valid.
+        // `Utc::now().timestamp()` has one-second granularity, so a generous TTL
+        // keeps both calls inside the lock window even when they land on opposite
+        // sides of a second boundary.
+        assert!(try_set_api_cache("lock_key_held", "1", 300).unwrap());
+        assert!(!try_set_api_cache("lock_key_held", "2", 300).unwrap());
 
+        // Lock expires: sleeping past a one-second TTL guarantees the entry is
+        // gone regardless of where the first write fell within its second, so the
+        // next writer wins.
+        assert!(try_set_api_cache("lock_key_expiry", "1", 1).unwrap());
         thread::sleep(std::time::Duration::from_millis(1100));
-
-        assert!(try_set_api_cache("lock_key_unique", "3", 1).unwrap());
+        assert!(try_set_api_cache("lock_key_expiry", "2", 1).unwrap());
 
         unsafe { env::remove_var("CLAUDE_STATUSLINE_DB_PATH") };
     }
