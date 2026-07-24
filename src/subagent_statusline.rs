@@ -147,6 +147,14 @@ fn render_task(task: &SubagentStatusTask, columns: usize, now_ms: u64, truecolor
         .as_deref()
         .map(model_label)
         .map(|model| model_token(&model).paint(&model, truecolor));
+    // Effort is the agent's reasoning depth, colored on the same low..max tier
+    // scale as the main line. Claude Code only forwards a named effort for
+    // agents whose model exposes the capability; an integer level or an
+    // absent/unrecognized effort renders no chip.
+    let effort_c = task
+        .effort
+        .as_ref()
+        .and_then(|effort| effort_chip(effort, truecolor));
     let tokens_c = token_label(task.token_count, task.context_window_size, truecolor);
     // Burn is a throughput metric, not an alarm, so it shares the dim-white
     // tier with the token count; the only pressure color in a row is the
@@ -165,42 +173,34 @@ fn render_task(task: &SubagentStatusTask, columns: usize, now_ms: u64, truecolor
 
     let sep = format!(" {} ", tokens::MUTED.paint("·", truecolor));
 
-    // The burn chip rides only the richest variant so width reduction sheds it
-    // before any other field.
-    let mut with_burn = vec![name_c.as_str()];
-    if let Some(model) = model_c.as_deref() {
-        with_burn.push(model);
-    }
-    with_burn.push(tokens_c.as_str());
-    if let Some(burn) = burn_c.as_deref() {
-        with_burn.push(burn);
-    }
-    with_burn.push(elapsed_c.as_str());
-    if let Some(detail) = detail_c.as_deref() {
-        with_burn.push(detail);
-    }
-
-    let mut full = vec![name_c.as_str()];
-    if let Some(model) = model_c.as_deref() {
-        full.push(model);
-    }
-    full.push(tokens_c.as_str());
-    full.push(elapsed_c.as_str());
-    if let Some(detail) = detail_c.as_deref() {
-        full.push(detail);
-    }
-
-    let mut without_detail = vec![name_c.as_str()];
-    if let Some(model) = model_c.as_deref() {
-        without_detail.push(model);
-    }
-    without_detail.push(tokens_c.as_str());
-    without_detail.push(elapsed_c.as_str());
+    // Assemble a row at a chosen richness. Width reduction sheds fields in a
+    // fixed order: the burn chip first, then the effort chip, then the task
+    // detail, so the always-present name/model/context/elapsed core survives
+    // longest.
+    let assemble = |effort: bool, burn: bool, detail: bool| -> String {
+        let mut parts = vec![name_c.as_str()];
+        if let Some(model) = model_c.as_deref() {
+            parts.push(model);
+        }
+        if effort && let Some(chip) = effort_c.as_deref() {
+            parts.push(chip);
+        }
+        parts.push(tokens_c.as_str());
+        if burn && let Some(chip) = burn_c.as_deref() {
+            parts.push(chip);
+        }
+        parts.push(elapsed_c.as_str());
+        if detail && let Some(chip) = detail_c.as_deref() {
+            parts.push(chip);
+        }
+        parts.join(sep.as_str())
+    };
 
     let variants = [
-        with_burn.join(sep.as_str()),
-        full.join(sep.as_str()),
-        without_detail.join(sep.as_str()),
+        assemble(true, true, true),
+        assemble(true, false, true),
+        assemble(false, false, true),
+        assemble(false, false, false),
         [name_c.as_str(), tokens_c.as_str(), elapsed_c.as_str()].join(sep.as_str()),
         [name_c.as_str(), tokens_c.as_str()].join(sep.as_str()),
         name_c.clone(),
@@ -231,6 +231,26 @@ fn model_token(label: &str) -> tokens::ColorToken {
     } else {
         tokens::PRIMARY
     }
+}
+
+/// Render the agent's effort as a colored chip on the shared low..max tier
+/// scale (cyan low -> bold pink max), matching the main line. Only the named
+/// efforts Claude Code sends for effort-capable models map to a chip; an
+/// integer level or an unrecognized/unset label yields none.
+fn effort_chip(effort: &SubagentEffort, truecolor: bool) -> Option<String> {
+    let SubagentEffort::Label(label) = effort else {
+        return None;
+    };
+    let label = label.trim().to_lowercase();
+    let chip = match label.as_str() {
+        "low" => tokens::EFFORT_LOW.paint(&label, truecolor),
+        "medium" => tokens::EFFORT_MEDIUM.paint(&label, truecolor),
+        "high" => tokens::EFFORT_HIGH.paint(&label, truecolor),
+        "xhigh" => tokens::EFFORT_MAX.paint(&label, truecolor),
+        "max" => tokens::EFFORT_MAX.bold(&label, truecolor),
+        _ => return None,
+    };
+    Some(chip)
 }
 
 fn task_type_label(task_type: &str) -> String {
@@ -382,10 +402,42 @@ mod tests {
         let content = plain(&render_task(&task(), 120, 121_000, false));
         assert!(content.contains("Explore"));
         assert!(content.contains("Opus 4.8"));
+        assert!(content.contains("high"));
         assert!(content.contains("48.2K/1M 5%"));
         assert!(content.contains("217.0K/m"));
         assert!(content.contains("2m"));
         assert!(content.contains("tracing transcript entries"));
+    }
+
+    #[test]
+    fn renders_named_effort_as_a_chip() {
+        for label in ["low", "medium", "high", "xhigh", "max"] {
+            let chip = effort_chip(&SubagentEffort::Label(label.to_string()), false)
+                .unwrap_or_else(|| panic!("expected a chip for {label}"));
+            assert_eq!(plain(&chip), label);
+        }
+    }
+
+    #[test]
+    fn omits_effort_chip_for_integer_level_or_unknown_label() {
+        assert!(effort_chip(&SubagentEffort::Level(3), false).is_none());
+        assert!(effort_chip(&SubagentEffort::Label("unset".to_string()), false).is_none());
+        assert!(effort_chip(&SubagentEffort::Label(String::new()), false).is_none());
+    }
+
+    #[test]
+    fn drops_effort_before_task_detail_when_narrow() {
+        // At a width that can't fit both, the task detail (what the agent is
+        // doing) outranks the static effort chip.
+        let content = plain(&render_task(&task(), 70, 121_000, false));
+        assert!(
+            !content.contains("high"),
+            "effort should drop first: {content}"
+        );
+        assert!(
+            content.contains("tracing transcript entries"),
+            "detail should survive: {content}"
+        );
     }
 
     #[test]

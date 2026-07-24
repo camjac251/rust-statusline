@@ -87,7 +87,7 @@ Add to `~/.claude/settings.json`:
 
 `padding` and `refreshInterval` are Claude Code settings for the footer. `subagentStatusLine` is optional and customizes rows in the agent panel. Claude Code sends all eligible local-agent tasks to the command every five seconds; `claude_statusline` detects that payload automatically and returns the required per-task JSONL decorations.
 
-Claude Code truncates long footer output, so `claude_statusline` prefers a more compact, Claude-safe layout unless there is clear room for the richer two-line view. When Claude Code provides `COLUMNS` and `LINES`, those dimensions drive the layout: important segments reduce through shorter labels first, compact mode can show the project folder when useful, model names collapse to readable family names, and low-priority workspace/detail segments drop when that keeps the line more readable. Agent-panel rows use the per-row `columns` budget from Claude Code and reduce through shorter variants before truncating; the tokens-per-minute burn chip rides only the richest variant, so it is the first thing width reduction drops.
+Claude Code truncates long footer output, so `claude_statusline` prefers a more compact, Claude-safe layout unless there is clear room for the richer two-line view. When Claude Code provides `COLUMNS` and `LINES`, those dimensions drive the layout: important segments reduce through shorter labels first, compact mode can show the project folder when useful, model names collapse to readable family names, and low-priority workspace/detail segments drop when that keeps the line more readable. Agent-panel rows use the per-row `columns` budget from Claude Code and reduce through shorter variants before truncating. Width reduction sheds fields in a fixed order: the tokens-per-minute burn chip first, then the effort chip, then the current-task detail, so the name/model/context/elapsed core survives longest.
 
 Restart Claude Code. Done.
 
@@ -106,7 +106,7 @@ Restart Claude Code. Done.
 | **reset** | Time remaining until usage window reset |
 | **git** | Branch, commit, dirty state, ahead/behind |
 | **workspace** | Added workspace dirs and linked worktree hints from Claude Code |
-| **agents** | Live agent-panel rows: name, model, context usage, burn rate, elapsed time, and current task (Claude Code draws the status glyph in its own gutter) |
+| **agents** | Live agent-panel rows: name, model, effort, context usage, burn rate, elapsed time, and current task (Claude Code draws the status glyph in its own gutter) |
 
 ---
 
@@ -139,7 +139,7 @@ flowchart LR
 
 Pricing is embedded at compile time from `pricing.json`. The OAuth API is optional -- if no credentials are available, the tool falls back to transcript-only metrics.
 
-When stdin contains Claude Code's `subagentStatusLine` task payload, the binary switches to agent-panel mode without a separate flag. It emits one `{id, content}` JSON object per task as JSONL and does not perform transcript, Git, database, or API work. Each row can carry a burn chip (e.g. `12.3K/m`) derived from the payload's token samples, which arrive one per five-second tick; tasks with fewer than two samples or no token growth omit it. With `--json`, this mode emits a single structured `{"tasks": [...]}` object with the parsed task rows (snake_case keys, absent optional fields omitted) instead of the JSONL decorations; rows include a numeric `tokens_per_minute` field when the burn rate is derivable.
+When stdin contains Claude Code's `subagentStatusLine` task payload, the binary switches to agent-panel mode without a separate flag. It emits one `{id, content}` JSON object per task as JSONL and does not perform transcript, Git, database, or API work. Each row can carry a burn chip (e.g. `12.3K/m`) derived from the payload's token samples, which arrive one per five-second tick; tasks with fewer than two samples or no token growth omit it. Rows also carry an effort chip (`low`, `medium`, `high`, `xhigh`, `max`) colored on the same tier scale as the main line when Claude Code reports a named effort for the agent; agents whose model exposes no effort, or that report an integer level, show no chip. With `--json`, this mode emits a single structured `{"tasks": [...]}` object with the parsed task rows (snake_case keys, absent optional fields omitted) instead of the JSONL decorations; rows include a numeric `tokens_per_minute` field when the burn rate is derivable.
 
 Newer OAuth usage responses expose canonical rows through generic `limits[]` and `spend` fields. `claude_statusline` preserves those rows, uses them as fallbacks for session/weekly percentages, renders scoped weekly model rows such as `fable:24%`, and maps `spend` into the extra-usage credit token.
 
