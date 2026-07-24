@@ -46,7 +46,12 @@ const TERMINAL_STATUSES: &[&str] = &[
 ];
 
 /// Tolerant view of a `wf_<runId>.json` workflow run-state snapshot.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// Claude Code writes that snapshot only when a run reaches a terminal state, so
+/// a run that is still in flight is reconstructed from its journal instead. The
+/// `live_agents_*` fields carry that journal-derived progress and are never part
+/// of the on-disk snapshot.
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct WorkflowRun {
     #[serde(rename = "runId")]
     pub run_id: String,
@@ -62,6 +67,10 @@ pub struct WorkflowRun {
     pub agent_count: Option<u64>,
     #[serde(rename = "workflowProgress", default)]
     pub workflow_progress: Vec<WorkflowProgressEntry>,
+    #[serde(skip)]
+    pub live_agents_done: Option<usize>,
+    #[serde(skip)]
+    pub live_agents_total: Option<usize>,
 }
 
 impl WorkflowRun {
@@ -77,18 +86,26 @@ impl WorkflowRun {
         !self.is_terminal()
     }
 
-    /// Number of dispatched agents that have finished.
+    /// Number of dispatched agents that have finished. Journal-derived progress
+    /// (for a live run) takes precedence over the snapshot's progress records.
     pub fn agents_done(&self) -> usize {
+        if let Some(done) = self.live_agents_done {
+            return done;
+        }
         self.workflow_progress
             .iter()
             .filter(|e| e.is_agent() && e.is_done())
             .count()
     }
 
-    /// Total agents in the run: the declared `agentCount` when present and
-    /// nonzero, otherwise the number of dispatched agents seen in the progress
-    /// records.
+    /// Total agents in the run. For a live run this is the count dispatched so
+    /// far (the final total is only known once the run finishes); otherwise the
+    /// declared `agentCount` when present and nonzero, falling back to the
+    /// dispatched agents seen in the progress records.
     pub fn agents_total(&self) -> usize {
+        if let Some(total) = self.live_agents_total {
+            return total;
+        }
         match self.agent_count {
             Some(count) if count > 0 => count as usize,
             _ => self

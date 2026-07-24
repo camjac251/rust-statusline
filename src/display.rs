@@ -1318,6 +1318,14 @@ fn wrap_header_segment_variants(segment: StatusSegment, tc: bool) -> StatusSegme
     )
 }
 
+/// Progress label for a running workflow: `done/total` once at least one agent
+/// has been dispatched, otherwise `None` so callers render just the spinner (a
+/// live run's total is unknown until an agent starts).
+fn workflow_progress_label(run: &crate::models::WorkflowRun) -> Option<String> {
+    let total = run.agents_total();
+    (total > 0).then(|| format!("{}/{}", run.agents_done(), total))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_header_line(
     hook: &HookJson,
@@ -1506,14 +1514,21 @@ fn render_header_line(
             TerminalWidth::Wide => 28,
         };
         let name = truncate_label(run.workflow_name.as_deref().unwrap_or("workflow"), name_max);
-        let progress = format!("{}/{}", run.agents_done(), run.agents_total());
-        let body = format!(
-            "{}{} {} {}",
-            muted_label(label, tc),
-            tokens::ACCENT.paint(&name, tc),
-            tokens::PRIMARY_DIM.paint(&progress, tc),
-            tokens::SUCCESS.paint(SYM_RUNNING, tc),
-        );
+        let body = match workflow_progress_label(run) {
+            Some(progress) => format!(
+                "{}{} {} {}",
+                muted_label(label, tc),
+                tokens::ACCENT.paint(&name, tc),
+                tokens::PRIMARY_DIM.paint(&progress, tc),
+                tokens::SUCCESS.paint(SYM_RUNNING, tc),
+            ),
+            None => format!(
+                "{}{} {}",
+                muted_label(label, tc),
+                tokens::ACCENT.paint(&name, tc),
+                tokens::SUCCESS.paint(SYM_RUNNING, tc),
+            ),
+        };
         header_parts.push(status_segment(wrap_header_segment(body, tc), 20));
     }
 
@@ -1774,9 +1789,8 @@ fn render_compact_text_output(
             .and_then(|activity| activity.workflows.iter().find(|run| run.is_running()))
     {
         let name = truncate_label(run.workflow_name.as_deref().unwrap_or("workflow"), 16);
-        let progress = format!("{}/{}", run.agents_done(), run.agents_total());
-        segments.push(adaptive_segment(
-            vec![
+        let variants = match workflow_progress_label(run) {
+            Some(progress) => vec![
                 format!(
                     "{}{} {} {}",
                     muted_label("wf:", tc),
@@ -1791,8 +1805,21 @@ fn render_compact_text_output(
                     tokens::SUCCESS.paint(SYM_RUNNING, tc),
                 ),
             ],
-            20,
-        ));
+            None => vec![
+                format!(
+                    "{}{} {}",
+                    muted_label("wf:", tc),
+                    tokens::ACCENT.paint(&name, tc),
+                    tokens::SUCCESS.paint(SYM_RUNNING, tc),
+                ),
+                format!(
+                    "{}{}",
+                    muted_label("wf:", tc),
+                    tokens::SUCCESS.paint(SYM_RUNNING, tc),
+                ),
+            ],
+        };
+        segments.push(adaptive_segment(variants, 20));
     }
 
     if !args.no_integrations_remote_tasks
@@ -2527,6 +2554,7 @@ mod tests {
                     total_tokens: Some(200),
                     agent_count: Some(1),
                     workflow_progress: vec![agent_progress("done")],
+                    ..Default::default()
                 },
                 WorkflowRun {
                     run_id: "active".to_string(),
@@ -2536,6 +2564,7 @@ mod tests {
                     total_tokens: Some(100),
                     agent_count: Some(2),
                     workflow_progress: vec![agent_progress("done"), agent_progress("running")],
+                    ..Default::default()
                 },
             ],
             remote_tasks: vec![RemoteTask {
@@ -2880,6 +2909,7 @@ mod tests {
                     agent_progress("done"),
                     agent_progress("running"),
                 ],
+                ..Default::default()
             }],
             remote_tasks: vec![RemoteTask {
                 task_id: "t1".to_string(),
@@ -2924,6 +2954,7 @@ mod tests {
                 total_tokens: Some(500),
                 agent_count: Some(6),
                 workflow_progress: vec![],
+                ..Default::default()
             }],
             remote_tasks: vec![],
         };

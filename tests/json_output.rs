@@ -776,6 +776,7 @@ fn json_output_includes_workflows_and_remote_tasks() {
                     state: Some("running".to_string()),
                 },
             ],
+            ..Default::default()
         }],
         remote_tasks: vec![RemoteTask {
             task_id: "t1".to_string(),
