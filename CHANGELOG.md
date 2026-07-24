@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [2.7.0](https://github.com/camjac251/rust-statusline/compare/v2.6.5...v2.7.0) - 2026-07-24
+
+### Added
+
+- *(pricing)* add Claude Opus 5 and Sonnet 5
+
 ## [2.6.5](https://github.com/camjac251/rust-statusline/compare/v2.6.4...v2.6.5) - 2026-07-24
 
 ### Fixed
