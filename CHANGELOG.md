@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [2.6.3](https://github.com/camjac251/rust-statusline/compare/v2.6.2...v2.6.3) - 2026-07-24
+
+### Fixed
+
+- *(usage)* refresh weekly and scoped limits when their window resets
+
 ## [2.6.2](https://github.com/camjac251/rust-statusline/compare/v2.6.1...v2.6.2) - 2026-07-24
 
 ### Fixed
