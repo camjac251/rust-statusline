@@ -206,14 +206,17 @@ fn render_task(task: &SubagentStatusTask, columns: usize, now_ms: u64, truecolor
 }
 
 fn status_glyph(status: &str, truecolor: bool) -> String {
+    // Claude Code labels an in-flight task with several synonyms (`running`,
+    // `active`, `in_progress`), and likewise for the other lifecycle states;
+    // group them so a live agent never renders as an unknown-status bullet.
     match status {
-        "running" => tokens::ACCENT.paint("●", truecolor),
-        "completed" => tokens::SUCCESS.paint("✓", truecolor),
-        "failed" => tokens::ERROR.paint("✗", truecolor),
-        "paused" => tokens::WARNING.paint("◌", truecolor),
-        "killed" => tokens::MUTED.paint("■", truecolor),
-        "pending" => tokens::MUTED.paint("○", truecolor),
-        _ => tokens::MUTED.paint("?", truecolor),
+        "running" | "active" | "in_progress" => tokens::ACCENT.paint("●", truecolor),
+        "completed" | "done" => tokens::SUCCESS.paint("✓", truecolor),
+        "failed" | "error" => tokens::ERROR.paint("✗", truecolor),
+        "paused" | "blocked" => tokens::WARNING.paint("◌", truecolor),
+        "cancelled" | "canceled" | "killed" => tokens::MUTED.paint("■", truecolor),
+        // `pending`, `queued`, and any unrecognized status share a neutral bullet.
+        _ => tokens::MUTED.paint("○", truecolor),
     }
 }
 
@@ -405,5 +408,26 @@ mod tests {
     #[test]
     fn zero_columns_hides_the_row() {
         assert_eq!(render_task(&task(), 0, 1_000, false), "");
+    }
+
+    #[test]
+    fn status_glyph_maps_claude_code_status_synonyms() {
+        // `contains` so the assertion holds whether or not colors wrap the glyph.
+        for s in ["running", "active", "in_progress"] {
+            assert!(status_glyph(s, false).contains('●'), "status {s}");
+        }
+        for s in ["completed", "done"] {
+            assert!(status_glyph(s, false).contains('✓'), "status {s}");
+        }
+        for s in ["failed", "error"] {
+            assert!(status_glyph(s, false).contains('✗'), "status {s}");
+        }
+        // pending, queued, and unrecognized statuses share a neutral bullet
+        // rather than rendering as an unknown-status marker.
+        for s in ["pending", "queued", "brand-new-status"] {
+            let glyph = status_glyph(s, false);
+            assert!(glyph.contains('○'), "status {s}");
+            assert!(!glyph.contains('?'), "status {s}");
+        }
     }
 }
