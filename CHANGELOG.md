@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## [2.6.4](https://github.com/camjac251/rust-statusline/compare/v2.6.3...v2.6.4) - 2026-07-24
+
+### Fixed
+
+- *(deps)* update dependencies and raise MSRV to 1.95
+
+### Other
+
+- *(deps)* update actions/checkout action to v7
+
 ## [2.6.3](https://github.com/camjac251/rust-statusline/compare/v2.6.2...v2.6.3) - 2026-07-24
 
 ### Fixed
