@@ -301,6 +301,15 @@ pub struct UsageSummary {
     pub stale: bool,
 }
 
+impl UsageSummary {
+    /// True when the five-hour window's reset time is at or before `now`, meaning
+    /// the cached utilization describes a window that has already rolled over and
+    /// a refetch is needed to surface the fresh percentage and next reset time.
+    pub fn window_reset_elapsed(&self, now: DateTime<Utc>) -> bool {
+        self.window.resets_at.is_some_and(|reset| reset <= now)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ExtraUsageDto {
     #[serde(default)]
@@ -388,10 +397,15 @@ pub fn get_usage_summary(claude_paths: &[PathBuf], model_id: Option<&str>) -> Op
         return None;
     }
 
-    // Try to get from persistent SQLite cache first
+    // Try to get from persistent SQLite cache first. A cached response whose
+    // five-hour window has already reset is served past its usefulness: its
+    // percentage belongs to an expired window, so fall through to a refetch that
+    // picks up the fresh (lower) percentage and the next reset time.
     if let Ok(Some(cached_json)) = crate::db::get_api_cache(API_CACHE_KEY) {
         if let Ok(summary) = serde_json::from_str::<UsageSummary>(&cached_json) {
-            return Some(summary);
+            if !summary.window_reset_elapsed(Utc::now()) {
+                return Some(summary);
+            }
         }
     }
 
@@ -856,6 +870,44 @@ mod tests {
         for var in PROXY_VARS {
             unsafe { env::remove_var(var) };
         }
+    }
+
+    fn summary_with_window_reset(reset: Option<DateTime<Utc>>) -> UsageSummary {
+        UsageSummary {
+            window: UsageLimit {
+                resets_at: reset,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn window_reset_elapsed_true_when_reset_in_past() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let summary = summary_with_window_reset(Some(now - chrono::TimeDelta::minutes(1)));
+        assert!(summary.window_reset_elapsed(now));
+    }
+
+    #[test]
+    fn window_reset_elapsed_true_at_exact_boundary() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let summary = summary_with_window_reset(Some(now));
+        assert!(summary.window_reset_elapsed(now));
+    }
+
+    #[test]
+    fn window_reset_elapsed_false_when_reset_in_future() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let summary = summary_with_window_reset(Some(now + chrono::TimeDelta::minutes(1)));
+        assert!(!summary.window_reset_elapsed(now));
+    }
+
+    #[test]
+    fn window_reset_elapsed_false_when_reset_absent() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let summary = summary_with_window_reset(None);
+        assert!(!summary.window_reset_elapsed(now));
     }
 
     #[test]

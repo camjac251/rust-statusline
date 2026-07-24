@@ -476,30 +476,42 @@ fn main() -> Result<()> {
 
     // Priority 1: Hook-provided rate_limits (from subscribers, no network call)
     // Only use if at least five_hour is present (empty rate_limits falls through to OAuth)
+    //
+    // Claude Code keeps resending the last message's rate_limits snapshot while a
+    // session sits idle, so once the five-hour window rolls over the hook's
+    // percentage and reset describe an expired window. Detect that and defer the
+    // five-hour display to the live OAuth value instead of pinning stale numbers.
+    let mut hook_five_hour_stale = false;
     if let Some(ref rl) = hook.rate_limits {
         if let Some(ref five) = rl.five_hour {
-            usage_percent_display = five.used_percentage;
-            if let Some(epoch) = five.resets_at {
-                if epoch.is_finite() && epoch > 0.0 {
-                    if let Some(reset) = chrono::DateTime::from_timestamp(epoch as i64, 0) {
-                        apply_reset(
-                            reset,
-                            now_utc,
-                            &mut reset_at_display,
-                            &mut window_anchor,
-                            &mut authoritative_remaining_minutes,
-                        );
-                    }
+            let five_reset = five
+                .resets_at
+                .filter(|e| e.is_finite() && *e > 0.0)
+                .and_then(|e| chrono::DateTime::from_timestamp(e as i64, 0))
+                .map(claude_statusline::usage::normalize_reset_time);
+            hook_five_hour_stale = five_reset.is_some_and(|reset| now_utc >= reset);
+
+            if !hook_five_hour_stale {
+                usage_percent_display = five.used_percentage;
+                if let Some(reset) = five_reset {
+                    apply_reset(
+                        reset,
+                        now_utc,
+                        &mut reset_at_display,
+                        &mut window_anchor,
+                        &mut authoritative_remaining_minutes,
+                    );
                 }
             }
 
-            // Build UsageSummary from hook data for display consumers
+            // Build UsageSummary from hook data for display consumers. Leave the
+            // five-hour window empty when the hook snapshot is stale so the OAuth
+            // enrichment below can fill it with the live value.
             let mut summary = UsageSummary::default();
-            summary.window.utilization = five.used_percentage;
-            summary.window.resets_at = five
-                .resets_at
-                .filter(|e| e.is_finite() && *e > 0.0)
-                .and_then(|e| chrono::DateTime::from_timestamp(e as i64, 0));
+            if !hook_five_hour_stale {
+                summary.window.utilization = five.used_percentage;
+                summary.window.resets_at = five_reset;
+            }
             if let Some(ref seven) = rl.seven_day {
                 summary.seven_day.utilization = seven.used_percentage;
                 summary.seven_day.resets_at = seven
@@ -559,6 +571,41 @@ fn main() -> Result<()> {
                 if summary.spend.is_none() {
                     summary.spend = api_summary.spend.clone();
                 }
+            }
+        }
+
+        // When the hook's five-hour snapshot was stale, the enrichment above filled
+        // the window from the live OAuth value; adopt it for the primary display.
+        if hook_five_hour_stale && usage_percent_display.is_none() {
+            if let Some(summary) = usage_summary.as_ref() {
+                usage_percent_display = summary.window.utilization;
+                if let Some(reset) = summary.window.resets_at {
+                    apply_reset(
+                        reset,
+                        now_utc,
+                        &mut reset_at_display,
+                        &mut window_anchor,
+                        &mut authoritative_remaining_minutes,
+                    );
+                }
+            }
+        }
+    }
+
+    // Degraded fallback: the hook's five-hour window is stale and no live source
+    // replaced it. Keep the last known percentage but mark it stale so the label
+    // renders with a "~" prefix, and leave the reset unset so the countdown rolls
+    // forward via the window anchor instead of freezing "0m" against a passed reset.
+    if hook_five_hour_stale && usage_percent_display.is_none() {
+        if let Some(five) = hook
+            .rate_limits
+            .as_ref()
+            .and_then(|rl| rl.five_hour.as_ref())
+        {
+            usage_percent_display = five.used_percentage;
+            if let Some(summary) = usage_summary.as_mut() {
+                summary.window.utilization = five.used_percentage;
+                summary.stale = true;
             }
         }
     }
