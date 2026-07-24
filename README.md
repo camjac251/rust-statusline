@@ -106,7 +106,7 @@ Restart Claude Code. Done.
 | **reset** | Time remaining until usage window reset |
 | **git** | Branch, commit, dirty state, ahead/behind |
 | **workspace** | Added workspace dirs and linked worktree hints from Claude Code |
-| **agents** | Live agent-panel rows with status, model, context usage, burn rate, elapsed time, and current task |
+| **agents** | Live agent-panel rows: name, model, context usage, burn rate, elapsed time, and current task (Claude Code draws the status glyph in its own gutter) |
 
 ---
 

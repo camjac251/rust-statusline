@@ -130,11 +130,6 @@ fn render_task(task: &SubagentStatusTask, columns: usize, now_ms: u64, truecolor
         return String::new();
     }
 
-    let glyph = status_glyph(&task.status, truecolor);
-    if columns == 1 {
-        return glyph;
-    }
-
     let name = task
         .name
         .as_deref()
@@ -142,81 +137,99 @@ fn render_task(task: &SubagentStatusTask, columns: usize, now_ms: u64, truecolor
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| task_type_label(&task.task_type));
-    let model = task.model.as_deref().map(model_label);
-    let tokens = token_label(task.token_count, task.context_window_size);
-    let elapsed = elapsed_label(now_ms.saturating_sub(task.start_time));
-    let detail = (!task.label.trim().is_empty())
-        .then(|| task.label.trim())
-        .or_else(|| (!task.description.trim().is_empty()).then(|| task.description.trim()));
 
-    let burn = tokens_per_minute(&task.token_samples).map(burn_label);
+    // Claude Code draws its own status bullet in the gutter and hands us the
+    // width that remains (see the module note), so the row body is pure
+    // information: leading with our own bullet would double the gutter glyph.
+    let name_c = tokens::ACCENT.paint(&name, truecolor);
+    let model_c = task
+        .model
+        .as_deref()
+        .map(model_label)
+        .map(|model| model_token(&model).paint(&model, truecolor));
+    let tokens_c = token_label(task.token_count, task.context_window_size, truecolor);
+    // Burn is a throughput metric, not an alarm, so it shares the dim-white
+    // tier with the token count; the only pressure color in a row is the
+    // context percent.
+    let burn_c = tokens_per_minute(&task.token_samples)
+        .map(burn_label)
+        .map(|burn| tokens::PRIMARY_DIM.paint(&burn, truecolor));
+    let elapsed_c = tokens::MUTED.paint(
+        &elapsed_label(now_ms.saturating_sub(task.start_time)),
+        truecolor,
+    );
+    let detail_c = (!task.label.trim().is_empty())
+        .then(|| task.label.trim())
+        .or_else(|| (!task.description.trim().is_empty()).then(|| task.description.trim()))
+        .map(|detail| tokens::PRIMARY_DIM.paint(detail, truecolor));
+
+    let sep = format!(" {} ", tokens::MUTED.paint("·", truecolor));
 
     // The burn chip rides only the richest variant so width reduction sheds it
     // before any other field.
-    let mut with_burn = vec![name.as_str()];
-    if let Some(model) = model.as_deref() {
+    let mut with_burn = vec![name_c.as_str()];
+    if let Some(model) = model_c.as_deref() {
         with_burn.push(model);
     }
-    with_burn.push(tokens.as_str());
-    if let Some(burn) = burn.as_deref() {
+    with_burn.push(tokens_c.as_str());
+    if let Some(burn) = burn_c.as_deref() {
         with_burn.push(burn);
     }
-    with_burn.push(elapsed.as_str());
-    if let Some(detail) = detail {
+    with_burn.push(elapsed_c.as_str());
+    if let Some(detail) = detail_c.as_deref() {
         with_burn.push(detail);
     }
 
-    let mut full = vec![name.as_str()];
-    if let Some(model) = model.as_deref() {
+    let mut full = vec![name_c.as_str()];
+    if let Some(model) = model_c.as_deref() {
         full.push(model);
     }
-    full.push(tokens.as_str());
-    full.push(elapsed.as_str());
-    if let Some(detail) = detail {
+    full.push(tokens_c.as_str());
+    full.push(elapsed_c.as_str());
+    if let Some(detail) = detail_c.as_deref() {
         full.push(detail);
     }
 
-    let mut without_detail = vec![name.as_str()];
-    if let Some(model) = model.as_deref() {
+    let mut without_detail = vec![name_c.as_str()];
+    if let Some(model) = model_c.as_deref() {
         without_detail.push(model);
     }
-    without_detail.push(tokens.as_str());
-    without_detail.push(elapsed.as_str());
+    without_detail.push(tokens_c.as_str());
+    without_detail.push(elapsed_c.as_str());
 
     let variants = [
-        with_burn.join(" · "),
-        full.join(" · "),
-        without_detail.join(" · "),
-        [name.as_str(), tokens.as_str(), elapsed.as_str()].join(" · "),
-        [name.as_str(), tokens.as_str()].join(" · "),
-        name,
+        with_burn.join(sep.as_str()),
+        full.join(sep.as_str()),
+        without_detail.join(sep.as_str()),
+        [name_c.as_str(), tokens_c.as_str(), elapsed_c.as_str()].join(sep.as_str()),
+        [name_c.as_str(), tokens_c.as_str()].join(sep.as_str()),
+        name_c.clone(),
     ];
-    let body_width = columns.saturating_sub(2);
-    let body = variants
-        .iter()
-        .find(|variant| visible_width(variant) <= body_width)
-        .cloned()
-        .unwrap_or_else(|| truncate_with_ellipsis(&variants[5], body_width));
 
-    if body.is_empty() {
-        glyph
-    } else {
-        format!("{glyph} {body}")
-    }
+    variants
+        .iter()
+        .find(|variant| visible_width(variant) <= columns)
+        .cloned()
+        .unwrap_or_else(|| {
+            // Even the bare name overflows: truncate on visible width first, so
+            // the accent color wraps the already-shortened text and no escape
+            // sequence is ever cut mid-flight.
+            tokens::ACCENT.paint(&truncate_with_ellipsis(&name, columns), truecolor)
+        })
 }
 
-fn status_glyph(status: &str, truecolor: bool) -> String {
-    // Claude Code labels an in-flight task with several synonyms (`running`,
-    // `active`, `in_progress`), and likewise for the other lifecycle states;
-    // group them so a live agent never renders as an unknown-status bullet.
-    match status {
-        "running" | "active" | "in_progress" => tokens::ACCENT.paint("●", truecolor),
-        "completed" | "done" => tokens::SUCCESS.paint("✓", truecolor),
-        "failed" | "error" => tokens::ERROR.paint("✗", truecolor),
-        "paused" | "blocked" => tokens::WARNING.paint("◌", truecolor),
-        "cancelled" | "canceled" | "killed" => tokens::MUTED.paint("■", truecolor),
-        // `pending`, `queued`, and any unrecognized status share a neutral bullet.
-        _ => tokens::MUTED.paint("○", truecolor),
+fn model_token(label: &str) -> tokens::ColorToken {
+    let label = label.to_lowercase();
+    if label.contains("fable") || label.contains("mythos") {
+        tokens::MODEL_FABLE
+    } else if label.contains("opus") {
+        tokens::MODEL_OPUS
+    } else if label.contains("sonnet") {
+        tokens::MODEL_SONNET
+    } else if label.contains("haiku") {
+        tokens::MODEL_HAIKU
+    } else {
+        tokens::PRIMARY
     }
 }
 
@@ -236,18 +249,27 @@ fn model_label(model: &str) -> String {
         .to_string()
 }
 
-fn token_label(token_count: u64, context_window_size: Option<u64>) -> String {
+fn token_label(token_count: u64, context_window_size: Option<u64>, truecolor: bool) -> String {
     match context_window_size.filter(|limit| *limit > 0) {
         Some(limit) => {
             let percent = ((token_count as f64 / limit as f64) * 100.0).round() as u64;
+            let pct_text = format!("{percent}%");
+            let pct_token = tokens::gradient(percent as f64, 100.0);
+            // Match the main line: pressure gradient on the percent, bold once it
+            // crosses the danger line.
+            let pct = if percent >= 80 {
+                pct_token.bold(&pct_text, truecolor)
+            } else {
+                pct_token.paint(&pct_text, truecolor)
+            };
             format!(
-                "{}/{} {}%",
-                format_tokens(token_count),
-                format_tokens(limit),
-                percent
+                "{}/{} {}",
+                tokens::PRIMARY_DIM.paint(&format_tokens(token_count), truecolor),
+                tokens::MUTED.paint(&format_tokens(limit), truecolor),
+                pct
             )
         }
-        None => format_tokens(token_count),
+        None => tokens::PRIMARY_DIM.paint(&format_tokens(token_count), truecolor),
     }
 }
 
@@ -318,6 +340,25 @@ fn truncate_with_ellipsis(value: &str, max_width: usize) -> String {
 mod tests {
     use super::*;
 
+    /// Strip ANSI SGR sequences so assertions read the visible text regardless
+    /// of the coloring the row now applies.
+    fn plain(value: &str) -> String {
+        let mut output = String::new();
+        let mut in_escape = false;
+        for ch in value.chars() {
+            if in_escape {
+                if ch.is_ascii_alphabetic() {
+                    in_escape = false;
+                }
+            } else if ch == '\u{1b}' {
+                in_escape = true;
+            } else {
+                output.push(ch);
+            }
+        }
+        output
+    }
+
     fn task() -> SubagentStatusTask {
         SubagentStatusTask {
             id: "agent-test".to_string(),
@@ -338,13 +379,30 @@ mod tests {
 
     #[test]
     fn renders_full_task_details() {
-        let content = render_task(&task(), 120, 121_000, false);
+        let content = plain(&render_task(&task(), 120, 121_000, false));
         assert!(content.contains("Explore"));
         assert!(content.contains("Opus 4.8"));
         assert!(content.contains("48.2K/1M 5%"));
         assert!(content.contains("217.0K/m"));
         assert!(content.contains("2m"));
         assert!(content.contains("tracing transcript entries"));
+    }
+
+    #[test]
+    fn omits_leading_status_bullet_so_it_does_not_double_the_gutter() {
+        // Claude Code paints the status glyph in the gutter; our row body must
+        // not begin with one, or the panel shows a doubled circle.
+        let content = plain(&render_task(&task(), 120, 121_000, false));
+        assert!(
+            content.starts_with("Explore"),
+            "row should open with the agent name, got: {content}"
+        );
+        for bullet in ['●', '○', '◯', '◌'] {
+            assert!(
+                !content.contains(bullet),
+                "row leaked status bullet {bullet}"
+            );
+        }
     }
 
     #[test]
@@ -411,23 +469,11 @@ mod tests {
     }
 
     #[test]
-    fn status_glyph_maps_claude_code_status_synonyms() {
-        // `contains` so the assertion holds whether or not colors wrap the glyph.
-        for s in ["running", "active", "in_progress"] {
-            assert!(status_glyph(s, false).contains('●'), "status {s}");
-        }
-        for s in ["completed", "done"] {
-            assert!(status_glyph(s, false).contains('✓'), "status {s}");
-        }
-        for s in ["failed", "error"] {
-            assert!(status_glyph(s, false).contains('✗'), "status {s}");
-        }
-        // pending, queued, and unrecognized statuses share a neutral bullet
-        // rather than rendering as an unknown-status marker.
-        for s in ["pending", "queued", "brand-new-status"] {
-            let glyph = status_glyph(s, false);
-            assert!(glyph.contains('○'), "status {s}");
-            assert!(!glyph.contains('?'), "status {s}");
-        }
+    fn colors_the_model_by_family() {
+        assert_eq!(model_token("Opus 4.8").rgb, tokens::MODEL_OPUS.rgb);
+        assert_eq!(model_token("Sonnet 4.6").rgb, tokens::MODEL_SONNET.rgb);
+        assert_eq!(model_token("Fable 5").rgb, tokens::MODEL_FABLE.rgb);
+        assert_eq!(model_token("Haiku 4.5").rgb, tokens::MODEL_HAIKU.rgb);
+        assert_eq!(model_token("some-unknown-model").rgb, tokens::PRIMARY.rgb);
     }
 }

@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="80" viewBox="0 0 1240 80">
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="156" viewBox="0 0 1240 156">
   <defs>
     <style>
       .bg { fill: #1a1b26; }
@@ -7,6 +7,9 @@
       .white { fill: #ffffff; }
       .blue { fill: #60A5FA; }
       .purple { fill: #C8A0FF; }
+      .amber { fill: #FFC864; }
+      .cyan { fill: #64DCFF; }
+      .rose { fill: #FF8CBE; }
       .red { fill: #F87171; }
       .yellow { fill: #EEE153; }
       .green { fill: #86EFAC; }
@@ -15,12 +18,12 @@
       .bold { font-weight: 700; }
     </style>
   </defs>
-  <rect class="bg" width="1240" height="80" rx="8"/>
+  <rect class="bg" width="1240" height="156" rx="8"/>
   <!-- Line 1: header -->
   <text y="28" x="16">
     <tspan class="blue">~/rust-statusline</tspan>
     <tspan class="muted"> [</tspan><tspan class="white">main@739eeef clean</tspan><tspan class="muted">]</tspan>
-    <tspan class="muted"> [</tspan><tspan class="red">Fable 5</tspan><tspan class="muted">]</tspan>
+    <tspan class="muted"> [</tspan><tspan class="rose">Fable 5</tspan><tspan class="muted">]</tspan>
     <tspan class="muted"> [</tspan><tspan class="blue">style:default</tspan><tspan class="muted">]</tspan>
   </text>
   <!-- Line 2: metrics -->
@@ -35,5 +38,32 @@
     <tspan class="muted"> │ ex:</tspan><tspan class="white">$12/988</tspan>
     <tspan class="muted"> │ reset:</tspan><tspan class="cream">2h47m</tspan><tspan class="muted"> (6pm)</tspan>
     <tspan class="muted"> │ context:</tspan><tspan class="lime bold">90.4K/1M 13%</tspan>
+  </text>
+  <!-- Agent panel: Claude Code draws the ◯ status glyph in the gutter, our decoration is everything after it -->
+  <text y="90" x="16">
+    <tspan class="muted">◯</tspan>
+    <tspan class="blue"> code-reviewer</tspan>
+    <tspan class="muted"> · </tspan><tspan class="purple">Opus 4.8</tspan>
+    <tspan class="muted"> · </tspan><tspan class="white">81.3K</tspan><tspan class="muted">/1M </tspan><tspan class="green">8%</tspan>
+    <tspan class="muted"> · </tspan><tspan class="white">163.8K/m</tspan>
+    <tspan class="muted"> · </tspan><tspan class="muted">2m</tspan>
+    <tspan class="muted"> · </tspan><tspan class="white">reviewing the render_task rewrite</tspan>
+  </text>
+  <text y="116" x="16">
+    <tspan class="muted">◯</tspan>
+    <tspan class="blue"> Explore</tspan>
+    <tspan class="muted"> · </tspan><tspan class="amber">Sonnet 5</tspan>
+    <tspan class="muted"> · </tspan><tspan class="white">168K</tspan><tspan class="muted">/1M </tspan><tspan class="green">17%</tspan>
+    <tspan class="muted"> · </tspan><tspan class="white">288K/m</tspan>
+    <tspan class="muted"> · </tspan><tspan class="muted">5m</tspan>
+    <tspan class="muted"> · </tspan><tspan class="white">tracing the OAuth usage flow</tspan>
+  </text>
+  <text y="142" x="16">
+    <tspan class="muted">◯</tspan>
+    <tspan class="blue"> test-engineer</tspan>
+    <tspan class="muted"> · </tspan><tspan class="cyan">Haiku 4.5</tspan>
+    <tspan class="muted"> · </tspan><tspan class="white">179K</tspan><tspan class="muted">/200K </tspan><tspan class="red bold">90%</tspan>
+    <tspan class="muted"> · </tspan><tspan class="muted">1m</tspan>
+    <tspan class="muted"> · </tspan><tspan class="white">covering window calc edge cases</tspan>
   </text>
 </svg>
