@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## [2.6.2](https://github.com/camjac251/rust-statusline/compare/v2.6.1...v2.6.2) - 2026-07-24
+
+### Fixed
+
+- *(subagent)* map Claude Code task status synonyms to glyphs
+- *(display)* show live workflow progress from the run journal
+
 ## [2.6.1](https://github.com/camjac251/rust-statusline/compare/v2.6.0...v2.6.1) - 2026-07-24
 
 ### Fixed
