@@ -117,12 +117,12 @@ Config: `release-plz.toml` (git-only, no crates.io publish, no CHANGELOG.md)
 - Tests on Ubuntu, macOS, Windows with stable Rust
 - All feature combinations tested
 - Binary size < 7MB on Linux
-- MSRV: Rust 1.88.0
+- MSRV: Rust 1.95.0
 
 ## Constraints
 
 - **Binary size**: Release < 7MB (CI enforced); currently ~6.5MB on Linux, so weigh new dependencies against the remaining headroom
-- **MSRV**: 1.88.0, edition 2024
+- **MSRV**: 1.95.0, edition 2024
 - **Pricing**: Compile-time embedded; override with all four `CLAUDE_PRICE_*` env vars
 - **Cache**: SQLite at `~/.claude/statusline.db` with session rows and a usage event ledger (WAL mode, concurrent-safe)
 - **Time format**: Auto-detects locale; override with `CLAUDE_TIME_FORMAT` or `--time`

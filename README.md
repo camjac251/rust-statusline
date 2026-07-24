@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/camjac251/rust-statusline/actions/workflows/ci.yml/badge.svg)](https://github.com/camjac251/rust-statusline/actions/workflows/ci.yml)
 [![Release](https://github.com/camjac251/rust-statusline/actions/workflows/release.yml/badge.svg)](https://github.com/camjac251/rust-statusline/actions/workflows/release.yml)
-[![Rust](https://img.shields.io/badge/rust-1.88+-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.95+-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A fast, single-binary statusline for [Claude Code](https://code.claude.com/docs). Parses session transcripts and the OAuth usage API to show real-time metrics in one line.
@@ -57,7 +57,7 @@ curl -fsSL https://github.com/camjac251/rust-statusline/releases/latest/download
 
 ### Option 3: Build from Source
 
-Requires Rust 1.88+:
+Requires Rust 1.95+:
 
 ```bash
 git clone https://github.com/camjac251/rust-statusline
@@ -585,7 +585,7 @@ cargo clippy --all-targets --all-features -- -D warnings  # lint
 cargo test --all-features --verbose                    # test
 ```
 
-CI runs tests across Ubuntu, macOS, and Windows with stable Rust, checks MSRV 1.88.0, exercises all feature combinations, and enforces a 7 MB binary size limit.
+CI runs tests across Ubuntu, macOS, and Windows with stable Rust, checks MSRV 1.95.0, exercises all feature combinations, and enforces a 7 MB binary size limit.
 
 ---
 
