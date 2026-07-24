@@ -188,7 +188,8 @@ pub(crate) fn static_pricing_lookup(model_id: &str) -> Option<Pricing> {
         let in_pt = 10e-6; // $10 / 1M
         return Some(Pricing::from_input_multipliers(in_pt, 50e-6));
     }
-    if m.contains("opus-4-5")
+    if m.contains("opus-5")
+        || m.contains("opus-4-5")
         || m.contains("opus-4-6")
         || m.contains("opus-4-7")
         || m.contains("opus-4-8")
@@ -200,7 +201,7 @@ pub(crate) fn static_pricing_lookup(model_id: &str) -> Option<Pricing> {
         let in_pt = 15e-6; // $15 / 1M
         return Some(Pricing::from_input_multipliers(in_pt, 75e-6));
     }
-    if m.contains("sonnet-4-5") || m.contains("sonnet-4-6") {
+    if m.contains("sonnet-5") || m.contains("sonnet-4-5") || m.contains("sonnet-4-6") {
         let in_pt = 3e-6; // $3 / 1M
         return Some(Pricing::from_input_multipliers(in_pt, 15e-6));
     }
@@ -357,11 +358,13 @@ fn canonical_pricing_key(model_id: &str) -> Option<&'static str> {
     let ordered = [
         ("fable-5", "claude-fable-5"),
         ("mythos-5", "claude-mythos-5"),
+        ("opus-5", "claude-opus-5"),
         ("opus-4-8", "claude-opus-4-8"),
         ("opus-4-7", "claude-opus-4-7"),
         ("opus-4-6", "claude-opus-4-6"),
         ("opus-4-5", "claude-opus-4-5"),
         ("opus-4-1", "claude-opus-4-1"),
+        ("sonnet-5", "claude-sonnet-5"),
         ("sonnet-4-6", "claude-sonnet-4-6"),
         ("sonnet-4-5", "claude-sonnet-4-5"),
         ("haiku-4-5", "claude-haiku-4-5"),
@@ -634,14 +637,52 @@ mod tests {
     }
 
     #[test]
+    fn test_opus_5_pricing() {
+        let p = pricing_for_model("claude-opus-5").unwrap();
+        assert!((p.in_per_tok - 5e-6).abs() < 1e-10);
+        assert!((p.out_per_tok - 25e-6).abs() < 1e-10);
+        assert!((p.cache_create_per_tok - 6.25e-6).abs() < 1e-10);
+        assert!((p.cache_create_1h_per_tok - 10e-6).abs() < 1e-10);
+        assert!((p.cache_read_per_tok - 0.5e-6).abs() < 1e-10);
+        // Opus 5 resolves to the embedded entry, not the family heuristic.
+        assert_eq!(
+            pricing_source_for_model("claude-opus-5"),
+            PricingSource::Embedded
+        );
+        // Provider-prefixed and 1M-suffixed IDs resolve to the same entry.
+        let prefixed = pricing_for_model("us.anthropic.claude-opus-5").unwrap();
+        assert!((prefixed.in_per_tok - 5e-6).abs() < 1e-10);
+        let one_m = pricing_for_model("claude-opus-5[1m]").unwrap();
+        assert!((one_m.out_per_tok - 25e-6).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_sonnet_5_pricing() {
+        let p = pricing_for_model("claude-sonnet-5").unwrap();
+        assert!((p.in_per_tok - 3e-6).abs() < 1e-10);
+        assert!((p.out_per_tok - 15e-6).abs() < 1e-10);
+        assert!((p.cache_create_per_tok - 3.75e-6).abs() < 1e-10);
+        assert!((p.cache_create_1h_per_tok - 6e-6).abs() < 1e-10);
+        assert!((p.cache_read_per_tok - 0.3e-6).abs() < 1e-10);
+        assert_eq!(
+            pricing_source_for_model("claude-sonnet-5"),
+            PricingSource::Embedded
+        );
+    }
+
+    #[test]
     fn test_fast_mode_multiplier() {
-        // Fast mode: Opus 4.8 is $10/$50 (2x base), Opus 4.6/4.7 are $30/$150 (6x base)
+        // Fast mode: Opus 5 and Opus 4.8 share the $10/$50 tier (2x base), Opus
+        // 4.6/4.7 are $30/$150 (6x base).
+        assert!((fast_mode_multiplier("claude-opus-5") - 2.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("claude-opus-4-8") - 2.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("claude-opus-4-7") - 6.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("claude-opus-4-6") - 6.0).abs() < 1e-10);
+        assert!((fast_mode_multiplier("us.anthropic.claude-opus-5") - 2.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("us.anthropic.claude-opus-4-8") - 2.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("us.anthropic.claude-opus-4-6-v1") - 6.0).abs() < 1e-10);
         // Other models have no fast mode (1x)
+        assert!((fast_mode_multiplier("claude-sonnet-5") - 1.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("claude-sonnet-4-6") - 1.0).abs() < 1e-10);
         assert!((fast_mode_multiplier("claude-sonnet-4-5") - 1.0).abs() < 1e-10);
     }

@@ -418,7 +418,7 @@ Pass `--json` for machine-readable output. Key fields:
 
 ```json
 {
-  "model": { "id": "claude-opus-4-6", "display_name": "Claude Opus 4.6", "fast_mode": false },
+  "model": { "id": "claude-opus-5", "display_name": "Claude Opus 5", "fast_mode": false },
   "workspace": {
     "current_dir": "/repo",
     "project_dir": "/repo",
@@ -436,7 +436,7 @@ Pass `--json` for machine-readable output. Key fields:
         "output_tokens": 2000,
         "agent_type": "code-reviewer",
         "name": "reviewer",
-        "model": "claude-opus-4-6",
+        "model": "claude-opus-5",
         "description": "review the diff",
         "spawn_depth": 1,
         "parent_agent_id": "root-agent"
