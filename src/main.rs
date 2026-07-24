@@ -513,11 +513,19 @@ fn main() -> Result<()> {
                 summary.window.resets_at = five_reset;
             }
             if let Some(ref seven) = rl.seven_day {
-                summary.seven_day.utilization = seven.used_percentage;
-                summary.seven_day.resets_at = seven
+                let seven_reset = seven
                     .resets_at
                     .filter(|e| e.is_finite() && *e > 0.0)
                     .and_then(|e| chrono::DateTime::from_timestamp(e as i64, 0));
+                // The weekly window suffers the same idle-snapshot staleness as
+                // five_hour: once it rolls over, the hook keeps resending the
+                // expired percentage. Leave it empty so the OAuth enrichment
+                // below supplies the live value instead of pinning the old one.
+                let seven_stale = seven_reset.is_some_and(|reset| now_utc >= reset);
+                if !seven_stale {
+                    summary.seven_day.utilization = seven.used_percentage;
+                    summary.seven_day.resets_at = seven_reset;
+                }
             }
             usage_summary = Some(summary);
         }

@@ -308,6 +308,24 @@ impl UsageSummary {
     pub fn window_reset_elapsed(&self, now: DateTime<Utc>) -> bool {
         self.window.resets_at.is_some_and(|reset| reset <= now)
     }
+
+    /// True when any rolling usage window's reset has passed, so some cached
+    /// percentage describes an expired window and a refetch is due. Covers the
+    /// five-hour window, every seven-day window, and the scoped weekly rows.
+    /// Deliberately excludes `cinder_cove`: its `resets_at` is a one-time credit
+    /// expiry, not a rolling reset, so checking it would refetch on every call
+    /// once the credit lapsed.
+    pub fn any_window_reset_elapsed(&self, now: DateTime<Utc>) -> bool {
+        let elapsed =
+            |resets_at: Option<DateTime<Utc>>| resets_at.is_some_and(|reset| reset <= now);
+        self.window_reset_elapsed(now)
+            || elapsed(self.seven_day.resets_at)
+            || elapsed(self.seven_day_opus.resets_at)
+            || elapsed(self.seven_day_sonnet.resets_at)
+            || elapsed(self.seven_day_oauth_apps.resets_at)
+            || elapsed(self.seven_day_cowork.resets_at)
+            || self.limits.iter().any(|limit| elapsed(limit.resets_at))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -398,12 +416,12 @@ pub fn get_usage_summary(claude_paths: &[PathBuf], model_id: Option<&str>) -> Op
     }
 
     // Try to get from persistent SQLite cache first. A cached response whose
-    // five-hour window has already reset is served past its usefulness: its
-    // percentage belongs to an expired window, so fall through to a refetch that
-    // picks up the fresh (lower) percentage and the next reset time.
+    // five-hour, weekly, or scoped window has already reset is served past its
+    // usefulness: some percentage belongs to an expired window, so fall through
+    // to a refetch that picks up the fresh percentages and next reset times.
     if let Ok(Some(cached_json)) = crate::db::get_api_cache(API_CACHE_KEY) {
         if let Ok(summary) = serde_json::from_str::<UsageSummary>(&cached_json) {
-            if !summary.window_reset_elapsed(Utc::now()) {
+            if !summary.any_window_reset_elapsed(Utc::now()) {
                 return Some(summary);
             }
         }
@@ -908,6 +926,48 @@ mod tests {
         let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
         let summary = summary_with_window_reset(None);
         assert!(!summary.window_reset_elapsed(now));
+    }
+
+    #[test]
+    fn any_window_reset_elapsed_triggers_on_seven_day_while_five_hour_is_fresh() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut summary = summary_with_window_reset(Some(now + chrono::TimeDelta::hours(1)));
+        summary.seven_day.resets_at = Some(now - chrono::TimeDelta::minutes(1));
+        assert!(summary.any_window_reset_elapsed(now));
+        // The five-hour window alone is still fresh.
+        assert!(!summary.window_reset_elapsed(now));
+    }
+
+    #[test]
+    fn any_window_reset_elapsed_triggers_on_scoped_limit() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut summary = UsageSummary::default();
+        summary.limits.push(UsageApiLimit {
+            resets_at: Some(now - chrono::TimeDelta::seconds(30)),
+            ..Default::default()
+        });
+        assert!(summary.any_window_reset_elapsed(now));
+    }
+
+    #[test]
+    fn any_window_reset_elapsed_false_when_all_future_or_absent() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut summary = summary_with_window_reset(Some(now + chrono::TimeDelta::hours(1)));
+        summary.seven_day.resets_at = Some(now + chrono::TimeDelta::hours(48));
+        summary.limits.push(UsageApiLimit {
+            resets_at: Some(now + chrono::TimeDelta::hours(24)),
+            ..Default::default()
+        });
+        assert!(!summary.any_window_reset_elapsed(now));
+    }
+
+    #[test]
+    fn any_window_reset_elapsed_ignores_cinder_cove_expiry() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut summary = UsageSummary::default();
+        // A lapsed one-time promo credit must not force perpetual refetching.
+        summary.cinder_cove.resets_at = Some(now - chrono::TimeDelta::hours(72));
+        assert!(!summary.any_window_reset_elapsed(now));
     }
 
     #[test]
