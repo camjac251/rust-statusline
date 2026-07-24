@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [2.6.1](https://github.com/camjac251/rust-statusline/compare/v2.6.0...v2.6.1) - 2026-07-24
+
+### Fixed
+
+- *(usage)* refresh five-hour usage when the window resets while idle
+
 ## [2.6.0](https://github.com/camjac251/rust-statusline/compare/v2.5.7...v2.6.0) - 2026-07-23
 
 ### Added
