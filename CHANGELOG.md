@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## [2.6.5](https://github.com/camjac251/rust-statusline/compare/v2.6.4...v2.6.5) - 2026-07-24
+
+### Fixed
+
+- *(subagent)* stop doubling Claude Code's status bullet
+- *(deps)* drop sha2 to 0.10 to dedupe the crypto stack
+
+### Other
+
+- *(db)* deflake the api-cache expiring-lock test
+
 ## [2.6.4](https://github.com/camjac251/rust-statusline/compare/v2.6.3...v2.6.4) - 2026-07-24
 
 ### Fixed
