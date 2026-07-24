@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [2.8.0](https://github.com/camjac251/rust-statusline/compare/v2.7.0...v2.8.0) - 2026-07-24
+
+### Added
+
+- *(subagent)* show reasoning effort on agent-panel rows
+
 ## [2.7.0](https://github.com/camjac251/rust-statusline/compare/v2.6.5...v2.7.0) - 2026-07-24
 
 ### Added
