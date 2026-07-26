@@ -220,7 +220,13 @@ fn render_task(task: &SubagentStatusTask, columns: usize, now_ms: u64, truecolor
 
 fn model_token(label: &str) -> tokens::ColorToken {
     let label = label.to_lowercase();
-    if label.contains("fable") || label.contains("mythos") {
+    if label.contains("gpt-5.6-sol") || label.contains("gpt-5.6 sol") {
+        tokens::MODEL_GPT_SOL
+    } else if label.contains("gpt-5.6-terra") || label.contains("gpt-5.6 terra") {
+        tokens::MODEL_GPT_TERRA
+    } else if label.contains("gpt-5.6-luna") || label.contains("gpt-5.6 luna") {
+        tokens::MODEL_GPT_LUNA
+    } else if label.contains("fable") || label.contains("mythos") {
         tokens::MODEL_FABLE
     } else if label.contains("opus") {
         tokens::MODEL_OPUS
@@ -526,6 +532,12 @@ mod tests {
         assert_eq!(model_token("Sonnet 4.6").rgb, tokens::MODEL_SONNET.rgb);
         assert_eq!(model_token("Fable 5").rgb, tokens::MODEL_FABLE.rgb);
         assert_eq!(model_token("Haiku 4.5").rgb, tokens::MODEL_HAIKU.rgb);
+        assert_eq!(model_token("GPT-5.6 Sol").rgb, tokens::MODEL_GPT_SOL.rgb);
+        assert_eq!(
+            model_token("GPT-5.6 Terra").rgb,
+            tokens::MODEL_GPT_TERRA.rgb
+        );
+        assert_eq!(model_token("GPT-5.6 Luna").rgb, tokens::MODEL_GPT_LUNA.rgb);
         assert_eq!(model_token("some-unknown-model").rgb, tokens::PRIMARY.rgb);
     }
 }

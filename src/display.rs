@@ -735,8 +735,15 @@ pub fn model_colored_name(model_id: &str, display: &str, args: &Args) -> String 
     let lower_disp = display.to_lowercase();
     let tc = is_truecolor_enabled(args);
 
+    let token = if lower_id.contains("gpt-5.6-sol") || lower_disp.contains("gpt-5.6 sol") {
+        tokens::MODEL_GPT_SOL
+    } else if lower_id.contains("gpt-5.6-terra") || lower_disp.contains("gpt-5.6 terra") {
+        tokens::MODEL_GPT_TERRA
+    } else if lower_id.contains("gpt-5.6-luna") || lower_disp.contains("gpt-5.6 luna") {
+        tokens::MODEL_GPT_LUNA
+    }
     // Fable/Mythos tier -> Rose
-    let token = if lower_id.contains("fable")
+    else if lower_id.contains("fable")
         || lower_disp.contains("fable")
         || lower_id.contains("mythos")
         || lower_disp.contains("mythos")
@@ -2623,6 +2630,38 @@ mod tests {
         );
         // Mythos 5 keeps the plain family tag at the narrowest width.
         assert_eq!(tiny_model_label("claude-mythos-5", "Mythos 5"), "Mythos");
+    }
+
+    #[test]
+    #[cfg(feature = "colors")]
+    #[serial]
+    fn gpt_56_models_use_distinct_truecolor_identity_palette() {
+        let env = terminal_env_guard();
+        env.remove("NO_COLOR");
+        let args = Args::parse_from(["claude_statusline", "--truecolor"]);
+
+        for (model_id, display, rgb) in [
+            (
+                "clodex:openai-oauth:gpt-5.6-sol",
+                "GPT-5.6 Sol",
+                (255, 122, 89),
+            ),
+            (
+                "clodex:openai-oauth:gpt-5.6-terra",
+                "GPT-5.6 Terra",
+                (105, 219, 148),
+            ),
+            (
+                "clodex:openai-oauth:gpt-5.6-luna",
+                "GPT-5.6 Luna",
+                (125, 170, 255),
+            ),
+        ] {
+            let colored = model_colored_name(model_id, display, &args);
+            let escape = format!("\u{1b}[38;2;{};{};{}m", rgb.0, rgb.1, rgb.2);
+            assert!(colored.contains(&escape), "{model_id}: {colored:?}");
+            assert_eq!(strip_ansi(&colored), display);
+        }
     }
 
     #[test]

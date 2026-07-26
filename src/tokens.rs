@@ -138,6 +138,9 @@ pub const MODEL_FABLE: ColorToken = ColorToken::new((255, 140, 190), Ansi::Magen
 pub const MODEL_OPUS: ColorToken = ColorToken::new((200, 160, 255), Ansi::BrightMagenta);
 pub const MODEL_SONNET: ColorToken = ColorToken::new((255, 200, 100), Ansi::BrightYellow);
 pub const MODEL_HAIKU: ColorToken = ColorToken::new((100, 220, 255), Ansi::BrightCyan);
+pub const MODEL_GPT_SOL: ColorToken = ColorToken::new((255, 122, 89), Ansi::Red);
+pub const MODEL_GPT_TERRA: ColorToken = ColorToken::new((105, 219, 148), Ansi::Green);
+pub const MODEL_GPT_LUNA: ColorToken = ColorToken::new((125, 170, 255), Ansi::BrightBlue);
 
 // -- Semantic -----------------------------------------------------------------
 pub const SUCCESS: ColorToken = ColorToken::new((134, 239, 172), Ansi::Green);
