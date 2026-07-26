@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## [2.9.0](https://github.com/camjac251/rust-statusline/compare/v2.8.0...v2.9.0) - 2026-07-26
+
+### Added
+
+- *(display)* distinguish model families by color
+- *(pricing)* support namespaced long-context rates
+
 ## [2.8.0](https://github.com/camjac251/rust-statusline/compare/v2.7.0...v2.8.0) - 2026-07-24
 
 ### Added
