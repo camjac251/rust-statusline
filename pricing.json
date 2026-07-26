@@ -1,11 +1,32 @@
 {
   "_meta": {
-    "updated": "2026-07-24",
+    "updated": "2026-07-25",
     "currency": "USD",
     "unit": "per_token",
-    "description": "Pricing configuration for Claude models. All prices are in USD per token. Source: https://platform.claude.com/docs/en/about-claude/pricing"
+    "description": "Pricing configuration for supported models. All prices are in USD per token. Sources: https://platform.claude.com/docs/en/about-claude/pricing and https://platform.openai.com/docs/pricing"
   },
   "models": {
+    "gpt-5.6-sol": {
+      "name": "GPT-5.6 Sol",
+      "input": 5e-6,
+      "output": 3e-5,
+      "cache_create": 6.25e-6,
+      "cache_read": 5e-7
+    },
+    "gpt-5.6-terra": {
+      "name": "GPT-5.6 Terra",
+      "input": 2.5e-6,
+      "output": 1.5e-5,
+      "cache_create": 3.125e-6,
+      "cache_read": 2.5e-7
+    },
+    "gpt-5.6-luna": {
+      "name": "GPT-5.6 Luna",
+      "input": 1e-6,
+      "output": 6e-6,
+      "cache_create": 1.25e-6,
+      "cache_read": 1e-7
+    },
     "claude-fable-5": {
       "name": "Claude Fable 5",
       "input": 1e-5,
@@ -140,9 +161,27 @@
     }
   },
   "tiered_pricing": {
-    "enabled": false,
-    "comment": "No active Claude API model currently needs long-context tiered pricing; Opus 5, Opus 4.8, Sonnet 5, and Sonnet 4.6 use standard pricing across 1M tokens.",
-    "tiers": []
+    "enabled": true,
+    "comment": "GPT-5.6 requests above 272K input tokens use long-context pricing for the full request. Active Claude models use standard pricing across their full context windows.",
+    "tiers": [
+      {
+        "name": "gpt-5.6-long-context",
+        "description": "Prompts above 272K input tokens are billed at 2x input and 1.5x output for the full request.",
+        "threshold": 272000,
+        "applies_to": [
+          "gpt-5.6-sol",
+          "gpt-5.6-terra",
+          "gpt-5.6-luna"
+        ],
+        "multipliers": {
+          "input": 2.0,
+          "output": 1.5,
+          "cache_create": 2.0,
+          "cache_create_1h": 2.0,
+          "cache_read": 2.0
+        }
+      }
+    ]
   },
   "additional_costs": {
     "web_search_per_request": 0.01,

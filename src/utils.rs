@@ -46,6 +46,12 @@ pub fn claude_paths(override_env: Option<&str>) -> Vec<PathBuf> {
 
 pub fn deduce_provider_from_model(model_id: &str) -> &'static str {
     let m = model_id.to_lowercase();
+    if m.starts_with("clodex:openai-oauth:") {
+        return "openai-oauth";
+    }
+    if m.starts_with("clodex:openai:") {
+        return "openai";
+    }
     if m.contains('@') {
         return "vertex";
     }
@@ -284,6 +290,17 @@ pub fn friendly_model_name(model_id: &str, display_name: &str) -> String {
     }
 
     let id = model_id.to_lowercase();
+    let model_slug = id.rsplit(':').next().unwrap_or(&id);
+
+    let openai_name = match model_slug {
+        "gpt-5.6-sol" => Some("GPT-5.6 Sol"),
+        "gpt-5.6-terra" => Some("GPT-5.6 Terra"),
+        "gpt-5.6-luna" => Some("GPT-5.6 Luna"),
+        _ => None,
+    };
+    if let Some(name) = openai_name {
+        return name.to_string();
+    }
 
     // Strip known prefixes
     let stripped = if let Some(s) = id.strip_prefix("claude-") {
@@ -533,6 +550,29 @@ mod tests {
         assert_eq!(
             friendly_model_name("claude-haiku-4-5", "claude-haiku-4-5"),
             "Haiku 4.5"
+        );
+    }
+
+    #[test]
+    fn test_friendly_model_name_clodex_gpt_56() {
+        assert_eq!(
+            friendly_model_name(
+                "clodex:openai-oauth:gpt-5.6-sol",
+                "clodex:openai-oauth:gpt-5.6-sol"
+            ),
+            "GPT-5.6 Sol"
+        );
+    }
+
+    #[test]
+    fn test_clodex_provider_comes_from_model_namespace() {
+        assert_eq!(
+            deduce_provider_from_model("clodex:openai-oauth:gpt-5.6-sol"),
+            "openai-oauth"
+        );
+        assert_eq!(
+            deduce_provider_from_model("clodex:openai:gpt-5.6-sol"),
+            "openai"
         );
     }
 

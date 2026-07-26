@@ -498,17 +498,18 @@ pub fn apply_tiered_pricing(
     };
 
     let model_lower = model_id.to_lowercase();
+    let model_slug = model_lower.rsplit(':').next().unwrap_or(&model_lower);
 
     // Find applicable tier
     for tier in &config.tiered_pricing.tiers {
         // Check if this tier applies using exact or date-suffix matching.
         let applies = tier.applies_to.iter().any(|pattern| {
             let p = pattern.to_lowercase();
-            if model_lower == p {
+            if model_slug == p {
                 return true;
             }
             // Only match date suffixes like -20250514 (8+ digits), not version suffixes like -5, -6
-            if let Some(suffix) = model_lower.strip_prefix(&p) {
+            if let Some(suffix) = model_slug.strip_prefix(&p) {
                 if let Some(rest) = suffix.strip_prefix('-') {
                     return rest.len() >= 8 && rest.chars().all(|c| c.is_ascii_digit());
                 }
@@ -559,6 +560,25 @@ mod tests {
         let haiku_pricing = pricing_for_model("claude-haiku-4-5").unwrap();
         assert!((haiku_pricing.in_per_tok - 1e-6).abs() < 1e-10);
         assert!((haiku_pricing.out_per_tok - 5e-6).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_clodex_gpt_56_sol_pricing() {
+        let model = "clodex:openai-oauth:gpt-5.6-sol";
+        let pricing = pricing_for_model(model).unwrap();
+        assert!((pricing.in_per_tok - 5e-6).abs() < 1e-10);
+        assert!((pricing.out_per_tok - 30e-6).abs() < 1e-10);
+        assert!((pricing.cache_create_per_tok - 6.25e-6).abs() < 1e-10);
+        assert!((pricing.cache_read_per_tok - 0.5e-6).abs() < 1e-10);
+        assert_eq!(pricing_source_for_model(model), PricingSource::Embedded);
+
+        let usage = serde_json::json!({
+            "input_tokens": 200_000,
+            "output_tokens": 100_000,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+        });
+        assert!((calculate_cost_for_usage(model, &usage) - 4.0).abs() < 1e-10);
     }
 
     #[test]
@@ -808,6 +828,48 @@ mod tests {
         let tiered = apply_tiered_pricing(base, "claude-sonnet-4-6", 300_000);
         assert!((tiered.in_per_tok - base.in_per_tok).abs() < 1e-15);
         assert!((tiered.out_per_tok - base.out_per_tok).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_gpt_56_sol_long_context_tier_for_clodex_model_id() {
+        let model = "clodex:openai-oauth:gpt-5.6-sol";
+        let base = pricing_for_model(model).unwrap();
+
+        let at_threshold = apply_tiered_pricing(base, model, 272_000);
+        assert!((at_threshold.in_per_tok - base.in_per_tok).abs() < 1e-15);
+        assert!((at_threshold.out_per_tok - base.out_per_tok).abs() < 1e-15);
+
+        let long_context = apply_tiered_pricing(base, model, 272_001);
+        assert!((long_context.in_per_tok - base.in_per_tok * 2.0).abs() < 1e-15);
+        assert!((long_context.out_per_tok - base.out_per_tok * 1.5).abs() < 1e-15);
+        assert!(
+            (long_context.cache_create_per_tok - base.cache_create_per_tok * 2.0).abs() < 1e-15
+        );
+        assert!((long_context.cache_read_per_tok - base.cache_read_per_tok * 2.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_gpt_56_long_context_prices_full_request_for_each_model() {
+        let usage = serde_json::json!({
+            "input_tokens": 272_001,
+            "output_tokens": 100_000,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+        });
+
+        for (model, long_input, long_output) in [
+            ("gpt-5.6-sol", 10e-6, 45e-6),
+            ("gpt-5.6-terra", 5e-6, 22.5e-6),
+            ("gpt-5.6-luna", 2e-6, 9e-6),
+        ] {
+            let model_id = format!("clodex:openai-oauth:{model}");
+            let expected = 272_001.0 * long_input + 100_000.0 * long_output;
+            let actual = calculate_cost_for_usage(&model_id, &usage);
+            assert!(
+                (actual - expected).abs() < 1e-10,
+                "unexpected long-context cost for {model_id}: {actual}"
+            );
+        }
     }
 
     #[test]
