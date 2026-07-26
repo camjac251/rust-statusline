@@ -239,8 +239,8 @@ fn model_token(label: &str) -> tokens::ColorToken {
     }
 }
 
-/// Render the agent's effort as a colored chip on the shared low..max tier
-/// scale (cyan low -> bold pink max), matching the main line. Only the named
+/// Render the agent's effort as a colored chip on the shared none..max tier
+/// scale (muted none, cyan low -> bold pink max), matching the main line. Only the named
 /// efforts Claude Code sends for effort-capable models map to a chip; an
 /// integer level or an unrecognized/unset label yields none.
 fn effort_chip(effort: &SubagentEffort, truecolor: bool) -> Option<String> {
@@ -249,6 +249,7 @@ fn effort_chip(effort: &SubagentEffort, truecolor: bool) -> Option<String> {
     };
     let label = label.trim().to_lowercase();
     let chip = match label.as_str() {
+        "none" => tokens::EFFORT_NONE.paint(&label, truecolor),
         "low" => tokens::EFFORT_LOW.paint(&label, truecolor),
         "medium" => tokens::EFFORT_MEDIUM.paint(&label, truecolor),
         "high" => tokens::EFFORT_HIGH.paint(&label, truecolor),
@@ -417,7 +418,7 @@ mod tests {
 
     #[test]
     fn renders_named_effort_as_a_chip() {
-        for label in ["low", "medium", "high", "xhigh", "max"] {
+        for label in ["none", "low", "medium", "high", "xhigh", "max"] {
             let chip = effort_chip(&SubagentEffort::Label(label.to_string()), false)
                 .unwrap_or_else(|| panic!("expected a chip for {label}"));
             assert_eq!(plain(&chip), label);

@@ -1595,6 +1595,7 @@ fn render_header_line(
             _ => "effort:",
         };
         let effort_colored = match effort_lower.as_str() {
+            "none" => tokens::EFFORT_NONE.paint(&effort_lower, tc),
             "low" => tokens::EFFORT_LOW.paint(&effort_lower, tc),
             "medium" => tokens::EFFORT_MEDIUM.paint(&effort_lower, tc),
             "high" => tokens::EFFORT_HIGH.paint(&effort_lower, tc),

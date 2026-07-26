@@ -150,6 +150,7 @@ pub const MUTED: ColorToken = ColorToken::new((148, 163, 184), Ansi::BrightBlack
 pub const ACCENT: ColorToken = ColorToken::new((96, 165, 250), Ansi::BrightBlue);
 
 // -- Effort (heat gradient) ---------------------------------------------------
+pub const EFFORT_NONE: ColorToken = ColorToken::new((148, 163, 184), Ansi::BrightBlack);
 pub const EFFORT_LOW: ColorToken = ColorToken::new((100, 220, 255), Ansi::Cyan);
 pub const EFFORT_MEDIUM: ColorToken = ColorToken::new((255, 255, 255), Ansi::BrightWhite);
 pub const EFFORT_HIGH: ColorToken = ColorToken::new((255, 200, 100), Ansi::Yellow);
