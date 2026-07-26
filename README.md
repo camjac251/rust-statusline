@@ -9,7 +9,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.95+-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A fast, single-binary statusline for [Claude Code](https://code.claude.com/docs). Parses session transcripts and the OAuth usage API to show real-time metrics in one line.
+A fast, single-binary statusline for [Claude Code](https://code.claude.com/docs). Parses session transcripts and the OAuth usage API to show real-time metrics in one line. Provider-qualified `clodex:` model identifiers are normalized for display and embedded cost calculation, including GPT-5.6 Sol, Terra, and Luna.
 
 [Installation](#installation) · [What It Shows](#what-it-shows) · [CLI](#cli) · [JSON Output](#json-output) · [Architecture](#architecture)
 
@@ -104,6 +104,7 @@ Restart Claude Code. Done.
 | **burn** | Tokens per minute and cost per hour |
 | **context** | Token count and percentage of context window used |
 | **reset** | Time remaining until usage window reset |
+| **model** | Friendly model identity with family-specific ANSI or truecolor styling |
 | **git** | Branch, commit, dirty state, ahead/behind |
 | **workspace** | Added workspace dirs and linked worktree hints from Claude Code |
 | **agents** | Live agent-panel rows: name, model, effort, context usage, burn rate, elapsed time, and current task (Claude Code draws the status glyph in its own gutter) |
@@ -137,11 +138,37 @@ flowchart LR
     SA -->|JSONL decorations| STDOUT
 ```
 
-Pricing is embedded at compile time from `pricing.json`. The OAuth API is optional -- if no credentials are available, the tool falls back to transcript-only metrics.
+Pricing is embedded at compile time from `pricing.json`. Namespaced identifiers such as `clodex:openai-oauth:gpt-5.6-sol` retain their provider provenance while displaying a compact name such as `GPT-5.6 Sol`. The OAuth API is optional. If no credentials are available, the tool falls back to transcript-only metrics.
 
 When stdin contains Claude Code's `subagentStatusLine` task payload, the binary switches to agent-panel mode without a separate flag. It emits one `{id, content}` JSON object per task as JSONL and does not perform transcript, Git, database, or API work. Each row can carry a burn chip (e.g. `12.3K/m`) derived from the payload's token samples, which arrive one per five-second tick; tasks with fewer than two samples or no token growth omit it. Rows also carry an effort chip (`low`, `medium`, `high`, `xhigh`, `max`) colored on the same tier scale as the main line when Claude Code reports a named effort for the agent; agents whose model exposes no effort, or that report an integer level, show no chip. With `--json`, this mode emits a single structured `{"tasks": [...]}` object with the parsed task rows (snake_case keys, absent optional fields omitted) instead of the JSONL decorations; rows include a numeric `tokens_per_minute` field when the burn rate is derivable.
 
 Newer OAuth usage responses expose canonical rows through generic `limits[]` and `spend` fields. `claude_statusline` preserves those rows, uses them as fallbacks for session/weekly percentages, renders scoped weekly model rows such as `fable:24%`, and maps `spend` into the extra-usage credit token.
+
+### Model pricing and colors
+
+Embedded GPT-5.6 prices follow the [OpenAI pricing reference](https://platform.openai.com/docs/pricing). Rates below are USD per million tokens:
+
+| Model | Input | Output | Cache write | Cache read |
+|-------|------:|-------:|------------:|-----------:|
+| GPT-5.6 Sol | $5.00 | $30.00 | $6.25 | $0.50 |
+| GPT-5.6 Terra | $2.50 | $15.00 | $3.125 | $0.25 |
+| GPT-5.6 Luna | $1.00 | $6.00 | $1.25 | $0.10 |
+
+For any of these models, a request above 272,000 input tokens uses long-context pricing for the full request: input and cache tokens cost 2x, while output tokens cost 1.5x. Exactly 272,000 input tokens remains at the standard rate; 272,001 activates the long-context tier. Claude model rates continue to use the embedded [Anthropic pricing reference](https://platform.claude.com/docs/en/about-claude/pricing) across their supported context windows.
+
+Model names use a stable identity palette independent of cost, context pressure, and effort colors:
+
+| Model | Truecolor | ANSI fallback |
+|-------|-----------|---------------|
+| Fable | rose `#FF8CBE` | magenta |
+| Opus | lavender `#C8A0FF` | bright magenta |
+| Sonnet | amber `#FFC864` | bright yellow |
+| Haiku | cyan `#64DCFF` | bright cyan |
+| GPT-5.6 Sol | coral-orange `#FF7A59` | red |
+| GPT-5.6 Terra | green `#69DB94` | green |
+| GPT-5.6 Luna | periwinkle-blue `#7DAAFF` | bright blue |
+
+Truecolor is auto-detected from common terminal environment variables, and `--truecolor` or `CLAUDE_TRUECOLOR=1` forces it. [`NO_COLOR`](https://no-color.org/) disables all ANSI and truecolor styling.
 
 ---
 
@@ -395,6 +422,7 @@ usage_limits = true
 | `CLAUDE_STATUSLINE_CONFIG=...` | Explicit config file path |
 | `CLAUDE_PROMPT_CACHE_TTL_SECONDS=N` | Override prompt-cache TTL |
 | `CLAUDE_TIME_FORMAT=12` | Force 12-hour time |
+| `CLAUDE_TRUECOLOR=1` | Force 24-bit terminal colors; otherwise common truecolor terminals are auto-detected |
 | `CLAUDE_CONTEXT_LIMIT=N` | Override context window size (tokens) |
 | `CLAUDE_PROVIDER=...` | Override provider display (`firstParty` becomes `anthropic`) |
 | `CLAUDE_CONFIG_DIR=...` | Comma-separated list of Claude data roots |
