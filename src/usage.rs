@@ -10,8 +10,6 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Timelike, Utc};
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -227,16 +225,9 @@ fn parse_active_transcript_lines(lines: Vec<String>) -> ActiveTranscriptState {
 
         if entry_type == Some("system_message")
             && let Some(content) = v.get("content").and_then(|value| value.as_str())
+            && let Some(percent_used) = parse_context_warning_used_percent(content)
         {
-            if let Some(caps) = CONTEXT_AUTO_COMPACT_RE.captures(content) {
-                if let Ok(percent_left) = caps[1].parse::<u32>() {
-                    context_warning_pct = Some(100 - percent_left);
-                }
-            } else if let Some(caps) = CONTEXT_LOW_RE.captures(content)
-                && let Ok(percent_left) = caps[1].parse::<u32>()
-            {
-                context_warning_pct = Some(100 - percent_left);
-            }
+            context_warning_pct = Some(percent_used);
         }
 
         if entry_type == Some("assistant") {
@@ -543,10 +534,6 @@ impl TranscriptContext {
     }
 }
 
-// Helper: detect reset time from assistant text like "... limit reached ... resets 5am" with DST correction
-static ASSISTANT_LIMIT_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)limit\s+reached.*resets\s+(\d{1,2})\s*(am|pm)").unwrap());
-
 /// Round a reset timestamp to the nearest whole minute.
 ///
 /// `resets_at` arrives from the OAuth usage API, the Claude Code hook, and
@@ -574,28 +561,80 @@ pub fn normalize_reset_time(dt: DateTime<Utc>) -> DateTime<Utc> {
     }
 }
 
-// Context warning message patterns
-static CONTEXT_AUTO_COMPACT_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"Context left until auto-compact: (\d+)%").unwrap());
+fn parse_context_warning_used_percent(text: &str) -> Option<u32> {
+    let percent_left =
+        if let Some((_, after_prefix)) = text.split_once("Context left until auto-compact: ") {
+            after_prefix.split_once('%')?.0
+        } else {
+            let (_, after_prefix) = text.split_once("Context low (")?;
+            after_prefix.split_once("% remaining)")?.0
+        };
+    100u32.checked_sub(percent_left.parse().ok()?)
+}
 
-static CONTEXT_LOW_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"Context low \((\d+)% remaining\)").unwrap());
+fn strip_required_whitespace(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start_matches(char::is_whitespace);
+    (trimmed.len() < text.len()).then_some(trimmed)
+}
+
+fn parse_reset_hour24(after_reached: &str) -> Option<u32> {
+    let mut search = after_reached;
+    let mut parsed = None;
+
+    while let Some((_, after_resets)) = search.split_once("resets") {
+        search = after_resets;
+        let Some(after_resets) = strip_required_whitespace(after_resets) else {
+            continue;
+        };
+        let digit_count = after_resets
+            .bytes()
+            .take(2)
+            .take_while(u8::is_ascii_digit)
+            .count();
+        let Some(base_hour) = after_resets
+            .get(..digit_count)
+            .and_then(|hour| hour.parse::<u32>().ok())
+            .filter(|hour| (1..=12).contains(hour))
+        else {
+            continue;
+        };
+
+        let Some(suffix) = after_resets.get(digit_count..) else {
+            continue;
+        };
+        let suffix = suffix.trim_start_matches(char::is_whitespace);
+        if suffix.starts_with("am") {
+            parsed = Some(if base_hour == 12 { 0 } else { base_hour });
+        } else if suffix.starts_with("pm") {
+            parsed = Some(if base_hour == 12 { 12 } else { base_hour + 12 });
+        }
+    }
+
+    parsed
+}
+
+fn parse_limit_reset_hour24(text: &str) -> Option<u32> {
+    let lowercase = text.to_ascii_lowercase();
+    let mut search = lowercase.as_str();
+
+    loop {
+        let (_, after_limit) = search.split_once("limit")?;
+        search = after_limit;
+        let Some(after_limit) = strip_required_whitespace(after_limit) else {
+            continue;
+        };
+        let Some(after_reached) = after_limit.strip_prefix("reached") else {
+            continue;
+        };
+        let after_reached = after_reached.split(['\n', '\r']).next()?;
+        if let Some(hour24) = parse_reset_hour24(after_reached) {
+            return Some(hour24);
+        }
+    }
+}
 
 fn parse_am_pm_reset(ts_utc: DateTime<Utc>, text: &str) -> Option<DateTime<Utc>> {
-    let caps = ASSISTANT_LIMIT_RE.captures(text)?;
-    let hour_s = caps.get(1)?.as_str();
-    let ampm = caps.get(2)?.as_str().to_lowercase();
-    let base_hour: u32 = hour_s.parse().ok()?;
-    if base_hour == 0 || base_hour > 12 {
-        return None;
-    }
-    let hour24: u32 = if ampm == "am" {
-        if base_hour == 12 { 0 } else { base_hour }
-    } else if base_hour == 12 {
-        12
-    } else {
-        (base_hour + 12) % 24
-    };
+    let hour24 = parse_limit_reset_hour24(text)?;
     // Convert ts to local
     let ts_local = ts_utc.with_timezone(&Local);
     // Construct same-day local time at the given hour
@@ -1631,6 +1670,61 @@ mod tests {
             .collect::<String>();
         fs::write(&transcript, contents)?;
         Ok(dir)
+    }
+
+    #[test]
+    fn context_warning_percent_parses_auto_compact_message() {
+        assert_eq!(
+            parse_context_warning_used_percent(
+                "Warning: Context left until auto-compact: 17% before cleanup"
+            ),
+            Some(83)
+        );
+    }
+
+    #[test]
+    fn context_warning_percent_parses_context_low_message() {
+        assert_eq!(
+            parse_context_warning_used_percent("Context low (9% remaining)"),
+            Some(91)
+        );
+    }
+
+    #[test]
+    fn limit_reset_hour_parses_pm_message() {
+        assert_eq!(
+            parse_limit_reset_hour24("Claude AI usage limit reached. Your limit resets 5pm"),
+            Some(17)
+        );
+    }
+
+    #[test]
+    fn limit_reset_hour_accepts_flexible_whitespace() {
+        assert_eq!(
+            parse_limit_reset_hour24("limit \t reached; resets \t 12 \t am"),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn limit_reset_hour_skips_nonmatching_limit_text() {
+        assert_eq!(
+            parse_limit_reset_hour24("Unlimited access ended; limit reached, resets 7am"),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn limit_reset_hour_does_not_cross_lines_after_reached() {
+        assert_eq!(parse_limit_reset_hour24("limit reached\nresets 7am"), None);
+    }
+
+    #[test]
+    fn limit_reset_hour_backtracks_to_valid_reset_phrase() {
+        assert_eq!(
+            parse_limit_reset_hour24("limit reached; resets 5pm; note that resets are local"),
+            Some(17)
+        );
     }
 
     #[test]
