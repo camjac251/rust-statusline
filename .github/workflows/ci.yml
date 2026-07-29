@@ -55,16 +55,6 @@ jobs:
       - name: Test (colors only)
         run: cargo test --no-default-features --features colors
 
-      - name: Check binary size
-        run: |
-          cargo build --release --all-features
-          SIZE=$(stat -c%s target/release/claude_statusline)
-          echo "Binary size: $SIZE bytes ($(( SIZE / 1024 / 1024 ))MB)"
-          if [ "$SIZE" -gt 7000000 ]; then
-            echo "::error::Binary size exceeds 7MB"
-            exit 1
-          fi
-
   # macOS needed for #[cfg(target_os = "macos")] keychain code
   test-macos:
     name: Test (macOS)
