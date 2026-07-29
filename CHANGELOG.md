@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## [2.10.0](https://github.com/camjac251/rust-statusline/compare/v2.9.1...v2.10.0) - 2026-07-29
+
+### Added
+
+- *(usage)* honor retry-after and map the full usage response
+
+### Other
+
+- drop the binary size gate
+
 ## [2.9.1](https://github.com/camjac251/rust-statusline/compare/v2.9.0...v2.9.1) - 2026-07-26
 
 ### Fixed
