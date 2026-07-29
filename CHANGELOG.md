@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [2.11.0](https://github.com/camjac251/rust-statusline/compare/v2.10.0...v2.11.0) - 2026-07-29
+
+### Added
+
+- *(usage)* report how stale the usage figures are
+
 ## [2.10.0](https://github.com/camjac251/rust-statusline/compare/v2.9.1...v2.10.0) - 2026-07-29
 
 ### Added
