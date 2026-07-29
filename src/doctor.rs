@@ -261,13 +261,20 @@ fn print_report(report: &DoctorReport) {
             .unwrap_or("unknown")
     );
     println!(
-        "usage_api: direct={} token={} cache={} stale_cache={} negative_cache={}",
+        "usage_api: direct={} token={} cache={} stale_cache={} negative_cache={} ttl={}s",
         report.usage_api.direct_claude_api,
         report.usage_api.oauth_token_present,
         report.usage_api.fresh_cache_present,
         report.usage_api.stale_cache_present,
-        report.usage_api.negative_cache_active
+        report.usage_api.negative_cache_active,
+        report.usage_api.cache_ttl_seconds
     );
+    if !report.usage_api.unknown_response_fields.is_empty() {
+        println!(
+            "usage_api: unmapped response fields: {}",
+            report.usage_api.unknown_response_fields.join(", ")
+        );
+    }
     println!(
         "usage_api egress: {}{}",
         report.usage_api.egress.route,

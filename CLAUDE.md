@@ -58,7 +58,7 @@ Pipeline: stdin JSON hook -> transcript parsing -> pricing -> display (text or J
 | `models/subagent.rs` | Subagent sidecar metadata and enriched per-agent usage rows |
 | `models/workflow.rs` | Workflow run-state and remote-agent task models |
 | `usage.rs` | Transcript analysis, session/window/daily metrics, burn rates |
-| `usage_api.rs` | OAuth usage API client with SQLite-cached responses; honors proxy env and `NODE_EXTRA_CA_CERTS`, reports egress route |
+| `usage_api.rs` | OAuth usage API client with SQLite-cached responses; honors proxy env and `NODE_EXTRA_CA_CERTS`, reports egress route, backs off on the endpoint's own `retry-after` |
 | `pricing.rs` | Model pricing tables (compile-time from `pricing.json`) |
 | `provenance.rs` | Cost, pricing, and context source metadata |
 | `db.rs` | SQLite persistent cache and usage event ledger for cross-session usage tracking |
@@ -83,10 +83,12 @@ Pipeline: stdin JSON hook -> transcript parsing -> pricing -> display (text or J
 - Transcript files in `~/.config/claude` and `~/.claude`
 - Pricing embedded from `pricing.json`, overridable via `CLAUDE_PRICE_*` env vars
 - Config files are optional: explicit `--config`, project `.claude-statusline.toml`, then `~/.config/claude-statusline/config.toml`; precedence is defaults < config < env < CLI
-- `doctor` reports Claude paths, `settings.json` (`statusLine` plus the optional `subagentStatusLine`, whose absence never degrades `ok`), DB/WAL health, OAuth cache/token availability, the usage API egress route (direct or proxy, from `HTTPS_PROXY`/`NO_PROXY`, plus `NODE_EXTRA_CA_CERTS` trust), config load status, and pricing source without reading hook stdin
+- `doctor` reports Claude paths, `settings.json` (`statusLine` plus the optional `subagentStatusLine`, whose absence never degrades `ok`), DB/WAL health, OAuth cache/token availability, the effective usage-cache TTL, any unmapped usage-response fields, the usage API egress route (direct or proxy, from `HTTPS_PROXY`/`NO_PROXY`, plus `NODE_EXTRA_CA_CERTS` trust), config load status, and pricing source without reading hook stdin
 - Usage API HTTP honors `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` (via ureq env defaults, inherited from Claude Code's environment) and `NODE_EXTRA_CA_CERTS` (system roots + extra bundle via `rustls-native-certs`); `resolve_usage_egress` powers the route shown by `doctor`/`--debug`
 - `init` writes/updates the Claude Code `statusLine` command, padding, and `refreshInterval`, plus the `subagentStatusLine` block (`type` and `command` only), preserving extra keys on existing objects and refusing non-object values without `--force`
 - OAuth usage API for utilization percentages and reset times (fallback; hook data is preferred)
+- The usage endpoint budgets roughly 5 requests per fixed 300s window **per account**. `CACHE_TTL_SECONDS` (300, overridable via `CLAUDE_USAGE_CACHE_TTL_SECONDS`, floored at 60) keeps one machine to one request per window; a machine-local SQLite fetch lock keeps concurrent sessions to one call; a 429 arms the negative cache from the response's `retry-after`. The agent is built with `http_status_as_error(false)` specifically so a 429 arrives as a readable response instead of an opaque transport error
+- Unrecognized usage-response keys land in `UsageSummary::unknown_fields` via a `serde(flatten)` catch-all rather than being dropped. Codename limit slots (`seven_day_omelette`, `tangelo`, `iguana_necktie`, `omelette_promotional`, `nimbus_quill`, `amber_ladder`) are captured into `codename_limits` when non-null. Before wiring a new slot into `any_window_reset_elapsed`, decide whether it is a rolling window or a one-time expiry: only rolling ones belong there, or the cache invalidates on every invocation once the date passes
 - Subagent transcripts in `subagents/agent-*.jsonl` are included in cost calculations
 - JSON output includes provenance fields for session cost, today cost, pricing source, context source, and prompt cache countdown state
 
@@ -116,12 +118,10 @@ Config: `release-plz.toml` (git-only, no crates.io publish, no CHANGELOG.md)
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - Tests on Ubuntu, macOS, Windows with stable Rust
 - All feature combinations tested
-- Binary size < 7MB on Linux
 - MSRV: Rust 1.95.0
 
 ## Constraints
 
-- **Binary size**: Release < 7MB (CI enforced); currently ~6.5MB on Linux, so weigh new dependencies against the remaining headroom
 - **MSRV**: 1.95.0, edition 2024
 - **Pricing**: Compile-time embedded; override with all four `CLAUDE_PRICE_*` env vars
 - **Cache**: SQLite at `~/.claude/statusline.db` with session rows and a usage event ledger (WAL mode, concurrent-safe)

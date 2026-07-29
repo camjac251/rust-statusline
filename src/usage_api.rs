@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -7,8 +8,20 @@ use std::time::Duration;
 
 const USAGE_ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 const ANTHROPIC_API_HOST: &str = "api.anthropic.com";
+/// The endpoint allows a small burst per account inside a fixed window and then
+/// answers 429 with `retry-after` counting down to the window's reset. Measured
+/// budget is 5 requests per 300s, so the default keeps one machine at a single
+/// request per window and leaves room for other machines on the same account.
 const CACHE_TTL_SECONDS: i64 = 300;
+/// Floor for an operator-supplied TTL. Below this, a handful of machines sharing
+/// one account would exhaust the per-window budget and sit in 429 permanently.
+const MIN_CACHE_TTL_SECONDS: i64 = 60;
+const CACHE_TTL_ENV: &str = "CLAUDE_USAGE_CACHE_TTL_SECONDS";
+/// Backstop when a rejected fetch carries no usable `retry-after`.
 const NEGATIVE_CACHE_TTL_SECONDS: i64 = 120;
+/// Ceiling on a server-supplied `retry-after` so one absurd value cannot wedge
+/// the statusline on stale numbers for hours.
+const MAX_RETRY_AFTER_SECONDS: i64 = 900;
 const FETCH_LOCK_TTL_SECONDS: i64 = 10;
 const ANTHROPIC_BETA: &str = "oauth-2025-04-20";
 /// Extra CA bundle path, matching Claude Code's proxy CA env var. When set, the
@@ -169,6 +182,11 @@ pub struct UsageApiHealth {
     pub fresh_cache_present: bool,
     pub stale_cache_present: bool,
     pub negative_cache_active: bool,
+    /// Effective positive-cache lifetime, after any env override and floor.
+    pub cache_ttl_seconds: i64,
+    /// Response fields the cached summary could not attribute to a known field.
+    /// Non-empty means the endpoint grew something worth mapping.
+    pub unknown_response_fields: Vec<String>,
     pub egress: UsageEgress,
 }
 
@@ -188,6 +206,13 @@ pub fn inspect_usage_api(claude_paths: &[PathBuf], model_id: Option<&str>) -> Us
             .ok()
             .flatten()
             .is_some(),
+        cache_ttl_seconds: cache_ttl_seconds(),
+        unknown_response_fields: crate::db::get_stale_api_cache(API_CACHE_KEY)
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str::<UsageSummary>(&json).ok())
+            .map(|summary| summary.unknown_fields)
+            .unwrap_or_default(),
         egress: resolve_usage_egress(),
     }
 }
@@ -222,6 +247,7 @@ impl UsageLimit {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ExtraUsage {
     pub is_enabled: bool,
     pub monthly_limit: Option<f64>,
@@ -229,6 +255,20 @@ pub struct ExtraUsage {
     pub utilization: Option<f64>,
     pub currency: Option<String>,
     pub disabled_reason: Option<String>,
+    /// Minor-unit exponent for `monthly_limit` / `used_credits`. The API states
+    /// it explicitly; only fall back to 2 when the field is absent.
+    pub decimal_places: Option<i32>,
+    /// Set when the user turned extra usage off themselves, as opposed to an
+    /// org policy or an exhausted balance. Distinguishes the two causes that
+    /// `disabled_reason` alone conflates.
+    pub user_disabled: Option<bool>,
+    pub spend_limit_reached: Option<bool>,
+    pub credits_ever_enabled: Option<bool>,
+    /// Sub-window credit rows. Shape is unverified because the live endpoint has
+    /// only ever returned null for these, so they are preserved verbatim rather
+    /// than typed against a guess.
+    pub daily: Option<serde_json::Value>,
+    pub weekly: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -277,6 +317,21 @@ pub struct UsageSpend {
     pub disabled_reason: Option<String>,
     pub can_purchase_credits: Option<bool>,
     pub can_toggle: Option<bool>,
+    /// Purchasable ceiling, split by funding kind. Distinct from `limit`, which
+    /// is the currently provisioned spend cap.
+    pub cap: Option<UsageSpendCap>,
+    pub disclaimer: Option<String>,
+    /// Shapes unverified: the live endpoint has only ever returned null for
+    /// these, so they are preserved verbatim rather than typed against a guess.
+    pub balance: Option<serde_json::Value>,
+    pub auto_reload: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UsageSpendCap {
+    pub money: Option<UsageMoney>,
+    pub credits: Option<UsageMoney>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -297,6 +352,14 @@ pub struct UsageSummary {
     pub limits: Vec<UsageApiLimit>,
     /// Newer extra-usage spend object with explicit money units.
     pub spend: Option<UsageSpend>,
+    /// Non-null codename limit slots, keyed by their wire name. Empty in every
+    /// response observed so far; populated rather than dropped so a slot that
+    /// activates shows up in `--json` without another schema change.
+    pub codename_limits: BTreeMap<String, UsageLimit>,
+    pub member_dashboard_available: Option<bool>,
+    /// Names of response fields no DTO field claimed. Surfaced by `doctor` and
+    /// `--debug` as an early warning that the endpoint grew a new field.
+    pub unknown_fields: Vec<String>,
     /// True when serving expired cached data after an API failure
     pub stale: bool,
 }
@@ -325,18 +388,29 @@ impl UsageSummary {
             || elapsed(self.seven_day_oauth_apps.resets_at)
             || elapsed(self.seven_day_cowork.resets_at)
             || self.limits.iter().any(|limit| elapsed(limit.resets_at))
+            || ROLLING_CODENAME_LIMIT_KEYS.iter().any(|key| {
+                self.codename_limits
+                    .get(*key)
+                    .is_some_and(|limit| elapsed(limit.resets_at))
+            })
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 struct ExtraUsageDto {
-    #[serde(default)]
     is_enabled: bool,
     monthly_limit: Option<f64>,
     used_credits: Option<f64>,
     utilization: Option<f64>,
     currency: Option<String>,
     disabled_reason: Option<String>,
+    decimal_places: Option<i32>,
+    user_disabled: Option<bool>,
+    spend_limit_reached: Option<bool>,
+    credits_ever_enabled: Option<bool>,
+    daily: Option<serde_json::Value>,
+    weekly: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -371,7 +445,8 @@ struct UsageMoneyDto {
     currency: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 struct UsageSpendDto {
     used: Option<UsageMoneyDto>,
     limit: Option<UsageMoneyDto>,
@@ -381,30 +456,114 @@ struct UsageSpendDto {
     disabled_reason: Option<String>,
     can_purchase_credits: Option<bool>,
     can_toggle: Option<bool>,
+    cap: Option<UsageSpendCapDto>,
+    disclaimer: Option<String>,
+    balance: Option<serde_json::Value>,
+    auto_reload: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct UsageSpendCapDto {
+    money: Option<UsageMoneyDto>,
+    credits: Option<UsageMoneyDto>,
+}
+
+/// Codename limit slots the API ships alongside the documented windows. None of
+/// them is read by any Claude Code build, and all have been null in every
+/// observed response, but they are named limit rows so they are captured rather
+/// than discarded. Order here is the order they appear on the wire.
+const CODENAME_LIMIT_KEYS: [&str; 6] = [
+    "seven_day_omelette",
+    "tangelo",
+    "iguana_necktie",
+    "omelette_promotional",
+    "nimbus_quill",
+    "amber_ladder",
+];
+
+/// Codename slots that are rolling windows rather than one-time grants, and so
+/// must invalidate a cached response once their reset passes. `seven_day_*` is
+/// a weekly window by construction; the rest have unknown semantics and are
+/// deliberately excluded, because treating a one-time expiry as a rolling reset
+/// causes a refetch on every invocation once that date passes.
+const ROLLING_CODENAME_LIMIT_KEYS: [&str; 1] = ["seven_day_omelette"];
+
+/// Deserialize one section, degrading to `None` when its shape no longer
+/// matches instead of failing the whole response.
+///
+/// The endpoint is undocumented and has already renamed and restructured fields
+/// in place (`used` -> `used_dollars`, extra usage duplicated into `spend`). A
+/// strict struct turns any one such change into a total blackout: no session
+/// percentage, no weekly percentage, nothing. Isolating per section means a
+/// reshaped `spend` costs `spend` alone and the numbers on the line survive.
+fn lenient_section<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
+/// Same isolation for the `limits` array, but per row: one malformed entry is
+/// dropped rather than discarding every limit row alongside it.
+fn lenient_rows<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let serde_json::Value::Array(rows) = value else {
+        return Ok(Vec::new());
+    };
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| serde_json::from_value(row).ok())
+        .collect())
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 struct UsageResponseDto {
-    #[serde(default)]
+    #[serde(deserialize_with = "lenient_section")]
     five_hour: Option<UsageLimitDto>,
-    #[serde(default)]
+    #[serde(deserialize_with = "lenient_section")]
     seven_day: Option<UsageLimitDto>,
-    #[serde(default)]
+    #[serde(deserialize_with = "lenient_section")]
     seven_day_opus: Option<UsageLimitDto>,
-    #[serde(default)]
+    #[serde(deserialize_with = "lenient_section")]
     seven_day_sonnet: Option<UsageLimitDto>,
-    #[serde(default)]
+    #[serde(deserialize_with = "lenient_section")]
     seven_day_oauth_apps: Option<UsageLimitDto>,
-    #[serde(default)]
+    #[serde(deserialize_with = "lenient_section")]
     seven_day_cowork: Option<UsageLimitDto>,
-    #[serde(default)]
+    #[serde(deserialize_with = "lenient_section")]
     cinder_cove: Option<UsageLimitDto>,
-    #[serde(default)]
+    #[serde(deserialize_with = "lenient_section")]
+    seven_day_omelette: Option<UsageLimitDto>,
+    #[serde(deserialize_with = "lenient_section")]
+    tangelo: Option<UsageLimitDto>,
+    #[serde(deserialize_with = "lenient_section")]
+    iguana_necktie: Option<UsageLimitDto>,
+    #[serde(deserialize_with = "lenient_section")]
+    omelette_promotional: Option<UsageLimitDto>,
+    #[serde(deserialize_with = "lenient_section")]
+    nimbus_quill: Option<UsageLimitDto>,
+    #[serde(deserialize_with = "lenient_section")]
+    amber_ladder: Option<UsageLimitDto>,
+    #[serde(deserialize_with = "lenient_section")]
+    member_dashboard_available: Option<bool>,
+    #[serde(deserialize_with = "lenient_section")]
     extra_usage: Option<ExtraUsageDto>,
-    #[serde(default)]
+    #[serde(deserialize_with = "lenient_rows")]
     limits: Vec<UsageApiLimitDto>,
-    #[serde(default)]
+    #[serde(deserialize_with = "lenient_section")]
     spend: Option<UsageSpendDto>,
+    /// Anything the endpoint adds that none of the above claims. Kept so a new
+    /// field surfaces in `doctor`/`--debug` instead of vanishing silently.
+    #[serde(flatten)]
+    unknown: BTreeMap<String, serde_json::Value>,
 }
 
 pub fn get_usage_summary(claude_paths: &[PathBuf], model_id: Option<&str>) -> Option<UsageSummary> {
@@ -441,23 +600,51 @@ pub fn get_usage_summary(claude_paths: &[PathBuf], model_id: Option<&str>) -> Op
     }
 
     // Cache miss or invalid - fetch from API
-    let summary = fetch_usage_summary(claude_paths);
-
-    match summary {
-        Some(s) => {
+    match fetch_usage_summary(claude_paths) {
+        Ok(summary) => {
             // Store in persistent cache; clear the fetch lock
-            if let Ok(json) = serde_json::to_string(&s) {
-                let _ = crate::db::set_api_cache(API_CACHE_KEY, &json, CACHE_TTL_SECONDS);
+            if let Ok(json) = serde_json::to_string(&summary) {
+                let _ = crate::db::set_api_cache(API_CACHE_KEY, &json, cache_ttl_seconds());
             }
             let _ = crate::db::set_api_cache(NEGATIVE_CACHE_KEY, "", 0);
-            Some(s)
+            Some(summary)
         }
-        None => {
-            // Upgrade fetch lock to full negative cache to prevent retry storm
-            let _ = crate::db::set_api_cache(NEGATIVE_CACHE_KEY, "1", NEGATIVE_CACHE_TTL_SECONDS);
+        Err(failure) => {
+            // Upgrade fetch lock to full negative cache to prevent retry storm.
+            // A 429 states exactly how long the account's window has left, and
+            // retrying before then just burns another request off the budget, so
+            // the server's number wins over the local default whenever present.
+            let backoff = failure
+                .retry_after_seconds
+                .map(|seconds| seconds.clamp(1, MAX_RETRY_AFTER_SECONDS))
+                .unwrap_or(NEGATIVE_CACHE_TTL_SECONDS);
+            let _ = crate::db::set_api_cache(NEGATIVE_CACHE_KEY, "1", backoff);
             stale_fallback()
         }
     }
+}
+
+/// Positive-cache lifetime. Defaults to one request per rate-limit window and
+/// can be shortened for a single-machine setup, but never below the floor that
+/// keeps several machines on one account inside the shared budget.
+fn cache_ttl_seconds() -> i64 {
+    env::var(CACHE_TTL_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .map(|seconds| seconds.max(MIN_CACHE_TTL_SECONDS))
+        .unwrap_or(CACHE_TTL_SECONDS)
+}
+
+/// Why a fetch did not produce a summary, and how long to wait before retrying.
+struct FetchFailure {
+    retry_after_seconds: Option<i64>,
+}
+
+/// Parse a `retry-after` header. Only the delta-seconds form is handled; the
+/// HTTP-date form is not emitted by this endpoint and a wrong parse would be
+/// worse than falling back to the local default.
+fn parse_retry_after(raw: &str) -> Option<i64> {
+    raw.trim().parse::<i64>().ok().filter(|value| *value > 0)
 }
 
 /// Return the last cached API data (even if expired), marked as stale
@@ -471,9 +658,19 @@ fn stale_fallback() -> Option<UsageSummary> {
     None
 }
 
-fn fetch_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
-    let token = find_oauth_token(claude_paths)?;
-    let mut config = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(5)));
+fn fetch_usage_summary(claude_paths: &[PathBuf]) -> Result<UsageSummary, FetchFailure> {
+    let no_retry_after = || FetchFailure {
+        retry_after_seconds: None,
+    };
+    let Some(token) = find_oauth_token(claude_paths) else {
+        return Err(no_retry_after());
+    };
+    // Deliver non-2xx as a normal response instead of an error, so a 429 can be
+    // read for its `retry-after` header rather than collapsing into an opaque
+    // transport error that loses the one value worth having.
+    let mut config = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(5)))
+        .http_status_as_error(false);
     // Honor NODE_EXTRA_CA_CERTS so the call works behind a TLS-intercepting proxy.
     if let Some(roots) = usage_root_certs() {
         config = config.tls_config(ureq::tls::TlsConfig::builder().root_certs(roots).build());
@@ -491,17 +688,36 @@ fn fetch_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Usage API error: {}", e);
-            return None;
+            return Err(no_retry_after());
         }
     };
 
     if response.status() != 200 {
-        eprintln!("Usage API HTTP {}", response.status());
-        return None;
+        let retry_after_seconds = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_retry_after);
+        match retry_after_seconds {
+            Some(seconds) => eprintln!(
+                "Usage API HTTP {} (retry-after {}s)",
+                response.status(),
+                seconds
+            ),
+            None => eprintln!("Usage API HTTP {}", response.status()),
+        }
+        return Err(FetchFailure {
+            retry_after_seconds,
+        });
     }
 
-    let dto: UsageResponseDto = response.body_mut().read_json().ok()?;
-    Some(usage_summary_from_dto(dto))
+    match response.body_mut().read_json::<UsageResponseDto>() {
+        Ok(dto) => Ok(usage_summary_from_dto(dto)),
+        Err(e) => {
+            eprintln!("Usage API parse error: {}", e);
+            Err(no_retry_after())
+        }
+    }
 }
 
 impl From<UsageLimitDto> for UsageLimit {
@@ -551,6 +767,15 @@ impl From<UsageMoneyDto> for UsageMoney {
     }
 }
 
+impl From<UsageSpendCapDto> for UsageSpendCap {
+    fn from(value: UsageSpendCapDto) -> Self {
+        UsageSpendCap {
+            money: value.money.map(UsageMoney::from),
+            credits: value.credits.map(UsageMoney::from),
+        }
+    }
+}
+
 impl From<UsageSpendDto> for UsageSpend {
     fn from(value: UsageSpendDto) -> Self {
         UsageSpend {
@@ -562,20 +787,41 @@ impl From<UsageSpendDto> for UsageSpend {
             disabled_reason: value.disabled_reason,
             can_purchase_credits: value.can_purchase_credits,
             can_toggle: value.can_toggle,
+            cap: value.cap.map(UsageSpendCap::from),
+            disclaimer: value.disclaimer,
+            balance: value.balance,
+            auto_reload: value.auto_reload,
         }
+    }
+}
+
+/// Minor units per major unit for a currency exponent, e.g. 2 -> 100.0. Falls
+/// back to the near-universal 2 when the API omits the exponent, and rejects
+/// nonsensical values rather than scaling a balance into gibberish.
+fn minor_unit_divisor(exponent: Option<i32>) -> f64 {
+    match exponent {
+        Some(exponent) if (0..=6).contains(&exponent) => 10_f64.powi(exponent),
+        _ => 100.0,
     }
 }
 
 impl From<ExtraUsageDto> for ExtraUsage {
     fn from(value: ExtraUsageDto) -> Self {
+        // Amounts arrive in minor units; `decimal_places` names the exponent.
+        let divisor = minor_unit_divisor(value.decimal_places);
         ExtraUsage {
             is_enabled: value.is_enabled,
-            // API returns cents, convert to dollars.
-            monthly_limit: value.monthly_limit.map(|v| v / 100.0),
-            used_credits: value.used_credits.map(|v| v / 100.0),
+            monthly_limit: value.monthly_limit.map(|v| v / divisor),
+            used_credits: value.used_credits.map(|v| v / divisor),
             utilization: value.utilization,
             currency: value.currency,
             disabled_reason: value.disabled_reason,
+            decimal_places: value.decimal_places,
+            user_disabled: value.user_disabled,
+            spend_limit_reached: value.spend_limit_reached,
+            credits_ever_enabled: value.credits_ever_enabled,
+            daily: value.daily,
+            weekly: value.weekly,
         }
     }
 }
@@ -609,6 +855,22 @@ fn usage_summary_from_dto(dto: UsageResponseDto) -> UsageSummary {
         find_scoped_weekly_limit(&limits, "sonnet"),
     );
 
+    // Keep only the codename slots the response actually populated, so the map
+    // stays empty on the common path instead of carrying six null rows.
+    let codename_dtos = [
+        dto.seven_day_omelette,
+        dto.tangelo,
+        dto.iguana_necktie,
+        dto.omelette_promotional,
+        dto.nimbus_quill,
+        dto.amber_ladder,
+    ];
+    let codename_limits = CODENAME_LIMIT_KEYS
+        .iter()
+        .zip(codename_dtos)
+        .filter_map(|(key, limit)| limit.map(|limit| ((*key).to_string(), UsageLimit::from(limit))))
+        .collect::<BTreeMap<_, _>>();
+
     let mut extra_usage = dto.extra_usage.map(ExtraUsage::from);
     if let Some(spend_extra) = spend.as_ref().and_then(extra_usage_from_spend) {
         match extra_usage.as_mut() {
@@ -634,6 +896,9 @@ fn usage_summary_from_dto(dto: UsageResponseDto) -> UsageSummary {
         extra_usage,
         limits,
         spend,
+        codename_limits,
+        member_dashboard_available: dto.member_dashboard_available,
+        unknown_fields: dto.unknown.into_keys().collect(),
         stale: false,
     }
 }
@@ -718,6 +983,7 @@ fn extra_usage_from_spend(spend: &UsageSpend) -> Option<ExtraUsage> {
 
     Some(ExtraUsage {
         is_enabled: spend.enabled.unwrap_or(false),
+        // `UsageMoney::amount` is already scaled out of minor units.
         monthly_limit: limit.and_then(|money| money.amount),
         used_credits: used.and_then(|money| money.amount),
         utilization: spend.percent,
@@ -725,6 +991,8 @@ fn extra_usage_from_spend(spend: &UsageSpend) -> Option<ExtraUsage> {
             .and_then(|money| money.currency.clone())
             .or_else(|| limit.and_then(|money| money.currency.clone())),
         disabled_reason: spend.disabled_reason.clone(),
+        // `spend` carries no equivalent of the extra_usage-only flags.
+        ..ExtraUsage::default()
     })
 }
 
@@ -1264,5 +1532,282 @@ KYWlso+DPM561Zw=
         assert_eq!(extra.monthly_limit, Some(987.65));
         assert_eq!(extra.utilization, Some(1.25));
         assert_eq!(extra.currency.as_deref(), Some("USD"));
+    }
+
+    /// Mirrors every top-level key the live endpoint returns. If the response
+    /// grows a field, this stays green while `captures_unrecognized_fields`
+    /// documents where it lands.
+    const FULL_SHAPE_RESPONSE: &str = r#"{
+        "five_hour": {"utilization": 10.0, "resets_at": "2026-09-01T12:00:00.111111+00:00",
+                      "limit_dollars": null, "used_dollars": null, "remaining_dollars": null},
+        "seven_day": {"utilization": 20.0, "resets_at": "2026-09-05T07:00:00.222222+00:00",
+                      "limit_dollars": null, "used_dollars": null, "remaining_dollars": null},
+        "seven_day_oauth_apps": null,
+        "seven_day_opus": null,
+        "seven_day_sonnet": null,
+        "seven_day_cowork": null,
+        "seven_day_omelette": null,
+        "tangelo": null,
+        "iguana_necktie": null,
+        "omelette_promotional": null,
+        "nimbus_quill": null,
+        "cinder_cove": null,
+        "amber_ladder": null,
+        "extra_usage": {
+            "is_enabled": false, "monthly_limit": 2000, "used_credits": 500.0,
+            "utilization": 25.0, "currency": "USD", "decimal_places": 2,
+            "disabled_reason": "org_level_disabled_until", "user_disabled": false,
+            "spend_limit_reached": true, "credits_ever_enabled": true,
+            "daily": null, "weekly": null
+        },
+        "limits": [],
+        "spend": {
+            "used": {"amount_minor": 500, "currency": "USD", "exponent": 2},
+            "limit": {"amount_minor": 2000, "currency": "USD", "exponent": 2},
+            "percent": 25, "severity": "normal", "enabled": false,
+            "disabled_reason": "org_level_disabled_until",
+            "cap": {"money": null, "credits": {"amount_minor": 2000, "exponent": 2}},
+            "balance": null, "auto_reload": null,
+            "disclaimer": "Usage credits cover you when you hit your plan limits.",
+            "can_purchase_credits": false, "can_toggle": false
+        },
+        "member_dashboard_available": false
+    }"#;
+
+    #[test]
+    fn live_response_shape_leaves_no_unclaimed_fields() {
+        let dto: UsageResponseDto =
+            serde_json::from_str(FULL_SHAPE_RESPONSE).expect("parse full-shape response");
+        let summary = usage_summary_from_dto(dto);
+
+        assert!(
+            summary.unknown_fields.is_empty(),
+            "unclaimed fields: {:?}",
+            summary.unknown_fields
+        );
+        assert_eq!(summary.member_dashboard_available, Some(false));
+        // Every codename slot was null, so none should occupy the map.
+        assert!(summary.codename_limits.is_empty());
+    }
+
+    #[test]
+    fn captures_unrecognized_fields_instead_of_dropping_them() {
+        let raw = r#"{"five_hour": null, "brand_new_slot": {"utilization": 5.0}}"#;
+        let dto: UsageResponseDto = serde_json::from_str(raw).expect("parse unknown field");
+        let summary = usage_summary_from_dto(dto);
+
+        assert_eq!(summary.unknown_fields, vec!["brand_new_slot".to_string()]);
+    }
+
+    #[test]
+    fn populated_codename_slot_is_retained() {
+        let raw = r#"{
+            "seven_day_omelette": {"utilization": 12.0, "resets_at": "2026-09-05T07:00:00+00:00"},
+            "tangelo": {"utilization": 3.0, "resets_at": null}
+        }"#;
+        let dto: UsageResponseDto = serde_json::from_str(raw).expect("parse codename slots");
+        let summary = usage_summary_from_dto(dto);
+
+        assert_eq!(summary.codename_limits.len(), 2);
+        assert_eq!(
+            summary
+                .codename_limits
+                .get("seven_day_omelette")
+                .and_then(|limit| limit.utilization),
+            Some(12.0)
+        );
+        assert!(summary.unknown_fields.is_empty());
+    }
+
+    #[test]
+    fn rolling_codename_reset_invalidates_but_unknown_codename_does_not() {
+        let now = Utc::now();
+        let elapsed = UsageLimit {
+            resets_at: Some(now - chrono::TimeDelta::hours(1)),
+            ..UsageLimit::default()
+        };
+
+        let mut rolling = UsageSummary::default();
+        rolling
+            .codename_limits
+            .insert("seven_day_omelette".to_string(), elapsed.clone());
+        assert!(rolling.any_window_reset_elapsed(now));
+
+        // Unknown semantics: an elapsed date is assumed to be a one-time expiry,
+        // which must not force a refetch on every single invocation.
+        let mut unknown = UsageSummary::default();
+        unknown
+            .codename_limits
+            .insert("tangelo".to_string(), elapsed);
+        assert!(!unknown.any_window_reset_elapsed(now));
+    }
+
+    #[test]
+    fn extra_usage_scales_by_reported_decimal_places() {
+        let two = r#"{"extra_usage": {"is_enabled": true, "monthly_limit": 5000,
+                       "used_credits": 5091.0, "decimal_places": 2}}"#;
+        let dto: UsageResponseDto = serde_json::from_str(two).expect("parse exponent 2");
+        let extra = usage_summary_from_dto(dto).extra_usage.expect("extra");
+        assert_eq!(extra.monthly_limit, Some(50.0));
+        assert_eq!(extra.used_credits, Some(50.91));
+        assert_eq!(extra.decimal_places, Some(2));
+
+        // A three-decimal currency must not be read as cents.
+        let three = r#"{"extra_usage": {"is_enabled": true, "monthly_limit": 5000,
+                         "used_credits": 5091.0, "decimal_places": 3}}"#;
+        let dto: UsageResponseDto = serde_json::from_str(three).expect("parse exponent 3");
+        let extra = usage_summary_from_dto(dto).extra_usage.expect("extra");
+        assert_eq!(extra.monthly_limit, Some(5.0));
+        assert_eq!(extra.used_credits, Some(5.091));
+    }
+
+    #[test]
+    fn extra_usage_without_decimal_places_stays_on_cents() {
+        let raw = r#"{"extra_usage": {"is_enabled": true, "monthly_limit": 5000,
+                      "used_credits": 5091.0}}"#;
+        let dto: UsageResponseDto = serde_json::from_str(raw).expect("parse missing exponent");
+        let extra = usage_summary_from_dto(dto).extra_usage.expect("extra");
+        assert_eq!(extra.monthly_limit, Some(50.0));
+        assert_eq!(extra.used_credits, Some(50.91));
+        assert_eq!(extra.decimal_places, None);
+    }
+
+    #[test]
+    fn nonsensical_decimal_places_falls_back_to_cents() {
+        assert_eq!(minor_unit_divisor(Some(2)), 100.0);
+        assert_eq!(minor_unit_divisor(Some(0)), 1.0);
+        assert_eq!(minor_unit_divisor(None), 100.0);
+        assert_eq!(minor_unit_divisor(Some(-3)), 100.0);
+        assert_eq!(minor_unit_divisor(Some(99)), 100.0);
+    }
+
+    #[test]
+    fn spend_cap_and_passthrough_fields_are_retained() {
+        let dto: UsageResponseDto =
+            serde_json::from_str(FULL_SHAPE_RESPONSE).expect("parse full-shape response");
+        let spend = usage_summary_from_dto(dto).spend.expect("spend");
+
+        let cap = spend.cap.expect("cap");
+        assert_eq!(cap.credits.and_then(|money| money.amount), Some(20.0));
+        assert!(cap.money.is_none());
+        assert!(spend.disclaimer.is_some());
+        assert!(spend.balance.is_none());
+    }
+
+    #[test]
+    fn survives_fields_being_removed_from_the_response() {
+        // Every optional section gone, including ones that were mandatory in
+        // earlier shapes. The response must still parse.
+        let dto: UsageResponseDto = serde_json::from_str("{}").expect("parse empty response");
+        let summary = usage_summary_from_dto(dto);
+        assert!(summary.window.utilization.is_none());
+        assert!(summary.limits.is_empty());
+        assert!(summary.extra_usage.is_none());
+
+        // A section that kept only some of its keys.
+        let partial = r#"{"five_hour": {"utilization": 44.0},
+                          "spend": {"percent": 12.0},
+                          "extra_usage": {"is_enabled": true}}"#;
+        let dto: UsageResponseDto = serde_json::from_str(partial).expect("parse partial sections");
+        let summary = usage_summary_from_dto(dto);
+        assert_eq!(summary.window.utilization, Some(44.0));
+        assert_eq!(summary.spend.and_then(|spend| spend.percent), Some(12.0));
+    }
+
+    #[test]
+    fn a_reshaped_section_does_not_take_down_the_rest() {
+        // `spend` becomes a scalar and `extra_usage` an array: both shapes the
+        // structs cannot represent. The percentages that drive the line must
+        // still come through.
+        let raw = r#"{
+            "five_hour": {"utilization": 17.0, "resets_at": "2026-09-01T09:30:00+00:00"},
+            "seven_day": {"utilization": 30.0},
+            "spend": 12345,
+            "extra_usage": ["unexpected"],
+            "limits": [
+                {"kind": "session", "group": "session", "percent": 17.0},
+                {"kind": "weekly_all", "group": "weekly", "percent": "thirty"},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 5.0,
+                 "scope": {"model": {"id": null, "display_name": "Fable"}}}
+            ]
+        }"#;
+        let dto: UsageResponseDto = serde_json::from_str(raw).expect("parse reshaped sections");
+        let summary = usage_summary_from_dto(dto);
+
+        assert_eq!(summary.window.utilization, Some(17.0));
+        assert_eq!(summary.seven_day.utilization, Some(30.0));
+        assert!(summary.window.resets_at.is_some());
+        // The two unrepresentable sections degrade to absent, not to a failure.
+        assert!(summary.spend.is_none());
+        assert!(summary.extra_usage.is_none());
+        // Only the row whose `percent` changed type is dropped.
+        assert_eq!(summary.limits.len(), 2);
+        assert_eq!(
+            find_scoped_weekly_limit(&summary.limits, "fable").and_then(|limit| limit.percent),
+            Some(5.0)
+        );
+    }
+
+    #[test]
+    fn a_reshaped_nested_field_costs_only_its_own_section() {
+        // `spend.limit` stops being a money object. `spend` is lost, but the
+        // sibling windows are untouched.
+        let raw = r#"{
+            "five_hour": {"utilization": 8.0},
+            "spend": {"percent": 3.0, "limit": "50 dollars"}
+        }"#;
+        let dto: UsageResponseDto = serde_json::from_str(raw).expect("parse nested reshape");
+        let summary = usage_summary_from_dto(dto);
+        assert_eq!(summary.window.utilization, Some(8.0));
+        assert!(summary.spend.is_none());
+    }
+
+    #[test]
+    fn added_fields_are_recorded_while_known_ones_still_parse() {
+        let raw = r#"{
+            "five_hour": {"utilization": 21.0},
+            "brand_new_window": {"utilization": 9.0},
+            "some_scalar_flag": true,
+            "nested_novelty": {"a": {"b": [1, 2, 3]}}
+        }"#;
+        let dto: UsageResponseDto = serde_json::from_str(raw).expect("parse added fields");
+        let summary = usage_summary_from_dto(dto);
+
+        assert_eq!(summary.window.utilization, Some(21.0));
+        assert_eq!(
+            summary.unknown_fields,
+            vec![
+                "brand_new_window".to_string(),
+                "nested_novelty".to_string(),
+                "some_scalar_flag".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn retry_after_accepts_delta_seconds_only() {
+        assert_eq!(parse_retry_after("293"), Some(293));
+        assert_eq!(parse_retry_after("  120 "), Some(120));
+        assert_eq!(parse_retry_after("0"), None);
+        assert_eq!(parse_retry_after("-5"), None);
+        // HTTP-date form is deliberately unhandled rather than mis-parsed.
+        assert_eq!(parse_retry_after("Wed, 29 Jul 2026 05:51:11 GMT"), None);
+        assert_eq!(parse_retry_after(""), None);
+    }
+
+    #[test]
+    fn cache_ttl_override_cannot_drop_below_the_shared_budget_floor() {
+        // Guards the parse-and-clamp rule without mutating process env, which
+        // would race the other tests in this binary.
+        let resolve = |raw: &str| {
+            raw.trim()
+                .parse::<i64>()
+                .ok()
+                .map(|seconds| seconds.max(MIN_CACHE_TTL_SECONDS))
+                .unwrap_or(CACHE_TTL_SECONDS)
+        };
+        assert_eq!(resolve("5"), MIN_CACHE_TTL_SECONDS);
+        assert_eq!(resolve("90"), 90);
+        assert_eq!(resolve("not-a-number"), CACHE_TTL_SECONDS);
     }
 }

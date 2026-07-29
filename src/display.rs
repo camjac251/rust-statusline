@@ -3457,14 +3457,24 @@ pub fn build_json_output(
             "cinder_cove": usage_limit_json(&summary.cinder_cove),
             "extra_usage": summary.extra_usage.as_ref().map(|e| serde_json::json!({
                 "is_enabled": e.is_enabled,
+                // Already scaled out of minor units using `decimal_places`.
                 "monthly_limit": e.monthly_limit,
                 "used_credits": e.used_credits,
                 "utilization": e.utilization,
                 "currency": e.currency,
-                "disabled_reason": e.disabled_reason
+                "disabled_reason": e.disabled_reason,
+                "decimal_places": e.decimal_places,
+                "user_disabled": e.user_disabled,
+                "spend_limit_reached": e.spend_limit_reached,
+                "credits_ever_enabled": e.credits_ever_enabled,
+                "daily": e.daily,
+                "weekly": e.weekly
             })),
             "limits": &summary.limits,
-            "spend": &summary.spend
+            "spend": &summary.spend,
+            "codename_limits": &summary.codename_limits,
+            "member_dashboard_available": summary.member_dashboard_available,
+            "unknown_fields": &summary.unknown_fields
         })
     });
 

@@ -293,16 +293,44 @@ claude_statusline init --refresh-interval 5
 
 `doctor` checks Claude config paths, `settings.json` (both the `statusLine` and optional `subagentStatusLine` entries), SQLite cache health, OAuth cache/token availability, the usage API egress route (direct, or through a proxy resolved from `HTTPS_PROXY`/`NO_PROXY`, plus any `NODE_EXTRA_CA_CERTS` trust), config loading, and pricing lookup provenance without reading statusline stdin. A missing `subagentStatusLine` is reported on the settings line but never counts against `ok`. When `statusLine` is present but has no `refreshInterval`, `doctor` warns: Claude Code does not re-run the command on terminal resize, so the footer keeps stale, re-truncated output and timed metrics do not refresh between messages until the next message; `init` sets it.
 
-The `usage_api` lines show where the OAuth usage call goes (an excerpt):
+The `usage_api` lines show the cache state and where the OAuth usage call goes (an excerpt):
 
 ```text
-usage_api: direct=true token=true cache=false stale_cache=false negative_cache=false
+usage_api: direct=true token=true cache=false stale_cache=false negative_cache=false ttl=300s
 usage_api egress: proxy http://proxy.internal:8080 (auth)
 ```
 
-The route reads `direct` when no proxy applies. Credentials embedded in the proxy URL are masked.
+The route reads `direct` when no proxy applies. Credentials embedded in the proxy URL are masked. `ttl` is the effective positive-cache lifetime after any `CLAUDE_USAGE_CACHE_TTL_SECONDS` override; see [Usage API rate limits](#usage-api-rate-limits).
+
+A further line appears only when the endpoint returns a field no released version maps:
+
+```text
+usage_api: unmapped response fields: some_new_slot
+```
+
+That is an early warning that the response schema grew, not an error.
 
 **Proxy and TLS.** The usage API call follows the same proxy as Claude Code. It reads `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` (upper or lower case) from the inherited environment, so whatever you set in your shell or in `settings.json` `env` applies with no extra configuration. For a TLS-intercepting proxy, point `NODE_EXTRA_CA_CERTS` at the proxy's CA bundle (PEM); it is trusted in addition to the system roots. Run `doctor` to confirm the resolved route.
+
+### Usage API rate limits
+
+The OAuth usage endpoint enforces a per-account budget of roughly **5 requests per fixed 300-second window**. The window is anchored at the first request in it, and exceeding the budget returns `429` with a `retry-after` header counting down to the reset. Extra `429`s do not extend the lockout.
+
+`claude_statusline` stays inside that budget three ways:
+
+- **Positive cache.** A successful response is reused for `CLAUDE_USAGE_CACHE_TTL_SECONDS` (default 300), so one machine spends one request per window. With `refreshInterval: 5`, roughly 1 statusline invocation in 60 touches the network.
+- **Cross-session fetch lock.** Concurrent sessions on one machine do not each fetch. The first to take a short SQLite lock performs the call; the others read the cache. Sessions on a machine cost no extra requests.
+- **Server-driven backoff.** A `429` arms the negative cache with the endpoint's own `retry-after` rather than a fixed guess, so the next attempt lands after the window reopens instead of burning further requests against a closed one.
+
+The budget is per account, not per machine, and only the fetch lock is machine-local. Several machines on one account each spend a request per window, so the safe floor is `300 / machines` seconds:
+
+| Machines on the account | Requests per 300s at default TTL | Safe TTL |
+|---|---|---|
+| 1 | 1 | 60s (the configured floor) |
+| 3 | 3 | 100s |
+| 5 | 5 (at budget) | 300s, leave at default |
+
+`CLAUDE_USAGE_CACHE_TTL_SECONDS` will not go below 60 seconds. Overshooting is self-correcting rather than fatal (the `retry-after` backoff parks the statusline on cached numbers until the window reopens), but sustained overshoot means the displayed utilization is persistently stale. `doctor` prints the effective TTL.
 
 `init` writes the Claude Code `statusLine` and `subagentStatusLine` blocks to `settings.json` (the `subagentStatusLine` schema takes only `type` and `command`; extra keys on existing objects are preserved either way):
 
@@ -421,6 +449,7 @@ usage_limits = true
 |----------|--------|
 | `CLAUDE_STATUSLINE_CONFIG=...` | Explicit config file path |
 | `CLAUDE_PROMPT_CACHE_TTL_SECONDS=N` | Override prompt-cache TTL |
+| `CLAUDE_USAGE_CACHE_TTL_SECONDS=N` | Override how long an OAuth usage response is reused (default 300, floor 60). See [Usage API rate limits](#usage-api-rate-limits) before lowering it |
 | `CLAUDE_TIME_FORMAT=12` | Force 12-hour time |
 | `CLAUDE_TRUECOLOR=1` | Force 24-bit terminal colors; otherwise common truecolor terminals are auto-detected |
 | `CLAUDE_CONTEXT_LIMIT=N` | Override context window size (tokens) |
@@ -613,7 +642,7 @@ cargo clippy --all-targets --all-features -- -D warnings  # lint
 cargo test --all-features --verbose                    # test
 ```
 
-CI runs tests across Ubuntu, macOS, and Windows with stable Rust, checks MSRV 1.95.0, exercises all feature combinations, and enforces a 7 MB binary size limit.
+CI runs tests across Ubuntu, macOS, and Windows with stable Rust, checks MSRV 1.95.0, and exercises all feature combinations.
 
 ---
 
