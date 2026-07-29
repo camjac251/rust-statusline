@@ -60,6 +60,7 @@ pub struct DisplayFileConfig {
     // usage.*
     pub usage_five_hour: Option<bool>,
     pub usage_weekly: Option<bool>,
+    pub usage_age: Option<bool>,
     pub usage_opus: Option<bool>,
     pub usage_sonnet: Option<bool>,
     pub usage_extra: Option<bool>,
@@ -265,6 +266,12 @@ fn apply_config(args: &mut Args, matches: &clap::ArgMatches, config: &FileConfig
         "no_usage_weekly",
         config.display.usage_weekly,
         &mut args.no_usage_weekly,
+    );
+    apply_display_toggle(
+        matches,
+        "no_usage_age",
+        config.display.usage_age,
+        &mut args.no_usage_age,
     );
     apply_display_toggle(
         matches,
@@ -530,6 +537,7 @@ fn apply_preset_minimal(args: &mut Args, matches: &clap::ArgMatches) {
     );
     // Usage: keep five_hour, hide the rest
     set_if_unset_neg(matches, "no_usage_weekly", &mut args.no_usage_weekly, true);
+    set_if_unset_neg(matches, "no_usage_age", &mut args.no_usage_age, true);
     set_if_unset_neg(matches, "no_usage_opus", &mut args.no_usage_opus, true);
     set_if_unset_neg(matches, "no_usage_sonnet", &mut args.no_usage_sonnet, true);
     set_if_unset_neg(matches, "no_usage_extra", &mut args.no_usage_extra, true);
@@ -733,6 +741,7 @@ fn parse_config_str(input: &str) -> Result<FileConfig> {
             // display.usage.*
             "usage.five_hour" => config.display.usage_five_hour = Some(parse_bool(value)?),
             "usage.weekly" => config.display.usage_weekly = Some(parse_bool(value)?),
+            "usage.age" => config.display.usage_age = Some(parse_bool(value)?),
             "usage.opus" => config.display.usage_opus = Some(parse_bool(value)?),
             "usage.sonnet" => config.display.usage_sonnet = Some(parse_bool(value)?),
             "usage.extra" => config.display.usage_extra = Some(parse_bool(value)?),

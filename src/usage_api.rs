@@ -360,6 +360,10 @@ pub struct UsageSummary {
     /// Names of response fields no DTO field claimed. Surfaced by `doctor` and
     /// `--debug` as an early warning that the endpoint grew a new field.
     pub unknown_fields: Vec<String>,
+    /// When this response was read from the API. Stamped before caching, so it
+    /// round-trips through the cached JSON and describes the underlying fetch
+    /// rather than the moment some later process read the cache.
+    pub fetched_at: Option<DateTime<Utc>>,
     /// True when serving expired cached data after an API failure
     pub stale: bool,
 }
@@ -601,7 +605,10 @@ pub fn get_usage_summary(claude_paths: &[PathBuf], model_id: Option<&str>) -> Op
 
     // Cache miss or invalid - fetch from API
     match fetch_usage_summary(claude_paths) {
-        Ok(summary) => {
+        Ok(mut summary) => {
+            // Stamp before caching so the age describes this fetch, not the
+            // moment a later process happened to read the cache back.
+            summary.fetched_at = Some(Utc::now());
             // Store in persistent cache; clear the fetch lock
             if let Ok(json) = serde_json::to_string(&summary) {
                 let _ = crate::db::set_api_cache(API_CACHE_KEY, &json, cache_ttl_seconds());
@@ -627,7 +634,7 @@ pub fn get_usage_summary(claude_paths: &[PathBuf], model_id: Option<&str>) -> Op
 /// Positive-cache lifetime. Defaults to one request per rate-limit window and
 /// can be shortened for a single-machine setup, but never below the floor that
 /// keeps several machines on one account inside the shared budget.
-fn cache_ttl_seconds() -> i64 {
+pub fn cache_ttl_seconds() -> i64 {
     env::var(CACHE_TTL_ENV)
         .ok()
         .and_then(|raw| raw.trim().parse::<i64>().ok())
@@ -899,7 +906,27 @@ fn usage_summary_from_dto(dto: UsageResponseDto) -> UsageSummary {
         codename_limits,
         member_dashboard_available: dto.member_dashboard_available,
         unknown_fields: dto.unknown.into_keys().collect(),
+        // Set by the caller once the response is about to be cached.
+        fetched_at: None,
         stale: false,
+    }
+}
+
+impl UsageSummary {
+    /// How long ago this response was read from the API.
+    ///
+    /// `None` when the summary predates age stamping, so a cache entry written
+    /// by an older build reports no age rather than a fabricated one.
+    pub fn age_seconds(&self, now: DateTime<Utc>) -> Option<i64> {
+        self.fetched_at
+            .map(|fetched| (now - fetched).num_seconds().max(0))
+    }
+
+    /// True once the response has outlived the refresh window it was cached
+    /// for, meaning a refresh was due and did not land.
+    pub fn is_past_refresh_window(&self, now: DateTime<Utc>) -> bool {
+        self.age_seconds(now)
+            .is_some_and(|age| age > cache_ttl_seconds())
     }
 }
 
@@ -1123,13 +1150,27 @@ fn deserialize_optional_datetime<'de, D>(deserializer: D) -> Result<Option<DateT
 where
     D: serde::Deserializer<'de>,
 {
-    let opt = Option::<String>::deserialize(deserializer)?;
-    if let Some(s) = opt {
-        DateTime::parse_from_rfc3339(&s)
+    // Accept the RFC 3339 strings the endpoint sends today and numeric epoch
+    // seconds. Claude Code's own hook already reports resets as epoch floats, so
+    // that form is a plausible drift rather than a hypothetical one, and a reset
+    // time is worth keeping across the change.
+    match Option::<serde_json::Value>::deserialize(deserializer)? {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(raw)) => DateTime::parse_from_rfc3339(&raw)
             .map(|dt| Some(dt.with_timezone(&Utc)))
-            .map_err(serde::de::Error::custom)
-    } else {
-        Ok(None)
+            .map_err(serde::de::Error::custom),
+        Some(serde_json::Value::Number(raw)) => {
+            let seconds = raw
+                .as_f64()
+                .ok_or_else(|| serde::de::Error::custom("reset timestamp is not a number"))?;
+            let nanos = (seconds.fract() * 1e9).round().clamp(0.0, 999_999_999.0) as u32;
+            DateTime::from_timestamp(seconds.trunc() as i64, nanos)
+                .map(Some)
+                .ok_or_else(|| serde::de::Error::custom("reset timestamp out of range"))
+        }
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "unexpected reset timestamp shape: {other}"
+        ))),
     }
 }
 
@@ -1782,6 +1823,47 @@ KYWlso+DPM561Zw=
                 "some_scalar_flag".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn limits_rows_still_supply_percentages_when_the_named_windows_disappear() {
+        // The dedicated `five_hour` / `seven_day` objects are gone entirely, as
+        // they would be after a rename. The generic rows carry the same numbers,
+        // so the line keeps its percentages without a code change.
+        let raw = r#"{
+            "limits": [
+                {"kind": "session", "group": "session", "percent": 17.0,
+                 "resets_at": "2026-09-01T09:30:00+00:00", "is_active": false},
+                {"kind": "weekly_all", "group": "weekly", "percent": 30.0,
+                 "resets_at": "2026-09-05T07:00:00+00:00", "is_active": true},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 24.0,
+                 "scope": {"model": {"id": null, "display_name": "Opus"}}}
+            ]
+        }"#;
+        let dto: UsageResponseDto = serde_json::from_str(raw).expect("parse limits-only response");
+        let summary = usage_summary_from_dto(dto);
+
+        assert_eq!(summary.window.utilization, Some(17.0));
+        assert!(summary.window.resets_at.is_some());
+        assert_eq!(summary.seven_day.utilization, Some(30.0));
+        assert_eq!(summary.seven_day_opus.utilization, Some(24.0));
+    }
+
+    #[test]
+    fn reset_timestamps_parse_as_rfc3339_or_epoch_seconds() {
+        let rfc =
+            r#"{"five_hour": {"utilization": 5.0, "resets_at": "2026-09-01T09:30:00+00:00"}}"#;
+        let dto: UsageResponseDto = serde_json::from_str(rfc).expect("parse rfc3339");
+        let rfc_reset = usage_summary_from_dto(dto).window.resets_at.expect("reset");
+
+        // Claude Code's own hook already reports resets as epoch seconds, so the
+        // endpoint moving to that form is a plausible change rather than a
+        // hypothetical one.
+        let epoch = r#"{"five_hour": {"utilization": 5.0, "resets_at": 1788255000}}"#;
+        let dto: UsageResponseDto = serde_json::from_str(epoch).expect("parse epoch seconds");
+        let epoch_reset = usage_summary_from_dto(dto).window.resets_at.expect("reset");
+
+        assert_eq!(rfc_reset, epoch_reset);
     }
 
     #[test]

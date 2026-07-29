@@ -104,6 +104,7 @@ Restart Claude Code. Done.
 | **burn** | Tokens per minute and cost per hour |
 | **context** | Token count and percentage of context window used |
 | **reset** | Time remaining until usage window reset |
+| **up** | How old the usage figures are, e.g. `up:15m`. Absent while they are current, so it appears only when a refresh was due and did not land |
 | **model** | Friendly model identity with family-specific ANSI or truecolor styling |
 | **git** | Branch, commit, dirty state, ahead/behind |
 | **workspace** | Added workspace dirs and linked worktree hints from Claude Code |
@@ -225,6 +226,7 @@ Scoped weekly model rows from the OAuth usage API render from the model metadata
 | cost | `--no-cost-lines-delta` | on | `+a -b` lines token in header |
 | usage | `--no-usage-five-hour` | on | `usage:X%` + reset inline |
 | usage | `--no-usage-weekly` | on | `weekly:X%` / `7d:X%` token |
+| usage | `--no-usage-age` | on | `up:N` token, shown only once the usage figures outlive their refresh window |
 | usage | `--no-usage-opus` | on | `opus:X%` legacy or scoped family token |
 | usage | `--no-usage-sonnet` | on | `sonnet:X%` legacy or scoped family token |
 | usage | `--no-usage-extra` | on | paid extra-usage credit token |
@@ -330,6 +332,8 @@ The budget is per account, not per machine, and only the fetch lock is machine-l
 | 3 | 3 | 100s |
 | 5 | 5 (at budget) | 300s, leave at default |
 
+The `up:` token reports how stale the figures are, staying hidden until they outlive the TTL above and then colouring from muted through amber to red as further refresh windows are missed. Because both the 5-hour and weekly tokens come from one cached fetch, the age is stated once for the group rather than repeated per token.
+
 `CLAUDE_USAGE_CACHE_TTL_SECONDS` will not go below 60 seconds. Overshooting is self-correcting rather than fatal (the `retry-after` backoff parks the statusline on cached numbers until the window reopens), but sustained overshoot means the displayed utilization is persistently stale. `doctor` prints the effective TTL.
 
 `init` writes the Claude Code `statusLine` and `subagentStatusLine` blocks to `settings.json` (the `subagentStatusLine` schema takes only `type` and `command`; extra keys on existing objects are preserved either way):
@@ -398,6 +402,7 @@ lines_delta = true
 [display.usage]
 five_hour = true
 weekly = true
+age = true
 opus = true
 sonnet = true
 extra = true

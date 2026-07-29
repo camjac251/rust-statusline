@@ -188,6 +188,13 @@ pub struct Args {
         env = "CLAUDE_STATUSLINE_USAGE_NO_WEEKLY"
     )]
     pub no_usage_weekly: bool,
+    /// Hide the `up:` token reporting how old the usage figures are
+    #[arg(
+        long = "no-usage-age",
+        global = true,
+        env = "CLAUDE_STATUSLINE_USAGE_NO_AGE"
+    )]
+    pub no_usage_age: bool,
     /// Hide the per-model Opus usage percent token
     #[arg(
         long = "no-usage-opus",

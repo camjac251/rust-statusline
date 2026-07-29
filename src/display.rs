@@ -133,6 +133,37 @@ fn colorize_percent(pct: f64, args: &Args) -> String {
     }
 }
 
+/// Compact single-unit age, e.g. `8m`, `2h`, `3d`.
+///
+/// Deliberately coarser than the `3h49m` reset countdown beside it: the point
+/// is how stale the number is, not a precise duration, and a single unit keeps
+/// the two from reading as the same kind of value.
+fn format_usage_age(seconds: i64) -> String {
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+
+    match seconds {
+        s if s < MINUTE => "<1m".to_string(),
+        s if s < HOUR => format!("{}m", s / MINUTE),
+        s if s < DAY => format!("{}h", s / HOUR),
+        s => format!("{}d", s / DAY),
+    }
+}
+
+/// Colour the age by how many refresh windows have been missed, so the scale
+/// tracks the configured TTL instead of hardcoded wall-clock thresholds.
+fn usage_age_token(seconds: i64, truecolor: bool) -> String {
+    let ttl = crate::usage_api::cache_ttl_seconds().max(1);
+    let windows_missed = seconds / ttl;
+    let token = match windows_missed {
+        0..=2 => tokens::MUTED,
+        3..=11 => tokens::WARNING,
+        _ => tokens::ERROR,
+    };
+    token.paint(&format_usage_age(seconds), truecolor)
+}
+
 fn usage_limit_json(limit: &UsageLimit) -> serde_json::Value {
     serde_json::json!({
         "utilization": limit.utilization.map(|v| (v * 10.0).round() / 10.0),
@@ -2080,6 +2111,26 @@ fn render_rich_text_output(
             };
             segments.push(status_segment(extra_segment, 12));
         }
+
+        // How stale the usage figures are. Both the 5h and weekly tokens come
+        // from one cached fetch, so this is stated once for the group rather
+        // than repeated per token. Silent until a refresh was due and missed,
+        // which makes it a fault signal rather than a permanent fixture.
+        if !args.no_usage_age {
+            let now = chrono::Utc::now();
+            if summary.is_past_refresh_window(now)
+                && let Some(age) = summary.age_seconds(now)
+            {
+                segments.push(status_segment(
+                    format!(
+                        "{}{}",
+                        muted_label("up:", tc),
+                        usage_age_token(age, tc).as_str()
+                    ),
+                    11,
+                ));
+            }
+        }
     }
 
     if args.cost_breakdown {
@@ -2603,6 +2654,47 @@ mod tests {
         assert!(plain.contains("wf:active 1/2"), "line: {plain}");
         assert!(plain.contains("rt:1"), "line: {plain}");
         assert!(!plain.contains("finished"), "line: {plain}");
+    }
+
+    #[test]
+    fn usage_age_uses_one_coarse_unit() {
+        assert_eq!(format_usage_age(0), "<1m");
+        assert_eq!(format_usage_age(59), "<1m");
+        assert_eq!(format_usage_age(60), "1m");
+        assert_eq!(format_usage_age(8 * 60), "8m");
+        assert_eq!(format_usage_age(59 * 60), "59m");
+        assert_eq!(format_usage_age(60 * 60), "1h");
+        // Minutes are dropped past an hour so it never reads like the reset
+        // countdown sitting next to it.
+        assert_eq!(format_usage_age(2 * 3600 + 49 * 60), "2h");
+        assert_eq!(format_usage_age(24 * 3600), "1d");
+        assert_eq!(format_usage_age(3 * 24 * 3600 + 5 * 3600), "3d");
+    }
+
+    #[test]
+    fn usage_age_stays_silent_until_a_refresh_is_actually_missed() {
+        let now = chrono::Utc::now();
+        let ttl = crate::usage_api::cache_ttl_seconds();
+        let at_age = |seconds: i64| UsageSummary {
+            fetched_at: Some(now - chrono::TimeDelta::seconds(seconds)),
+            ..UsageSummary::default()
+        };
+
+        assert!(!at_age(0).is_past_refresh_window(now));
+        assert!(!at_age(ttl - 1).is_past_refresh_window(now));
+        // Exactly at the TTL the entry is still the one a refresh would produce.
+        assert!(!at_age(ttl).is_past_refresh_window(now));
+        assert!(at_age(ttl + 1).is_past_refresh_window(now));
+    }
+
+    #[test]
+    fn usage_age_is_absent_for_summaries_written_before_age_stamping() {
+        // A cache row from an older build carries no timestamp, so it must
+        // report no age rather than one invented from the read time.
+        let summary = UsageSummary::default();
+        let now = chrono::Utc::now();
+        assert_eq!(summary.age_seconds(now), None);
+        assert!(!summary.is_past_refresh_window(now));
     }
 
     #[test]
@@ -3474,7 +3566,9 @@ pub fn build_json_output(
             "spend": &summary.spend,
             "codename_limits": &summary.codename_limits,
             "member_dashboard_available": summary.member_dashboard_available,
-            "unknown_fields": &summary.unknown_fields
+            "unknown_fields": &summary.unknown_fields,
+            "fetched_at": summary.fetched_at.map(|at| at.to_rfc3339()),
+            "age_seconds": summary.age_seconds(chrono::Utc::now())
         })
     });
 
