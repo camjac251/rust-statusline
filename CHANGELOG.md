@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [2.11.2](https://github.com/camjac251/rust-statusline/compare/v2.11.1...v2.11.2) - 2026-08-06
+
+### Fixed
+
+- *(usage)* preserve scoped OAuth limits
+
 ## [2.11.1](https://github.com/camjac251/rust-statusline/compare/v2.11.0...v2.11.1) - 2026-07-29
 
 ### Other
