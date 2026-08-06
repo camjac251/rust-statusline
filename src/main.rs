@@ -52,6 +52,18 @@ fn release_db_scan_lock() {
     let _ = claude_statusline::db::set_api_cache(DB_SCAN_LOCK_KEY, "", 0);
 }
 
+fn merge_hook_usage_with_api(mut hook: UsageSummary, mut api: UsageSummary) -> UsageSummary {
+    if api.stale {
+        return hook;
+    }
+
+    hook.window.fill_missing_from(&api.window);
+    hook.seven_day.fill_missing_from(&api.seven_day);
+    api.window = hook.window;
+    api.seven_day = hook.seven_day;
+    api
+}
+
 fn session_today_cost_for_db(
     session_id: &str,
     scan_session_today_cost: f64,
@@ -551,51 +563,30 @@ fn main() -> Result<()> {
                 }
             }
         } else if let Some(api_summary) = get_usage_summary(&paths, Some(&hook.model.id)) {
-            // Hook provided utilization/reset; enrich with API-only fields
-            if let Some(ref mut summary) = usage_summary {
-                summary.window.fill_missing_from(&api_summary.window);
-                summary.seven_day.fill_missing_from(&api_summary.seven_day);
-                if summary.extra_usage.is_none() {
-                    summary.extra_usage = api_summary.extra_usage.clone();
-                }
-                summary
-                    .seven_day_sonnet
-                    .fill_missing_from(&api_summary.seven_day_sonnet);
-                summary
-                    .seven_day_opus
-                    .fill_missing_from(&api_summary.seven_day_opus);
-                summary
-                    .seven_day_oauth_apps
-                    .fill_missing_from(&api_summary.seven_day_oauth_apps);
-                summary
-                    .seven_day_cowork
-                    .fill_missing_from(&api_summary.seven_day_cowork);
-                summary
-                    .cinder_cove
-                    .fill_missing_from(&api_summary.cinder_cove);
-                if summary.limits.is_empty() {
-                    summary.limits = api_summary.limits.clone();
-                }
-                if summary.spend.is_none() {
-                    summary.spend = api_summary.spend.clone();
-                }
+            // Hook utilization/reset wins, while a fresh OAuth response supplies
+            // all API-only fields and fetch metadata. Stale enrichment is rejected
+            // so it cannot make an expired hook window look current.
+            if let Some(hook_summary) = usage_summary.take() {
+                usage_summary = Some(merge_hook_usage_with_api(hook_summary, api_summary));
             }
         }
 
-        // When the hook's five-hour snapshot was stale, the enrichment above filled
-        // the window from the live OAuth value; adopt it for the primary display.
-        if hook_five_hour_stale && usage_percent_display.is_none() {
-            if let Some(summary) = usage_summary.as_ref() {
+        // Fresh OAuth data fills any five-hour field the hook omitted. Adopt
+        // each recovered value independently for the primary display.
+        if let Some(summary) = usage_summary.as_ref() {
+            if usage_percent_display.is_none() {
                 usage_percent_display = summary.window.utilization;
-                if let Some(reset) = summary.window.resets_at {
-                    apply_reset(
-                        reset,
-                        now_utc,
-                        &mut reset_at_display,
-                        &mut window_anchor,
-                        &mut authoritative_remaining_minutes,
-                    );
-                }
+            }
+            if reset_at_display.is_none()
+                && let Some(reset) = summary.window.resets_at
+            {
+                apply_reset(
+                    reset,
+                    now_utc,
+                    &mut reset_at_display,
+                    &mut window_anchor,
+                    &mut authoritative_remaining_minutes,
+                );
             }
         }
     }

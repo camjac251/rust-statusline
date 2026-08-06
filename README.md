@@ -247,11 +247,13 @@ Scoped weekly model rows from the OAuth usage API render from the model metadata
 | integrations | `--no-integrations-beads` | on | beads current-work + open count segment |
 | integrations | `--no-integrations-beads-alerts` | on | beads P0 + blocked alert segment |
 | integrations | `--no-integrations-gastown` | on | gastown header segment |
-| integrations | `--no-integrations-prompt-cache` | on | prompt-cache countdown token |
+| integrations | `--no-integrations-prompt-cache` | on | prompt-cache status and optional read/write token details |
 | integrations | `--no-integrations-workflows` | on | running-workflow `wf:name done/total` segment |
 | integrations | `--no-integrations-remote-tasks` | on | remote-agent task-count `rt:N` segment |
 | provider | `--provider-key-source` | off | `key:X` hint |
 | provider | `--provider-name` | off | `prov:Y` hint |
+
+At narrower widths, prompt-cache read/write token details collapse before the cache status is dropped.
 
 **JSON-only toggles** (omit fields from `--json` output)
 

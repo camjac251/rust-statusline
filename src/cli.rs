@@ -343,7 +343,7 @@ pub struct Args {
         env = "CLAUDE_STATUSLINE_INTEGRATIONS_NO_GASTOWN"
     )]
     pub no_integrations_gastown: bool,
-    /// Hide the prompt-cache countdown token in the status line
+    /// Hide the prompt-cache status and optional token details in the status line
     #[arg(
         long = "no-integrations-prompt-cache",
         global = true,
@@ -410,7 +410,7 @@ pub struct Args {
         env = "CLAUDE_STATUSLINE_JSON_NO_RATE_LIMIT"
     )]
     pub no_json_rate_limit: bool,
-    /// Omit the top-level usage_limits object (also gated by subsystems.usage_api)
+    /// Omit the top-level usage_limits object, including hook-derived limits
     #[arg(
         long = "no-json-usage-limits",
         global = true,

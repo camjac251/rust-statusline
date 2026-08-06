@@ -306,7 +306,7 @@ fn prompt_cache_json(info: Option<&PromptCacheInfo>) -> serde_json::Value {
     .unwrap_or(serde_json::Value::Null)
 }
 
-fn render_prompt_cache_segment(info: &PromptCacheInfo, tc: bool) -> String {
+fn render_prompt_cache_segment(info: &PromptCacheInfo, tc: bool) -> StatusSegment {
     let mut parts: Vec<String> = info
         .buckets
         .iter()
@@ -331,6 +331,12 @@ fn render_prompt_cache_segment(info: &PromptCacheInfo, tc: bool) -> String {
         tokens::PRIMARY_DIM
     };
 
+    let compact = format!(
+        "{}{}",
+        muted_label("cache:", tc),
+        token.paint(&parts.join(" "), tc)
+    );
+    let mut full = compact.clone();
     let mut token_parts = Vec::new();
     let show_read_tokens = match (info.last_cache_read_at, info.last_cache_write_at) {
         (Some(read), Some(write)) => read >= write,
@@ -351,20 +357,15 @@ fn render_prompt_cache_segment(info: &PromptCacheInfo, tc: bool) -> String {
             format_tokens(info.cache_write_input_tokens)
         ));
     }
-
-    let mut segment = format!(
-        "{}{}",
-        muted_label("cache:", tc),
-        token.paint(&parts.join(" "), tc)
-    );
     if !token_parts.is_empty() {
         let _ = write!(
-            segment,
+            full,
             " {}",
             tokens::PRIMARY_DIM.paint(&token_parts.join(" "), tc)
         );
     }
-    segment
+
+    adaptive_segment(vec![full, compact], 50)
 }
 
 fn is_truecolor_enabled(args: &Args) -> bool {
@@ -2155,7 +2156,7 @@ fn render_rich_text_output(
     if !args.no_integrations_prompt_cache
         && let Some(info) = prompt_cache
     {
-        segments.push(status_segment(render_prompt_cache_segment(info, tc), 50));
+        segments.push(render_prompt_cache_segment(info, tc));
     }
 
     if !args.no_context_tokens || !args.no_context_percent {
@@ -2411,6 +2412,7 @@ mod tests {
             "TERM",
             "COLORTERM",
             "CLAUDE_TRUECOLOR",
+            "CLAUDE_AUTO_COMPACT_ENABLED",
         ])
     }
 
@@ -3220,6 +3222,110 @@ mod tests {
 
     #[test]
     #[serial]
+    fn rich_usage_row_keeps_scoped_fable_at_observed_medium_width() {
+        let env = terminal_env_guard();
+        env.force_dimensions("200", "32");
+        env.set("NO_COLOR", "1");
+        env.set("CLAUDE_AUTO_COMPACT_ENABLED", "true");
+
+        let reset = chrono::Utc::now() + chrono::TimeDelta::days(2);
+        let summary = UsageSummary {
+            seven_day: UsageLimit {
+                utilization: Some(22.0),
+                resets_at: Some(reset),
+                ..UsageLimit::default()
+            },
+            seven_day_sonnet: UsageLimit {
+                utilization: Some(0.0),
+                ..UsageLimit::default()
+            },
+            limits: vec![scoped_weekly_limit("Fable", 24.0)],
+            extra_usage: Some(crate::usage_api::ExtraUsage {
+                is_enabled: true,
+                monthly_limit: Some(60.0),
+                used_credits: Some(17.0),
+                utilization: Some(28.3),
+                ..Default::default()
+            }),
+            ..UsageSummary::default()
+        };
+        let write_ts = chrono::Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap();
+        let prompt_cache = PromptCacheInfo {
+            buckets: vec![PromptCacheBucketInfo {
+                kind: PromptCacheBucketKind::OneHour,
+                created_at: write_ts,
+                ttl_seconds: 3600,
+                input_tokens: 2_000,
+            }],
+            last_cache_write_at: Some(write_ts),
+            last_cache_read_at: Some(write_ts),
+            cache_write_input_tokens: 2_000,
+            cache_read_input_tokens: 1_800,
+            now: write_ts + chrono::TimeDelta::seconds(42),
+        };
+
+        let render = || {
+            render_rich_text_output(
+                &test_args(),
+                "claude-opus-5",
+                "Opus 5 (1M)",
+                159.93,
+                479.04,
+                27.68,
+                Some(35.0),
+                None,
+                242.0,
+                None,
+                None,
+                1_500.0,
+                Some((716_600, 72)),
+                0,
+                0,
+                0,
+                0,
+                0,
+                Some(&summary),
+                Some(1_000_000),
+                Some(&prompt_cache),
+            )
+        };
+        let line = render();
+        let profile = render_profile();
+        let plain = strip_ansi(&line);
+
+        assert_eq!(profile.mode, RenderMode::Rich);
+        assert_eq!(profile.safe_width, 141);
+        assert!(plain.contains("fable:24%"), "line: {plain}");
+        assert!(plain.contains("cache:1h"), "line: {plain}");
+        assert!(!plain.contains("r:1.8K"), "line: {plain}");
+        assert!(!plain.contains("w:2K"), "line: {plain}");
+        assert!(
+            visible_width(&line) <= usize::from(profile.safe_width),
+            "{} > {}: {plain}",
+            visible_width(&line),
+            profile.safe_width
+        );
+
+        env.force_dimensions("320", "32");
+        let wide_line = render();
+        let wide_profile = render_profile();
+        let wide_plain = strip_ansi(&wide_line);
+
+        assert_eq!(wide_profile.mode, RenderMode::Rich);
+        assert!(wide_plain.contains("fable:24%"), "line: {wide_plain}");
+        assert!(wide_plain.contains("cache:1h"), "line: {wide_plain}");
+        assert!(wide_plain.contains("r:1.8K"), "line: {wide_plain}");
+        assert!(wide_plain.contains("w:2K"), "line: {wide_plain}");
+        assert!(
+            visible_width(&wide_line) <= usize::from(wide_profile.safe_width),
+            "{} > {}: {wide_plain}",
+            visible_width(&wide_line),
+            wide_profile.safe_width
+        );
+    }
+
+    #[test]
+    #[serial]
     fn rich_usage_row_deduplicates_scoped_sonnet_and_legacy_field() {
         let env = terminal_env_guard();
         env.force_dimensions("320", "32");
@@ -3323,14 +3429,19 @@ mod tests {
         };
 
         let segment = render_prompt_cache_segment(&info, false);
+        let full = strip_ansi(&segment.variants[0]);
+        let compact = strip_ansi(&segment.variants[1]);
 
-        assert!(segment.contains("1h"));
-        assert!(segment.contains("r:1.8K"));
-        assert!(segment.contains("w:2K"));
-        assert!(!segment.contains("59m"));
-        assert!(!segment.contains("made:"));
-        assert!(!segment.contains("hit:"));
-        assert!(!segment.contains("age:"));
+        assert!(full.contains("1h"));
+        assert!(full.contains("r:1.8K"));
+        assert!(full.contains("w:2K"));
+        assert!(!full.contains("59m"));
+        assert!(!full.contains("made:"));
+        assert!(!full.contains("hit:"));
+        assert!(!full.contains("age:"));
+        assert!(compact.contains("cache:1h"));
+        assert!(!compact.contains("r:"));
+        assert!(!compact.contains("w:"));
     }
 
     #[test]
@@ -3352,14 +3463,19 @@ mod tests {
         };
 
         let segment = render_prompt_cache_segment(&info, false);
+        let full = strip_ansi(&segment.variants[0]);
+        let compact = strip_ansi(&segment.variants[1]);
 
-        assert!(segment.contains("1h"));
-        assert!(segment.contains("r:1.8K"));
-        assert!(!segment.contains("w:2K"));
-        assert!(!segment.contains("59m"));
-        assert!(!segment.contains("made:"));
-        assert!(!segment.contains("hit:"));
-        assert!(!segment.contains("age:"));
+        assert!(full.contains("1h"));
+        assert!(full.contains("r:1.8K"));
+        assert!(!full.contains("w:2K"));
+        assert!(!full.contains("59m"));
+        assert!(!full.contains("made:"));
+        assert!(!full.contains("hit:"));
+        assert!(!full.contains("age:"));
+        assert!(compact.contains("cache:1h"));
+        assert!(!compact.contains("r:"));
+        assert!(!compact.contains("w:"));
     }
 }
 
