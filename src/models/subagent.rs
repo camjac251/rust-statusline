@@ -310,7 +310,7 @@ mod tests {
 
         fs::write(
             subagents_dir.join("agent-aaa111.meta.json"),
-            r#"{"agentType":"test-engineer","name":"tests","parentAgentId":"a5a2","spawnDepth":2,"toolUseId":"toolu_01example456789abcd"}"#,
+            r#"{"agentType":"test-engineer","name":"tests","parentAgentId":"root-agent","spawnDepth":2,"toolUseId":"toolu_01example456789abcd"}"#,
         )
         .unwrap();
         fs::write(
