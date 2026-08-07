@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## [2.12.0](https://github.com/camjac251/rust-statusline/compare/v2.11.2...v2.12.0) - 2026-08-07
+
+### Added
+
+- *(display)* measure the footer instead of guessing at it
+
+### Other
+
+- *(subagent)* use a synthetic parent id in the forked-skill fixture
+
 ## [2.11.2](https://github.com/camjac251/rust-statusline/compare/v2.11.1...v2.11.2) - 2026-08-06
 
 ### Fixed
