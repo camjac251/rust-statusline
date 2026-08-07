@@ -77,6 +77,27 @@ pub fn format_path(p: &str) -> String {
     p.to_owned()
 }
 
+/// Build a `file://` URL for an absolute path, for use as a hyperlink target.
+///
+/// Percent-encodes everything outside the RFC 3986 unreserved set, keeping `/`
+/// as the separator. A relative path has no unambiguous URL, so it yields none.
+pub fn file_url(path: &str) -> Option<String> {
+    if !path.starts_with('/') {
+        return None;
+    }
+    let mut url = String::with_capacity(path.len() + 8);
+    url.push_str("file://");
+    for byte in path.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                url.push(byte as char);
+            }
+            _ => url.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    Some(url)
+}
+
 pub fn format_currency(v: f64) -> String {
     format!("{v:.2}")
 }

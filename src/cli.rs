@@ -120,6 +120,14 @@ pub struct Args {
     #[arg(long)]
     pub truecolor: bool,
 
+    /// Emit path and repo segments as plain text instead of OSC 8 hyperlinks
+    #[arg(
+        long = "no-hyperlinks",
+        global = true,
+        env = "CLAUDE_STATUSLINE_NO_HYPERLINKS"
+    )]
+    pub no_hyperlinks: bool,
+
     /// Prompt cache TTL in seconds
     #[arg(long, env = "CLAUDE_PROMPT_CACHE_TTL_SECONDS")]
     pub prompt_cache_ttl_seconds: Option<u64>,

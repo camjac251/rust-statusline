@@ -123,12 +123,25 @@ fn main() -> Result<()> {
             return Ok(());
         }
         let now_ms = Utc::now().timestamp_millis().max(0) as u64;
-        for row in render_subagent_statusline(&subagent_status, now_ms, args.truecolor) {
+        // Same detection as the footer: the agent panel and the status line are
+        // one binary in one terminal, so they must not disagree on the palette.
+        let truecolor = claude_statusline::display::is_truecolor_enabled(&args);
+        for row in render_subagent_statusline(&subagent_status, now_ms, truecolor) {
             println!(
                 "{}",
                 serde_json::to_string(&row).context("serialize subagent statusline row")?
             );
         }
+        return Ok(());
+    }
+
+    // Diagnostic: replace the footer with a column ruler so the width Claude Code
+    // actually grants can be read off the screen. Placed after the agent-panel
+    // branch because that surface answers in JSONL and gets its budget from the
+    // payload rather than from the terminal.
+    let ruler = claude_statusline::display::ruler_requested();
+    if !matches!(ruler, claude_statusline::display::RulerRequest::Off) {
+        claude_statusline::display::print_width_ruler(&ruler);
         return Ok(());
     }
 

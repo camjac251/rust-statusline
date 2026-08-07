@@ -33,6 +33,36 @@ fn run_statusline(args: &[&str], stdin_payload: &str) -> std::process::Output {
     child.wait_with_output().unwrap()
 }
 
+/// Same as `run_statusline` but with colors left on and the palette-detection
+/// environment pinned, so a test states exactly which signals are present.
+#[cfg(feature = "colors")]
+fn run_statusline_colored(env: &[(&str, &str)], stdin_payload: &str) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_claude_statusline"));
+    command
+        .env_remove("NO_COLOR")
+        .env_remove("COLORTERM")
+        .env_remove("CLAUDE_TRUECOLOR")
+        .env("TERM", "xterm")
+        .env("CLAUDE_TERMINAL_WIDTH", "320")
+        .env("LINES", "32");
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(stdin_payload.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
 /// One task per payload kind Claude Code's task registry can emit; only
 /// `local_agent` arrives in practice, the rest exercise defensive tolerance.
 /// The non-agent rows drop the optional fields (name, model, effort,
@@ -346,4 +376,160 @@ fn statusline_hook_payload_still_routes_to_text_output() {
             .is_ok_and(|value| value.get("id").is_some() && value.get("content").is_some());
         assert!(!decoration_shaped, "line rendered as a decoration: {line}");
     }
+}
+
+/// Claude Code discards every decoration for the tick when the command exits
+/// non-zero, so one task it sends in an unexpected shape must not silence the
+/// rest of the panel.
+#[test]
+fn one_unreadable_task_does_not_drop_its_siblings() {
+    let start_time = epoch_ms_now();
+    let payload = json!({
+        "columns": 120,
+        "tasks": [
+            {
+                "id": "good-1",
+                "name": "Explore",
+                "type": "local_agent",
+                "status": "running",
+                "startTime": start_time,
+                "tokenCount": 1_000
+            },
+            {
+                // The object form the main statusline hook uses for effort.
+                "id": "object-effort",
+                "name": "Plan",
+                "type": "local_agent",
+                "status": "running",
+                "startTime": start_time,
+                "effort": { "level": "high" },
+                "tokenCount": 2_000
+            },
+            {
+                // No id, so there is nothing to key a decoration to.
+                "type": "local_agent",
+                "status": "running",
+                "startTime": start_time
+            },
+            {
+                "id": "good-2",
+                "name": "Review",
+                "type": "local_agent",
+                "status": "running",
+                "startTime": start_time,
+                "tokenCount": 3_000
+            }
+        ]
+    });
+
+    let output = run_statusline(&[], &payload.to_string());
+    assert!(
+        output.status.success(),
+        "subagent statusline failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let ids: Vec<String> = stdout
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    // The unreadable row keeps Claude Code's default rendering; the object-form
+    // effort parses and simply renders no chip.
+    assert_eq!(ids, ["good-1", "object-effort", "good-2"]);
+    assert!(stdout.contains("Explore"), "stdout: {stdout}");
+    assert!(stdout.contains("Review"), "stdout: {stdout}");
+}
+
+#[test]
+fn missing_columns_falls_back_instead_of_failing() {
+    let payload = json!({
+        "tasks": [{
+            "id": "solo",
+            "name": "Explore",
+            "type": "local_agent",
+            "status": "running",
+            "startTime": epoch_ms_now(),
+            "tokenCount": 1_234
+        }]
+    });
+
+    let output = run_statusline(&[], &payload.to_string());
+    assert!(
+        output.status.success(),
+        "subagent statusline failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Explore"), "stdout: {stdout}");
+    assert!(stdout.contains("1.2K"), "stdout: {stdout}");
+}
+
+/// An effort tier this build does not know still renders. A patched Claude Code
+/// that grows a level should show it rather than silently drop the chip.
+#[test]
+fn unrecognized_effort_tier_still_renders_a_chip() {
+    let payload = json!({
+        "columns": 120,
+        "tasks": [{
+            "id": "agent-1",
+            "name": "Explore",
+            "type": "local_agent",
+            "status": "running",
+            "startTime": epoch_ms_now(),
+            "model": "claude-opus-4-8",
+            "effort": "turbo",
+            "tokenCount": 1_000
+        }]
+    });
+
+    let output = run_statusline(&[], &payload.to_string());
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("turbo"), "stdout: {stdout}");
+}
+
+/// The agent panel and the footer are one binary in one terminal, so they must
+/// resolve the same palette from the same signals.
+#[cfg(feature = "colors")]
+#[test]
+fn agent_rows_use_the_same_truecolor_detection_as_the_footer() {
+    let payload = json!({
+        "columns": 120,
+        "tasks": [{
+            "id": "agent-1",
+            "name": "Explore",
+            "type": "local_agent",
+            "status": "running",
+            "startTime": epoch_ms_now(),
+            "tokenCount": 1_000
+        }]
+    });
+    let payload = payload.to_string();
+
+    for env in [
+        [("COLORTERM", "truecolor")],
+        [("CLAUDE_TRUECOLOR", "1")],
+        [("TERM", "xterm-256color")],
+    ] {
+        let output = run_statusline_colored(&env, &payload);
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("38;2;"),
+            "expected truecolor from {env:?}: {stdout}"
+        );
+    }
+
+    // With none of those signals present the ANSI fallback still applies.
+    let output = run_statusline_colored(&[], &payload);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("38;2;"), "stdout: {stdout}");
+    assert!(stdout.contains("\\u001b["), "stdout: {stdout}");
 }

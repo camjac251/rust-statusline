@@ -23,6 +23,7 @@ pub struct FileConfig {
     pub git: Option<GitArg>,
     pub time_fmt: Option<TimeFormatArg>,
     pub truecolor: Option<bool>,
+    pub hyperlinks: Option<bool>,
     pub prompt_cache_ttl_seconds: Option<u64>,
     pub burn_scope: Option<BurnScopeArg>,
     pub window_scope: Option<WindowScopeArg>,
@@ -210,6 +211,12 @@ fn apply_config(args: &mut Args, matches: &clap::ArgMatches, config: &FileConfig
             args.truecolor = value;
         }
     }
+    apply_display_toggle(
+        matches,
+        "no_hyperlinks",
+        config.hyperlinks,
+        &mut args.no_hyperlinks,
+    );
     if !arg_was_user_set(matches, "prompt_cache_ttl_seconds") {
         if let Some(value) = config.prompt_cache_ttl_seconds {
             args.prompt_cache_ttl_seconds = Some(value);
@@ -722,6 +729,7 @@ fn parse_config_str(input: &str) -> Result<FileConfig> {
             "git.verbosity" => config.git = Some(parse_git(value)?),
             "time" | "time_fmt" => config.time_fmt = Some(parse_time(value)?),
             "truecolor" => config.truecolor = Some(parse_bool(value)?),
+            "hyperlinks" => config.hyperlinks = Some(parse_bool(value)?),
             "prompt_cache_ttl_seconds" => config.prompt_cache_ttl_seconds = Some(parse_u64(value)?),
             "burn_scope" => config.burn_scope = Some(parse_burn_scope(value)?),
             "window_scope" => config.window_scope = Some(parse_window_scope(value)?),

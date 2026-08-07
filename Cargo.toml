@@ -20,6 +20,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 sha2 = "0.10"
 terminal_size = "0.4.4"
 walkdir = "2.5.0"
+unicode-width = "0.2.2"
 
 [features]
 default = ["git", "colors"]

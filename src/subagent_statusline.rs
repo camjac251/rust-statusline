@@ -13,19 +13,48 @@ use crate::tokens;
 use crate::utils::{format_tokens, friendly_model_name};
 use serde::{Deserialize, Serialize};
 
+/// Claude Code drops every decoration for the tick when the command exits
+/// non-zero, so a payload that grows an unexpected shape must not fail the whole
+/// batch. `columns` falls back to a conservative width and each task is parsed
+/// on its own: a row we cannot read keeps Claude Code's default rendering while
+/// its siblings still get decorated.
 #[derive(Debug, Deserialize)]
 pub struct SubagentStatusInput {
+    #[serde(default = "fallback_columns")]
     pub columns: usize,
+    #[serde(default, deserialize_with = "deserialize_readable_tasks")]
     pub tasks: Vec<SubagentStatusTask>,
+}
+
+/// Only used when Claude Code omits `columns` entirely, which it never does
+/// today. Narrow enough that the row survives Claude Code's own truncation on a
+/// small terminal, wide enough to stay informative.
+const FALLBACK_COLUMNS: usize = 80;
+
+fn fallback_columns() -> usize {
+    FALLBACK_COLUMNS
+}
+
+fn deserialize_readable_tasks<'de, D>(deserializer: D) -> Result<Vec<SubagentStatusTask>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Vec::<serde_json::Value>::deserialize(deserializer)?
+        .into_iter()
+        .filter_map(|task| serde_json::from_value(task).ok())
+        .collect())
 }
 
 /// Effort as Claude Code sends it: agent definitions admit either the string
 /// enum ("low" through "max") or an integer level, so both shapes must parse.
+/// `Other` catches anything else -- notably the `{level}` object the main
+/// statusline hook uses -- so an upstream convergence cannot fail the payload.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum SubagentEffort {
     Label(String),
     Level(i64),
+    Other(serde_json::Value),
 }
 
 /// One agent-panel task row. Deserialization reads the camelCase payload keys;
@@ -37,12 +66,15 @@ pub struct SubagentStatusTask {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(rename(deserialize = "type"))]
+    #[serde(default)]
     pub task_type: String,
+    #[serde(default)]
     pub status: String,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
     pub label: String,
+    #[serde(default)]
     pub start_time: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -240,24 +272,14 @@ fn model_token(label: &str) -> tokens::ColorToken {
 }
 
 /// Render the agent's effort as a colored chip on the shared none..max tier
-/// scale (muted none, cyan low -> bold pink max), matching the main line. Only the named
-/// efforts Claude Code sends for effort-capable models map to a chip; an
-/// integer level or an unrecognized/unset label yields none.
+/// scale, through the same mapping the footer uses so the two cannot drift.
+/// Claude Code only forwards a named effort for agents whose model exposes the
+/// capability; an integer level or any other shape yields no chip.
 fn effort_chip(effort: &SubagentEffort, truecolor: bool) -> Option<String> {
     let SubagentEffort::Label(label) = effort else {
         return None;
     };
-    let label = label.trim().to_lowercase();
-    let chip = match label.as_str() {
-        "none" => tokens::EFFORT_NONE.paint(&label, truecolor),
-        "low" => tokens::EFFORT_LOW.paint(&label, truecolor),
-        "medium" => tokens::EFFORT_MEDIUM.paint(&label, truecolor),
-        "high" => tokens::EFFORT_HIGH.paint(&label, truecolor),
-        "xhigh" => tokens::EFFORT_MAX.paint(&label, truecolor),
-        "max" => tokens::EFFORT_MAX.bold(&label, truecolor),
-        _ => return None,
-    };
-    Some(chip)
+    tokens::effort_chip(label, truecolor)
 }
 
 fn task_type_label(task_type: &str) -> String {
@@ -331,59 +353,21 @@ fn elapsed_label(elapsed_ms: u64) -> String {
 }
 
 fn visible_width(value: &str) -> usize {
-    let mut width = 0;
-    let mut in_escape = false;
-    for ch in value.chars() {
-        if in_escape {
-            if ch.is_ascii_alphabetic() {
-                in_escape = false;
-            }
-        } else if ch == '\u{1b}' {
-            in_escape = true;
-        } else {
-            width += 1;
-        }
-    }
-    width
+    tokens::visible_width(value)
 }
 
 fn truncate_with_ellipsis(value: &str, max_width: usize) -> String {
-    if visible_width(value) <= max_width {
-        return value.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    if max_width == 1 {
-        return "…".to_string();
-    }
-
-    let mut output: String = value.chars().take(max_width - 1).collect();
-    output.push('…');
-    output
+    tokens::truncate_to_width(value, max_width)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Strip ANSI SGR sequences so assertions read the visible text regardless
-    /// of the coloring the row now applies.
+    /// Strip ANSI escapes so assertions read the visible text regardless of the
+    /// styling the row now applies.
     fn plain(value: &str) -> String {
-        let mut output = String::new();
-        let mut in_escape = false;
-        for ch in value.chars() {
-            if in_escape {
-                if ch.is_ascii_alphabetic() {
-                    in_escape = false;
-                }
-            } else if ch == '\u{1b}' {
-                in_escape = true;
-            } else {
-                output.push(ch);
-            }
-        }
-        output
+        tokens::strip_ansi(value)
     }
 
     fn task() -> SubagentStatusTask {
@@ -426,10 +410,29 @@ mod tests {
     }
 
     #[test]
-    fn omits_effort_chip_for_integer_level_or_unknown_label() {
+    fn omits_effort_chip_for_a_non_named_effort() {
+        // An integer level is a raw reasoning budget, not a tier, so it has no
+        // place on the shared scale; the object form cannot be read as a label
+        // at all.
         assert!(effort_chip(&SubagentEffort::Level(3), false).is_none());
-        assert!(effort_chip(&SubagentEffort::Label("unset".to_string()), false).is_none());
+        assert!(
+            effort_chip(
+                &SubagentEffort::Other(serde_json::json!({"level": "high"})),
+                false
+            )
+            .is_none()
+        );
         assert!(effort_chip(&SubagentEffort::Label(String::new()), false).is_none());
+        assert!(effort_chip(&SubagentEffort::Label("  ".to_string()), false).is_none());
+    }
+
+    /// A named tier this build does not know still renders, so a Claude Code
+    /// that grows a level shows it here instead of silently dropping the chip.
+    #[test]
+    fn renders_an_unrecognized_named_tier() {
+        let chip = effort_chip(&SubagentEffort::Label("turbo".to_string()), false)
+            .expect("unknown tier still renders");
+        assert_eq!(plain(&chip), "turbo");
     }
 
     #[test]

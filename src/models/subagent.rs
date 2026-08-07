@@ -24,6 +24,39 @@ pub struct SubagentMeta {
     pub spawn_depth: Option<i64>,
     #[serde(default)]
     pub parent_agent_id: Option<String>,
+    /// Joins the agent back to the exact Task tool_use block in its parent's
+    /// transcript.
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
+}
+
+/// Effort as the forked-skill sidecar records it: the named tier or a raw
+/// integer reasoning budget, matching Claude Code's own union for the field.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ForkedSkillEffort {
+    Label(String),
+    Level(i64),
+}
+
+/// The `agent-<id>.forked-skill.json` scoping record Claude Code writes beside
+/// the transcript when a skill is run as a forked agent.
+///
+/// This is the only artifact that identifies a forked skill: such an agent's
+/// `meta.json` reports the underlying agent type, so a `/tests` fork is
+/// otherwise indistinguishable from an agent that happens to be named "tests".
+///
+/// Deserializes the sidecar's camelCase keys but serializes snake_case to match
+/// the rest of the `--json` surface. `frozenCommandDenies` is a permission
+/// detail with no display value and is left unread.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "camelCase"))]
+pub struct ForkedSkill {
+    pub skill_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ForkedSkillEffort>,
 }
 
 /// A parsed sidecar plus the `wf_<runId>` directory segment it was found under,
@@ -32,6 +65,7 @@ pub struct SubagentMeta {
 struct SubagentSidecar {
     meta: SubagentMeta,
     workflow_run_id: Option<String>,
+    forked_skill: Option<ForkedSkill>,
 }
 
 /// One row of the JSON `session.subagents` array. The base cost/token fields are
@@ -56,7 +90,11 @@ struct SubagentBreakdownRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     parent_agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    tool_use_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     workflow_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    forked_skill: Option<ForkedSkill>,
 }
 
 /// Derive the `subagents/` directory for the session whose main transcript is at
@@ -108,6 +146,15 @@ fn load_session_sidecars(
     out
 }
 
+/// Read the forked-skill scoping record that sits beside `agent-<id>.meta.json`.
+/// Absent for every agent that is not a forked skill, which is the common case,
+/// so a missing or unparseable file simply yields none.
+fn read_forked_skill(dir: &Path, agent_id: &str) -> Option<ForkedSkill> {
+    let path = dir.join(format!("agent-{agent_id}.forked-skill.json"));
+    let text = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 fn scan_sidecar_dir(
     dir: &Path,
     workflow_run_id: Option<&str>,
@@ -139,6 +186,7 @@ fn scan_sidecar_dir(
             SubagentSidecar {
                 meta,
                 workflow_run_id: workflow_run_id.map(str::to_string),
+                forked_skill: read_forked_skill(dir, id),
             },
         );
     }
@@ -190,7 +238,9 @@ pub fn build_subagent_breakdown(
                 description: sidecar.and_then(|s| s.meta.description.clone()),
                 spawn_depth: sidecar.and_then(|s| s.meta.spawn_depth),
                 parent_agent_id: sidecar.and_then(|s| s.meta.parent_agent_id.clone()),
+                tool_use_id: sidecar.and_then(|s| s.meta.tool_use_id.clone()),
                 workflow_run_id: sidecar.and_then(|s| s.workflow_run_id.clone()),
+                forked_skill: sidecar.and_then(|s| s.forked_skill.clone()),
             }
         })
         .collect();
@@ -245,6 +295,76 @@ mod tests {
 
         // agent_type is the only required field; its absence rejects the file.
         assert!(serde_json::from_str::<SubagentMeta>(r#"{"name":"x"}"#).is_err());
+    }
+
+    /// Fixtures copied from the shapes Claude Code 2.1.223 writes: the scoping
+    /// record identifies the skill, while `meta.json` reports only the agent type
+    /// the fork runs as.
+    #[test]
+    fn build_subagent_breakdown_surfaces_forked_skill_and_tool_use_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = "sess-fork";
+        let transcript_path = tmp.path().join(format!("{session_id}.jsonl"));
+        let subagents_dir = tmp.path().join(session_id).join("subagents");
+        fs::create_dir_all(&subagents_dir).unwrap();
+
+        fs::write(
+            subagents_dir.join("agent-aaa111.meta.json"),
+            r#"{"agentType":"test-engineer","name":"tests","parentAgentId":"a5a2","spawnDepth":2,"toolUseId":"toolu_01example456789abcd"}"#,
+        )
+        .unwrap();
+        fs::write(
+            subagents_dir.join("agent-aaa111.forked-skill.json"),
+            r#"{"skillName":"tests","attributionName":"tests","effort":"max","frozenCommandDenies":["rm"]}"#,
+        )
+        .unwrap();
+        // A plain agent alongside it, to prove the fields stay absent rather
+        // than serializing as null.
+        fs::write(
+            subagents_dir.join("agent-bbb222.meta.json"),
+            r#"{"agentType":"Explore"}"#,
+        )
+        .unwrap();
+
+        let entries = vec![
+            entry(session_id, "aaa111", 1.2, 900_000, 15_000),
+            entry(session_id, "bbb222", 0.5, 100, 10),
+        ];
+        let value =
+            build_subagent_breakdown(&entries, session_id, transcript_path.to_str().unwrap())
+                .expect("session has subagents");
+        let arr = value.as_array().expect("array");
+
+        let fork = &arr[0];
+        assert_eq!(fork["agent_type"], "test-engineer");
+        assert_eq!(fork["tool_use_id"], "toolu_01example456789abcd");
+        // Serialized snake_case like the rest of the JSON surface, even though
+        // the sidecar on disk is camelCase.
+        assert_eq!(fork["forked_skill"]["skill_name"], "tests");
+        assert_eq!(fork["forked_skill"]["attribution_name"], "tests");
+        assert_eq!(fork["forked_skill"]["effort"], "max");
+        // Permission detail with no display value stays unread.
+        assert!(fork["forked_skill"].get("frozen_command_denies").is_none());
+
+        let plain = &arr[1];
+        assert_eq!(plain["agent_type"], "Explore");
+        assert!(plain.get("forked_skill").is_none());
+        assert!(plain.get("tool_use_id").is_none());
+    }
+
+    #[test]
+    fn forked_skill_effort_accepts_the_integer_form() {
+        let scoping: ForkedSkill =
+            serde_json::from_str(r#"{"skillName":"s","attributionName":"s","effort":400}"#)
+                .unwrap();
+        assert!(matches!(
+            scoping.effort,
+            Some(ForkedSkillEffort::Level(400))
+        ));
+
+        let bare: ForkedSkill = serde_json::from_str(r#"{"skillName":"s"}"#).unwrap();
+        assert!(bare.effort.is_none());
+        assert!(bare.attribution_name.is_none());
     }
 
     #[test]

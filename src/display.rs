@@ -27,16 +27,19 @@ const SYM_RUNNING: &str = "●"; // Active/running indicator
 // Terminal width thresholds for responsive formatting
 const WIDTH_NARROW: u16 = 140;
 const WIDTH_MEDIUM: u16 = 200;
-// Claude Code sets COLUMNS to the full terminal width, but its footer box
-// spends ~5 of those columns on structural overhead (left/right padding and
-// the column gap) plus any configured statusLine padding.
-const TERMINAL_MARGIN: u16 = 15;
-// Beyond the structural overhead, the footer's right side holds auto-update
-// notices and mode labels that shrink the statusline column, and Claude Code
-// does not re-run the command on terminal resize. This reserve keeps output
-// clear of Ink's per-line ellipsis in the common case and absorbs a shrink
-// between refreshes.
-const CLAUDE_FOOTER_RESERVE: u16 = 44;
+/// Structural overhead of Claude Code's footer box: its `paddingLeft: 2` plus a
+/// `paddingRight` of 1, or 2 while a notification row is up.
+///
+/// Measured with `CLAUDE_STATUSLINE_RULER` against a live TUI at 80/120/200/320
+/// columns, where a full-width ruler renders `COLUMNS - 3` then Ink's ellipsis.
+/// The mode-label cluster does not compete for these columns: it is a sibling
+/// under `flexWrap: "wrap"` and moves to its own row once we are long.
+const TERMINAL_MARGIN: u16 = 4;
+/// Slack for a terminal narrowed between refreshes, since Claude Code does not
+/// re-run the command on resize. Small on purpose: overshooting costs a few
+/// seconds of ellipsis on the lowest-priority trailing segment, undershooting
+/// discards columns on every render.
+const CLAUDE_FOOTER_RESERVE: u16 = 8;
 const SHORT_TERMINAL_ROWS: u16 = 24;
 const DROP_BEFORE_SHRINK_MARGIN: u8 = 40;
 
@@ -97,7 +100,7 @@ use crate::models::{Block, GitInfo, HookJson, RateLimitInfo};
 use crate::usage_api::{UsageLimit, UsageSummary};
 use crate::utils::{
     auto_compact_enabled, auto_compact_headroom_tokens, context_limit_for_model_display,
-    deduce_provider_from_model, format_currency, format_path, format_tokens,
+    deduce_provider_from_model, file_url, format_currency, format_path, format_tokens,
     reserved_output_tokens_for_model, static_context_limit_lookup, system_overhead_tokens,
 };
 use crate::window::window_bounds;
@@ -368,7 +371,7 @@ fn render_prompt_cache_segment(info: &PromptCacheInfo, tc: bool) -> StatusSegmen
     adaptive_segment(vec![full, compact], 50)
 }
 
-fn is_truecolor_enabled(args: &Args) -> bool {
+pub fn is_truecolor_enabled(args: &Args) -> bool {
     if env::var_os("NO_COLOR").is_some() {
         return false;
     }
@@ -452,28 +455,11 @@ fn adaptive_segment(variants: Vec<String>, priority: u8) -> StatusSegment {
 }
 
 fn strip_ansi(text: &str) -> String {
-    let mut stripped = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' && chars.peek().is_some_and(|next| *next == '[') {
-            chars.next();
-            for code in chars.by_ref() {
-                if ('@'..='~').contains(&code) {
-                    break;
-                }
-            }
-            continue;
-        }
-
-        stripped.push(ch);
-    }
-
-    stripped
+    tokens::strip_ansi(text)
 }
 
 fn visible_width(text: &str) -> usize {
-    strip_ansi(text).chars().count()
+    tokens::visible_width(text)
 }
 
 fn fit_line_to_width(line: String, max_width: usize) -> String {
@@ -628,21 +614,91 @@ fn render_profile() -> RenderProfile {
     render_profile_for_dimensions(width, height)
 }
 
-fn truncate_label(text: &str, max_chars: usize) -> String {
-    let char_count = text.chars().count();
-    if char_count <= max_chars {
-        return text.to_string();
-    }
-    if max_chars <= 1 {
-        return "…".to_string();
-    }
+/// How `CLAUDE_STATUSLINE_RULER` was set: absent, "fill the reported width", or
+/// an explicit column count. A short explicit ruler leaves room beside it, which
+/// is what reveals the width of Claude Code's own mode-label cluster.
+pub enum RulerRequest {
+    Off,
+    FullWidth,
+    Fixed(u16),
+}
 
-    let mut truncated = String::new();
-    for ch in text.chars().take(max_chars - 1) {
-        truncated.push(ch);
+/// Parse `CLAUDE_STATUSLINE_RULER`. `1`/`true`/`yes` fill the terminal; any other
+/// integer is an explicit width; `0`/`false`/empty disable it.
+pub fn ruler_requested() -> RulerRequest {
+    let Ok(raw) = env::var("CLAUDE_STATUSLINE_RULER") else {
+        return RulerRequest::Off;
+    };
+    let value = raw.trim();
+    if value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false") {
+        return RulerRequest::Off;
     }
-    truncated.push('…');
-    truncated
+    match value.parse::<u16>() {
+        Ok(0 | 1) => RulerRequest::FullWidth,
+        Ok(width) => RulerRequest::Fixed(width),
+        Err(_) => RulerRequest::FullWidth,
+    }
+}
+
+/// Build a ruler whose every tenth column carries that column's number, so the
+/// point where Claude Code truncates can be read straight off the footer.
+///
+/// `--------10--------20--------30` -- each block is exactly ten columns wide and
+/// ends with its own count, so the last number still on screen plus the trailing
+/// dashes give the exact usable width.
+fn width_ruler(width: usize) -> String {
+    let mut out = String::with_capacity(width);
+    let mut column = 0;
+    while column < width {
+        let mark = (column + 10).to_string();
+        let dashes = 10usize.saturating_sub(mark.len());
+        for _ in 0..dashes {
+            if out.chars().count() >= width {
+                return out;
+            }
+            out.push('-');
+        }
+        for ch in mark.chars() {
+            if out.chars().count() >= width {
+                return out;
+            }
+            out.push(ch);
+        }
+        column += 10;
+    }
+    out.truncate(
+        out.char_indices()
+            .nth(width)
+            .map(|(i, _)| i)
+            .unwrap_or(out.len()),
+    );
+    out
+}
+
+/// Emit the width diagnostic: what we believe about the terminal, then a ruler
+/// spanning the full reported width. Whatever survives on screen is the width
+/// Claude Code actually grants, which is the number `CLAUDE_FOOTER_RESERVE` is
+/// trying to predict.
+pub fn print_width_ruler(request: &RulerRequest) {
+    let (width, height) = detect_terminal_dimensions();
+    let profile = render_profile_for_dimensions(width, height);
+    let ruler_width = match request {
+        RulerRequest::Fixed(fixed) => (*fixed).min(width),
+        _ => width,
+    };
+    println!(
+        "COLUMNS={} LINES={} assumed_safe_width={} reserve={} ruler={}",
+        width,
+        height.map_or_else(|| "?".to_string(), |rows| rows.to_string()),
+        profile.safe_width,
+        TERMINAL_MARGIN + CLAUDE_FOOTER_RESERVE,
+        ruler_width,
+    );
+    println!("{}", width_ruler(usize::from(ruler_width)));
+}
+
+fn truncate_label(text: &str, max_width: usize) -> String {
+    tokens::truncate_to_width(text, max_width)
 }
 
 fn hook_worktree_name(hook: &HookJson) -> Option<&str> {
@@ -701,6 +757,21 @@ fn added_dirs_segment(hook: &HookJson, tc: bool) -> Option<String> {
         muted_label("dirs:", tc),
         tokens::ACCENT.paint(&format!("+{}", count), tc)
     ))
+}
+
+/// Turn an already-styled segment into a `file://` hyperlink for `path`.
+///
+/// Claude Code re-emits OSC 8 on terminals that support it and renders the text
+/// plainly everywhere else (see the `subagentStatusLine` notes in CLAUDE.md), so
+/// the only gate needed here is the operator's own opt-out.
+fn link_to_path(text: String, path: &str, args: &Args) -> String {
+    if args.no_hyperlinks {
+        return text;
+    }
+    match file_url(path) {
+        Some(url) => tokens::hyperlink(&text, &url),
+        None => text,
+    }
 }
 
 fn worktree_segment(
@@ -1389,16 +1460,20 @@ fn render_header_line(
     // Build header segments: git (minimal) + model + beads + output_style + optional provider hints
     let mut header_parts: Vec<StatusSegment> = Vec::new();
     if !args.no_workspace_cwd {
+        // Both width variants point at the same directory, so they carry the
+        // same link; the shortened one is where a link earns the most, since the
+        // full path is no longer on screen.
+        let link = |text: String| link_to_path(text, &hook.workspace.current_dir, args);
         if let Some(base) = path_basename(&hook.workspace.current_dir) {
             header_parts.push(adaptive_segment(
                 vec![
-                    tokens::ACCENT.paint(&dir_fmt, tc),
-                    tokens::ACCENT.paint(base, tc),
+                    link(tokens::ACCENT.paint(&dir_fmt, tc)),
+                    link(tokens::ACCENT.paint(base, tc)),
                 ],
                 90,
             ));
         } else {
-            header_parts.push(status_segment(tokens::ACCENT.paint(&dir_fmt, tc), 90));
+            header_parts.push(status_segment(link(tokens::ACCENT.paint(&dir_fmt, tc)), 90));
         }
     }
     if let Some(git_seg) = build_git_status_segment(git_info, tc, profile.width, lines_delta, true)
@@ -1417,6 +1492,16 @@ fn render_header_line(
         && should_show_header_worktree(hook)
         && let Some(wt_seg) = worktree_segment(hook, git_info, tc, profile.width)
     {
+        // Only a `--worktree` session reports the directory the worktree lives
+        // in; a bare name from `workspace.git_worktree` has nothing to link to.
+        let wt_seg = match hook
+            .worktree
+            .as_ref()
+            .map(|worktree| worktree.path.as_str())
+        {
+            Some(path) => link_to_path(wt_seg, path, args),
+            None => wt_seg,
+        };
         header_parts.push(wrap_header_segment_variants(
             adaptive_segment(vec![wt_seg, muted_label("wt", tc)], 40),
             tc,
@@ -1621,19 +1706,11 @@ fn render_header_line(
     // Effort level segment (prefer live hook data, fall back to env var)
     if !args.no_workspace_effort
         && let Some(effort_lower) = active_effort_level(hook)
+        && let Some(effort_colored) = tokens::effort_chip(&effort_lower, tc)
     {
         let label = match profile.width {
             TerminalWidth::Narrow => "eff:",
             _ => "effort:",
-        };
-        let effort_colored = match effort_lower.as_str() {
-            "none" => tokens::EFFORT_NONE.paint(&effort_lower, tc),
-            "low" => tokens::EFFORT_LOW.paint(&effort_lower, tc),
-            "medium" => tokens::EFFORT_MEDIUM.paint(&effort_lower, tc),
-            "high" => tokens::EFFORT_HIGH.paint(&effort_lower, tc),
-            "xhigh" => tokens::EFFORT_MAX.paint(&effort_lower, tc),
-            "max" => tokens::EFFORT_MAX.bold(&effort_lower, tc),
-            other => tokens::EFFORT_MEDIUM.paint(other, tc),
         };
         header_parts.push(wrap_header_segment_variants(
             adaptive_segment(
@@ -2432,20 +2509,39 @@ mod tests {
         }
     }
 
+    /// The usable width is `COLUMNS` minus the measured footer overhead, so the
+    /// rich/compact boundary sits just above `WIDTH_NARROW` plus that overhead.
     #[test]
     fn render_profile_prefers_compact_for_claude_safe_fit() {
+        let overhead = usize::from(TERMINAL_MARGIN + CLAUDE_FOOTER_RESERVE);
+        assert_eq!(overhead, 12);
+
+        for wide in [320u16, 200, 180, 160] {
+            assert_eq!(
+                render_profile_for_dimensions(wide, Some(32)).mode,
+                RenderMode::Rich,
+                "{wide} columns leaves {} usable",
+                render_profile_for_dimensions(wide, Some(32)).safe_width
+            );
+        }
+        // WIDTH_NARROW (140) usable is the floor for the two-line view.
         assert_eq!(
-            render_profile_for_dimensions(320, Some(32)).mode,
+            render_profile_for_dimensions(
+                WIDTH_NARROW + TERMINAL_MARGIN + CLAUDE_FOOTER_RESERVE,
+                Some(32)
+            )
+            .mode,
             RenderMode::Rich
         );
         assert_eq!(
-            render_profile_for_dimensions(200, Some(32)).mode,
-            RenderMode::Rich
-        );
-        assert_eq!(
-            render_profile_for_dimensions(180, Some(32)).mode,
+            render_profile_for_dimensions(
+                WIDTH_NARROW + TERMINAL_MARGIN + CLAUDE_FOOTER_RESERVE - 1,
+                Some(32)
+            )
+            .mode,
             RenderMode::Compact
         );
+        // A short terminal stays compact however wide it is.
         assert_eq!(
             render_profile_for_dimensions(320, Some(20)).mode,
             RenderMode::Compact
@@ -2455,9 +2551,22 @@ mod tests {
     #[test]
     fn header_is_suppressed_in_compact_mode() {
         assert_eq!(
-            render_profile_for_dimensions(180, Some(32)).mode,
+            render_profile_for_dimensions(120, Some(32)).mode,
             RenderMode::Compact
         );
+    }
+
+    /// Guards the number the ruler measured: Claude Code's footer spends only its
+    /// own padding, so the usable width tracks `COLUMNS` closely.
+    #[test]
+    fn safe_width_matches_the_measured_footer_overhead() {
+        for columns in [80u16, 120, 200, 320] {
+            assert_eq!(
+                render_profile_for_dimensions(columns, Some(48)).safe_width,
+                columns - 12,
+                "columns={columns}"
+            );
+        }
     }
 
     #[test]
@@ -2982,6 +3091,100 @@ mod tests {
     }
 
     #[test]
+    fn width_ruler_is_exactly_the_requested_width_and_self_labelling() {
+        for width in [1, 7, 9, 10, 11, 60, 99, 100, 101, 320] {
+            let ruler = width_ruler(width);
+            assert_eq!(
+                visible_width(&ruler),
+                width,
+                "ruler for {width} was {ruler:?}"
+            );
+        }
+        // Each block ends with its own column number, so the last number still
+        // on screen plus the trailing dashes give the exact usable width.
+        assert_eq!(width_ruler(10), "--------10");
+        assert_eq!(width_ruler(20), "--------10--------20");
+        assert_eq!(width_ruler(14), "--------10----");
+        // Three-digit marks keep the ten-column block intact.
+        assert!(width_ruler(100).ends_with("-------100"));
+    }
+
+    #[test]
+    #[serial]
+    fn ruler_is_opt_in_and_ignores_falsey_values() {
+        let env = terminal_env_guard();
+        env.remove("CLAUDE_STATUSLINE_RULER");
+        assert!(matches!(ruler_requested(), RulerRequest::Off));
+        for off in ["", "0", "false", "FALSE", "  "] {
+            env.set("CLAUDE_STATUSLINE_RULER", off);
+            assert!(
+                matches!(ruler_requested(), RulerRequest::Off),
+                "value {off:?} should not enable it"
+            );
+        }
+        for on in ["1", "true", "yes"] {
+            env.set("CLAUDE_STATUSLINE_RULER", on);
+            assert!(
+                matches!(ruler_requested(), RulerRequest::FullWidth),
+                "value {on:?} should fill the width"
+            );
+        }
+        // An explicit count leaves room beside the ruler, which is what exposes
+        // the width of Claude Code's own cluster.
+        env.set("CLAUDE_STATUSLINE_RULER", "40");
+        assert!(matches!(ruler_requested(), RulerRequest::Fixed(40)));
+    }
+
+    #[test]
+    #[serial]
+    fn header_links_the_workspace_path_and_honors_the_opt_out() {
+        let env = terminal_env_guard();
+        env.force_dimensions("320", "32");
+
+        let hook = test_hook(vec![], None);
+        let expected = format!(
+            "\u{1b}]8;;{}\u{7}",
+            file_url(&hook.workspace.current_dir).unwrap()
+        );
+
+        let linked = render_header_line(
+            &hook,
+            None,
+            &long_args(),
+            None,
+            None,
+            None,
+            None,
+            Some(200_000),
+            false,
+            None,
+        )
+        .unwrap_or_default();
+        assert!(linked.contains(&expected), "line: {linked:?}");
+        // The URL must not be charged to the width budget.
+        assert_eq!(visible_width(&linked), strip_ansi(&linked).chars().count());
+        assert!(!strip_ansi(&linked).contains("file://"));
+
+        let mut plain_args = long_args();
+        plain_args.no_hyperlinks = true;
+        let plain = render_header_line(
+            &hook,
+            None,
+            &plain_args,
+            None,
+            None,
+            None,
+            None,
+            Some(200_000),
+            false,
+            None,
+        )
+        .unwrap_or_default();
+        assert!(!plain.contains("]8;;"), "line: {plain:?}");
+        assert_eq!(strip_ansi(&plain), strip_ansi(&linked));
+    }
+
+    #[test]
     #[serial]
     fn short_rich_header_hides_redundant_workspace_noise() {
         let env = terminal_env_guard();
@@ -3224,7 +3427,9 @@ mod tests {
     #[serial]
     fn rich_usage_row_keeps_scoped_fable_at_observed_medium_width() {
         let env = terminal_env_guard();
-        env.force_dimensions("200", "32");
+        // 153 columns is the medium case: 141 usable, the same budget 200 columns
+        // gave before the footer overhead was measured rather than guessed.
+        env.force_dimensions("153", "32");
         env.set("NO_COLOR", "1");
         env.set("CLAUDE_AUTO_COMPACT_ENABLED", "true");
 

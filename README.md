@@ -141,7 +141,9 @@ flowchart LR
 
 Pricing is embedded at compile time from `pricing.json`. Namespaced identifiers such as `clodex:openai-oauth:gpt-5.6-sol` retain their provider provenance while displaying a compact name such as `GPT-5.6 Sol`. The OAuth API is optional. If no credentials are available, the tool falls back to transcript-only metrics.
 
-When stdin contains Claude Code's `subagentStatusLine` task payload, the binary switches to agent-panel mode without a separate flag. It emits one `{id, content}` JSON object per task as JSONL and does not perform transcript, Git, database, or API work. Each row can carry a burn chip (e.g. `12.3K/m`) derived from the payload's token samples, which arrive one per five-second tick; tasks with fewer than two samples or no token growth omit it. Rows also carry an effort chip (`none`, `low`, `medium`, `high`, `xhigh`, `max`) colored on the same tier scale as the main line when Claude Code reports a named effort for the agent; agents whose model exposes no effort, or that report an integer level, show no chip. With `--json`, this mode emits a single structured `{"tasks": [...]}` object with the parsed task rows (snake_case keys, absent optional fields omitted) instead of the JSONL decorations; rows include a numeric `tokens_per_minute` field when the burn rate is derivable.
+When stdin contains Claude Code's `subagentStatusLine` task payload, the binary switches to agent-panel mode without a separate flag. It emits one `{id, content}` JSON object per task as JSONL and does not perform transcript, Git, database, or API work. Each row can carry a burn chip (e.g. `12.3K/m`) derived from the payload's token samples, which arrive one per five-second tick; tasks with fewer than two samples or no token growth omit it. Rows also carry an effort chip colored on the same tier scale as the main line when Claude Code reports a named effort for the agent; agents whose model exposes no effort, or that report an integer level, show no chip. With `--json`, this mode emits a single structured `{"tasks": [...]}` object with the parsed task rows (snake_case keys, absent optional fields omitted) instead of the JSONL decorations; rows include a numeric `tokens_per_minute` field when the burn rate is derivable.
+
+Claude Code discards every decoration for the tick when the command exits non-zero, so a payload it sends in an unexpected shape must not fail the whole batch. A task that cannot be read is skipped and keeps Claude Code's own row rendering while its siblings are still decorated, and an absent `columns` falls back to a conservative width rather than erroring.
 
 Newer OAuth usage responses expose canonical rows through generic `limits[]` and `spend` fields. `claude_statusline` preserves those rows, uses them as fallbacks for session/weekly percentages, renders scoped weekly model rows such as `fable:24%`, and maps `spend` into the extra-usage credit token.
 
@@ -169,7 +171,26 @@ Model names use a stable identity palette independent of cost, context pressure,
 | GPT-5.6 Terra | green `#69DB94` | green |
 | GPT-5.6 Luna | periwinkle-blue `#7DAAFF` | bright blue |
 
-Truecolor is auto-detected from common terminal environment variables, and `--truecolor` or `CLAUDE_TRUECOLOR=1` forces it. [`NO_COLOR`](https://no-color.org/) disables all ANSI and truecolor styling.
+Truecolor is auto-detected from common terminal environment variables, and `--truecolor` or `CLAUDE_TRUECOLOR=1` forces it. [`NO_COLOR`](https://no-color.org/) disables all ANSI and truecolor styling. The footer and the agent panel resolve the palette from the same signals, so one terminal never renders the two surfaces differently.
+
+### Effort tiers
+
+The effort chip uses one scale across the footer and the agent panel:
+
+| Tier | Color |
+|------|-------|
+| `none` | muted grey |
+| `low` | cyan |
+| `medium` | white |
+| `high` | amber |
+| `xhigh` | pink |
+| `max` | bold pink |
+
+`med` renders as `medium` and `ultracode` renders at the `xhigh` tier keeping its own wording, matching the aliases Claude Code accepts for `CLAUDE_CODE_EFFORT_LEVEL`. A tier this build does not recognize renders muted rather than disappearing, so a Claude Code that grows a level still shows it. An integer effort level is a raw reasoning budget rather than a tier and renders no chip.
+
+### Hyperlinks
+
+The workspace path, and the worktree segment during a `--worktree` session, are emitted as [OSC 8](https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda) hyperlinks to their `file://` target. Claude Code re-emits them as real hyperlinks on terminals that support one (kitty, ghostty, iTerm2, WezTerm, Alacritty, Windows Terminal, tmux 3.4+) and renders the text plainly everywhere else, so no terminal detection is needed here. Pass `--no-hyperlinks` to emit plain text instead. The escape sequences are excluded from the width budget, so linking never costs a column.
 
 ---
 
@@ -199,6 +220,7 @@ claude_statusline init [OPTIONS]
 | `--burn-scope <session\|global>` | Burn rate scope (default: session) |
 | `--git <minimal\|verbose>` | Git header verbosity (default: minimal) |
 | `--truecolor` | Force truecolor accents |
+| `--no-hyperlinks` | Emit path segments as plain text instead of OSC 8 hyperlinks |
 | `--debug` | Show detailed calculation info to stderr (includes the usage API egress route) |
 | `--claude-config-dir <PATHS>` | Override Claude data roots (comma-separated) |
 
@@ -314,6 +336,17 @@ usage_api: unmapped response fields: some_new_slot
 
 That is an early warning that the response schema grew, not an error.
 
+**Measuring the usable width.** Claude Code reports the full terminal width in `COLUMNS`, but its footer spends some of that on padding. `claude_statusline` targets `COLUMNS - 12`; `CLAUDE_STATUSLINE_RULER=1` replaces the footer with a column ruler so the real figure can be checked:
+
+```text
+COLUMNS=200 LINES=48 assumed_safe_width=188 reserve=12 ruler=200
+--------10--------20--------30--------40 ...
+```
+
+Every block is exactly ten columns wide and ends with its own column number, so the last number still visible plus any trailing dashes is the width Claude Code actually grants. Set the variable to an explicit count (`CLAUDE_STATUSLINE_RULER=40`) to emit a short ruler instead, which leaves the rest of the row visible. Unset it to restore normal output.
+
+Measured this way at 80, 120, 200 and 320 columns, Claude Code grants `COLUMNS - 3`: its footer container adds `paddingLeft: 2` and a `paddingRight` of 1, widening to 2 while a notification row is up. The mode-label and notification cluster beside the statusline does not compete for those columns; it wraps to its own row once the statusline is long. The remaining allowance is slack for a terminal narrowed between refreshes, since Claude Code does not re-run the command on resize.
+
 **Proxy and TLS.** The usage API call follows the same proxy as Claude Code. It reads `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` (upper or lower case) from the inherited environment, so whatever you set in your shell or in `settings.json` `env` applies with no extra configuration. For a TLS-intercepting proxy, point `NODE_EXTRA_CA_CERTS` at the proxy's CA bundle (PEM); it is trusted in addition to the system roots. Run `doctor` to confirm the resolved route.
 
 ### Usage API rate limits
@@ -379,6 +412,7 @@ labels = "long"
 git = "verbose"
 prompt_cache_ttl_seconds = 300
 truecolor = true
+hyperlinks = true     # false emits path segments as plain text
 window_scope = "global"
 burn_scope = "session"
 window_anchor = "provider"
@@ -459,6 +493,8 @@ usage_limits = true
 | `CLAUDE_USAGE_CACHE_TTL_SECONDS=N` | Override how long an OAuth usage response is reused (default 300, floor 60). See [Usage API rate limits](#usage-api-rate-limits) before lowering it |
 | `CLAUDE_TIME_FORMAT=12` | Force 12-hour time |
 | `CLAUDE_TRUECOLOR=1` | Force 24-bit terminal colors; otherwise common truecolor terminals are auto-detected |
+| `CLAUDE_STATUSLINE_NO_HYPERLINKS=true` | Emit path segments as plain text instead of OSC 8 hyperlinks |
+| `CLAUDE_STATUSLINE_RULER=1` | Replace the footer with a column ruler to measure the width Claude Code actually grants |
 | `CLAUDE_CONTEXT_LIMIT=N` | Override context window size (tokens) |
 | `CLAUDE_PROVIDER=...` | Override provider display (`firstParty` becomes `anthropic`) |
 | `CLAUDE_CONFIG_DIR=...` | Comma-separated list of Claude data roots |
@@ -503,7 +539,8 @@ Pass `--json` for machine-readable output. Key fields:
         "model": "claude-opus-5",
         "description": "review the diff",
         "spawn_depth": 1,
-        "parent_agent_id": "root-agent"
+        "parent_agent_id": "root-agent",
+        "tool_use_id": "toolu_01example456789abcd"
       },
       {
         "agent_id": "b0987654321fedcba",
@@ -513,6 +550,16 @@ Pass `--json` for machine-readable output. Key fields:
         "agent_type": "workflow-subagent",
         "spawn_depth": 2,
         "workflow_run_id": "wf_run42"
+      },
+      {
+        "agent_id": "c1122334455667788",
+        "cost_usd": 1.20,
+        "input_tokens": 900000,
+        "output_tokens": 15000,
+        "agent_type": "test-engineer",
+        "name": "tests",
+        "spawn_depth": 2,
+        "forked_skill": { "skill_name": "tests", "attribution_name": "tests", "effort": "max" }
       }
     ]
   },
@@ -586,6 +633,8 @@ Pass `--json` for machine-readable output. Key fields:
 ```
 
 Both `workflows` and `remote_tasks` are discovered from the current hook session's directory (beside the transcript) and are `null` when the session has none.
+
+Subagent rows are enriched from the `agent-<id>.meta.json` sidecar Claude Code writes beside each subagent transcript, and every enrichment field is omitted rather than null when the sidecar lacks it. `forked_skill` comes from the separate `agent-<id>.forked-skill.json` scoping record and is the only signal that an agent is a forked skill run: such an agent's `agent_type` reports the type the fork runs as, so a `/tests` fork is otherwise indistinguishable from an agent named "tests". Its `effort` mirrors Claude Code's own union of a named tier or an integer budget.
 
 Full schema includes `provider`, `plan`, `reset_at`, `session.subagents`, `prompt_cache`, `usage_limits.limits`, `usage_limits.spend`, `provenance`, `git.remote_url`, `git.worktree_count`, `git.is_linked_worktree`, `workflows`, `remote_tasks`, nested `workspace.*`, `model.fast_mode`, optional `remote.session_id`, and token breakdowns per window. Fields are added over time; consumers should tolerate unknown keys.
 
