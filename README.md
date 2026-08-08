@@ -100,7 +100,7 @@ Restart Claude Code. Done.
 | **session** | Cost of the current session (includes subagent costs) |
 | **today** | Aggregated cost across all concurrent sessions (via SQLite usage ledger) |
 | **window** | Cost within the current 5-hour usage window |
-| **usage%** | OAuth-reported session, weekly, scoped model, and extra-usage utilization |
+| **usage%** | OAuth-reported session, weekly, scoped model, and extra-usage utilization. These describe the account, so they keep rendering when a mixed-model launcher routes a turn through a third-party model |
 | **burn** | Tokens per minute and cost per hour |
 | **context** | Token count and percentage of context window used |
 | **reset** | Time remaining until usage window reset |
@@ -242,7 +242,7 @@ Scoped weekly model rows from the OAuth usage API render from the model metadata
 |-------|------|---------|----------|
 | cost | `--no-cost-session` | on | `session:$X` token |
 | cost | `--no-cost-today` | on | `today:$X` token |
-| cost | `--no-cost-window` | on | `window:$X` token (Claude direct only) |
+| cost | `--no-cost-window` | on | `window:$X` token |
 | cost | `--cost-breakdown` | off | `tok:I/O cache:C/R ws:N` segment |
 | cost | `--cost-provenance` | off | `src:/today:/price:` suffix |
 | cost | `--no-cost-lines-delta` | on | `+a -b` lines token in header |
@@ -368,6 +368,8 @@ The budget is per account, not per machine, and only the fetch lock is machine-l
 | 5 | 5 (at budget) | 300s, leave at default |
 
 The `up:` token reports how stale the figures are, staying hidden until they outlive the TTL above and then colouring from muted through amber to red as further refresh windows are missed. Because both the 5-hour and weekly tokens come from one cached fetch, the age is stated once for the group rather than repeated per token.
+
+While a fetch is locked or backed off, the hook's own `rate_limits` still supply the 5-hour and weekly percentages, but the scoped rows, spend, and extra usage exist only in the OAuth response. Those are carried over from the last response rather than dropped, so `fable:` and `ex:` stay on the line and `up:` reports their age. Discarding them instead made those two tokens blink out for the duration of every lock and every backoff while the tokens beside them stayed put.
 
 `CLAUDE_USAGE_CACHE_TTL_SECONDS` will not go below 60 seconds. Overshooting is self-correcting rather than fatal (the `retry-after` backoff parks the statusline on cached numbers until the window reopens), but sustained overshoot means the displayed utilization is persistently stale. `doctor` prints the effective TTL.
 

@@ -119,7 +119,7 @@ fn build_report(args: &Args) -> Result<DoctorReport> {
     let active_paths = crate::utils::claude_paths(args.claude_config_dir.as_deref());
     let settings = inspect_settings(args)?;
     let db = crate::db::inspect_health();
-    let usage_api = crate::usage_api::inspect_usage_api(&active_paths, Some("claude-sonnet-4-5"));
+    let usage_api = crate::usage_api::inspect_usage_api(&active_paths);
     let pricing_source = crate::pricing::pricing_source_for_model("claude-sonnet-4-5");
     let pricing = PricingHealth {
         probe_model: "claude-sonnet-4-5".to_string(),

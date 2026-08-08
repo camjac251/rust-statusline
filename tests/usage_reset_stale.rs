@@ -184,6 +184,24 @@ fn run_statusline_with_cached_api(
     cache_ttl_seconds: i64,
     negative_cache: bool,
 ) -> Value {
+    run_statusline_with_cached_api_for_model(
+        rate_limits,
+        summary,
+        cache_ttl_seconds,
+        negative_cache,
+        "claude-sonnet-4-6",
+        "Claude Sonnet 4.6",
+    )
+}
+
+fn run_statusline_with_cached_api_for_model(
+    rate_limits: Value,
+    summary: UsageSummary,
+    cache_ttl_seconds: i64,
+    negative_cache: bool,
+    model_id: &str,
+    model_display_name: &str,
+) -> Value {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("statusline.db");
     let transcript_path = temp_dir.path().join("transcript.jsonl");
@@ -200,8 +218,8 @@ fn run_statusline_with_cached_api(
         "session_id": "usage-api-cache-session",
         "transcript_path": transcript_path,
         "model": {
-            "id": "claude-sonnet-4-6",
-            "display_name": "Claude Sonnet 4.6"
+            "id": model_id,
+            "display_name": model_display_name
         },
         "workspace": {
             "current_dir": temp_dir.path(),
@@ -462,8 +480,12 @@ fn fresh_api_fills_seven_day_fields_without_overriding_hook() {
     assert_eq!(seven_day["limit"], json!(10.0));
 }
 
+/// A stale response must not move the hook's five-hour window, but the scoped
+/// rows only exist in that response. Dropping them blinks `fable:` out of the
+/// line for as long as a fetch is locked or backed off, while the hook-sourced
+/// `usage:` and `7d:` tokens beside it stay put.
 #[test]
-fn stale_api_enrichment_is_ignored_for_fresh_hook() {
+fn stale_api_keeps_scoped_rows_beside_a_fresh_hook_window() {
     let now = Utc::now();
     let parsed = run_statusline_with_cached_api(
         json!({
@@ -479,7 +501,11 @@ fn stale_api_enrichment_is_ignored_for_fresh_hook() {
 
     assert_eq!(window(&parsed)["usage_percent"], json!(44.0));
     assert_eq!(window(&parsed)["usage_stale"], json!(false));
-    assert_eq!(parsed["usage_limits"]["limits"], json!([]));
+    assert_eq!(
+        parsed["usage_limits"]["limits"][0]["scope"]["model"]["display_name"],
+        json!("Fable")
+    );
+    assert_eq!(parsed["usage_limits"]["limits"][0]["percent"], json!(24.0));
 }
 
 #[test]
@@ -499,7 +525,51 @@ fn stale_api_cannot_replace_elapsed_hook_window() {
 
     assert_eq!(window(&parsed)["usage_percent"], json!(44.0));
     assert_eq!(window(&parsed)["usage_stale"], json!(true));
-    assert_eq!(parsed["usage_limits"]["limits"], json!([]));
+    assert_eq!(
+        parsed["usage_limits"]["limits"][0]["scope"]["model"]["display_name"],
+        json!("Fable")
+    );
+}
+
+/// The subscription rows describe the account, not the turn in flight. A mixed
+/// launcher routing one reply through a third-party model is still spending the
+/// same subscription, so the cluster must not blank until the next Claude reply.
+#[test]
+fn subscription_rows_survive_a_third_party_model_turn() {
+    let now = Utc::now();
+    let rate_limits = json!({
+        "five_hour": {
+            "used_percentage": 44.0,
+            "resets_at": (now.timestamp() + 3600) as f64
+        }
+    });
+
+    let on_claude = run_statusline_with_cached_api_for_model(
+        rate_limits.clone(),
+        fable_summary(now),
+        300,
+        false,
+        "claude-sonnet-4-6",
+        "Claude Sonnet 4.6",
+    );
+    let on_third_party = run_statusline_with_cached_api_for_model(
+        rate_limits,
+        fable_summary(now),
+        300,
+        false,
+        "clodex:openai-oauth:gpt-5.6-sol",
+        "GPT-5.6 Sol",
+    );
+
+    assert_eq!(
+        on_third_party["usage_limits"]["limits"],
+        on_claude["usage_limits"]["limits"]
+    );
+    assert_eq!(
+        on_third_party["usage_limits"]["limits"][0]["scope"]["model"]["display_name"],
+        json!("Fable")
+    );
+    assert_eq!(window(&on_third_party)["usage_percent"], json!(44.0));
 }
 
 #[test]

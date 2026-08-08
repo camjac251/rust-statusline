@@ -59,6 +59,19 @@ pub fn is_direct_claude_api(model_id: Option<&str>) -> bool {
     true
 }
 
+/// Whether the subscription usage figures apply to this environment.
+///
+/// Deliberately model-independent, unlike [`is_direct_claude_api`]. The
+/// five-hour, weekly, scoped, and extra-usage rows describe the account's
+/// subscription rather than the turn in flight, so a mixed-model launcher that
+/// routes one turn to a third-party model is still spending the same
+/// subscription and must not blank the whole cluster until the next Claude
+/// reply lands. Only a non-Anthropic `ANTHROPIC_BASE_URL` means the numbers
+/// genuinely do not describe this session.
+pub fn subscription_usage_applies() -> bool {
+    is_direct_claude_api(None)
+}
+
 /// Where the OAuth usage ("stats") API request egresses: straight to Anthropic,
 /// or through an HTTP/HTTPS proxy resolved from the environment.
 ///
@@ -190,9 +203,9 @@ pub struct UsageApiHealth {
     pub egress: UsageEgress,
 }
 
-pub fn inspect_usage_api(claude_paths: &[PathBuf], model_id: Option<&str>) -> UsageApiHealth {
+pub fn inspect_usage_api(claude_paths: &[PathBuf]) -> UsageApiHealth {
     UsageApiHealth {
-        direct_claude_api: is_direct_claude_api(model_id),
+        direct_claude_api: subscription_usage_applies(),
         oauth_token_present: find_oauth_token(claude_paths).is_some(),
         fresh_cache_present: crate::db::get_api_cache(API_CACHE_KEY)
             .ok()
@@ -570,11 +583,11 @@ struct UsageResponseDto {
     unknown: BTreeMap<String, serde_json::Value>,
 }
 
-pub fn get_usage_summary(claude_paths: &[PathBuf], model_id: Option<&str>) -> Option<UsageSummary> {
+pub fn get_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
     // Subsystem-level disable now lives at main.rs (subsystems.usage_api). We
-    // keep the direct-API guard here because it depends on env/model details
-    // that the gate caller doesn't know.
-    if !is_direct_claude_api(model_id) {
+    // keep the base-URL guard here because it depends on env details that the
+    // gate caller doesn't know.
+    if !subscription_usage_applies() {
         return None;
     }
 

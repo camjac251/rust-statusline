@@ -52,9 +52,20 @@ fn release_db_scan_lock() {
     let _ = claude_statusline::db::set_api_cache(DB_SCAN_LOCK_KEY, "", 0);
 }
 
+/// Combine the hook's rate-limit snapshot with an OAuth usage response.
+///
+/// The hook owns the five-hour and weekly windows, so a stale response must not
+/// overwrite them. The scoped `limits[]` rows, spend, and extra usage have no
+/// hook counterpart, so discarding them on staleness deletes the only copy and
+/// blinks `fable:`/`ex:` out while `usage:`/`7d:` carry on. `stale` comes from
+/// the hook because it drives the `~usage:` marker, which describes the
+/// five-hour figure being returned here.
 fn merge_hook_usage_with_api(mut hook: UsageSummary, mut api: UsageSummary) -> UsageSummary {
     if api.stale {
-        return hook;
+        api.window = hook.window;
+        api.seven_day = hook.seven_day;
+        api.stale = hook.stale;
+        return api;
     }
 
     hook.window.fill_missing_from(&api.window);
@@ -562,7 +573,7 @@ fn main() -> Result<()> {
     if !args.no_subsystem_usage_api {
         if usage_summary.is_none() {
             // No hook data at all; API is the primary source
-            usage_summary = get_usage_summary(&paths, Some(&hook.model.id));
+            usage_summary = get_usage_summary(&paths);
             if let Some(summary) = usage_summary.as_ref() {
                 usage_percent_display = summary.window.utilization;
                 if let Some(reset) = summary.window.resets_at {
@@ -575,7 +586,7 @@ fn main() -> Result<()> {
                     );
                 }
             }
-        } else if let Some(api_summary) = get_usage_summary(&paths, Some(&hook.model.id)) {
+        } else if let Some(api_summary) = get_usage_summary(&paths) {
             // Hook utilization/reset wins, while a fresh OAuth response supplies
             // all API-only fields and fetch metadata. Stale enrichment is rejected
             // so it cannot make an expired hook window look current.

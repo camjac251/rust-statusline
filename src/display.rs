@@ -6,7 +6,7 @@ use crate::models::{BeadsInfo, GasTownInfo, SessionActivity};
 use crate::models::{PromptCacheBucketKind, PromptCacheInfo};
 use crate::provenance::CostProvenance;
 use crate::tokens;
-use crate::usage_api::{UsageApiLimit, is_direct_claude_api};
+use crate::usage_api::{UsageApiLimit, subscription_usage_applies};
 use std::env;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -1195,7 +1195,6 @@ struct UsageSegmentLabels<'a> {
 }
 
 fn render_usage_segment_variants(
-    model_id: &str,
     args: &Args,
     usage_percent: Option<f64>,
     projected_percent: Option<f64>,
@@ -1203,7 +1202,7 @@ fn render_usage_segment_variants(
     usage_limits: Option<&UsageSummary>,
     labels: UsageSegmentLabels<'_>,
 ) -> Option<StatusSegment> {
-    if !is_direct_claude_api(Some(model_id)) {
+    if !subscription_usage_applies() {
         return None;
     }
 
@@ -1870,7 +1869,6 @@ fn render_compact_text_output(
 
     if !args.no_usage_five_hour
         && let Some(usage_seg) = render_usage_segment_variants(
-            &hook.model.id,
             args,
             usage_percent,
             None,
@@ -2004,7 +2002,9 @@ fn render_rich_text_output(
     let tc = is_truecolor_enabled(args);
     let prompt = tokens::ACCENT.paint(SYM_PROMPT, tc);
     let long_labels = matches!(args.labels, LabelsArg::Long);
-    let is_claude = is_direct_claude_api(Some(model_id));
+    // Account-level, not turn-level: a mixed-model launcher switching to a
+    // third-party model does not stop spending the Claude subscription.
+    let is_claude = subscription_usage_applies();
     let use_12h = use_12h_time(args);
     let mut segments: Vec<StatusSegment> = Vec::new();
 
@@ -2065,7 +2065,6 @@ fn render_rich_text_output(
             _ => "usage:",
         };
         if let Some(usage_segment) = render_usage_segment_variants(
-            model_id,
             args,
             Some(usage_value),
             projected_percent,
