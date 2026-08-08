@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [2.12.1](https://github.com/camjac251/rust-statusline/compare/v2.12.0...v2.12.1) - 2026-08-08
+
+### Fixed
+
+- *(usage)* keep the subscription rows on the line
+
 ## [2.12.0](https://github.com/camjac251/rust-statusline/compare/v2.11.2...v2.12.0) - 2026-08-07
 
 ### Added
