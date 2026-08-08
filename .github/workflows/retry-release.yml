@@ -1,0 +1,28 @@
+name: Retry Release
+
+# release-plz vendors a git-config step that resolves the commit author through
+# `gh api graphql` under `set -e`, so a transient 5xx fails the job and the tag
+# waits for the next push to main. A separate workflow is required because a job
+# cannot re-run its own run: the run stays in progress while that job does.
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+
+jobs:
+  retry:
+    name: Re-run failed jobs
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.run_attempt < 2
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Re-run failed jobs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: gh run rerun "$RUN_ID" --failed --repo "$GITHUB_REPOSITORY"
