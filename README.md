@@ -145,7 +145,7 @@ When stdin contains Claude Code's `subagentStatusLine` task payload, the binary 
 
 Claude Code discards every decoration for the tick when the command exits non-zero, so a payload it sends in an unexpected shape must not fail the whole batch. A task that cannot be read is skipped and keeps Claude Code's own row rendering while its siblings are still decorated, and an absent `columns` falls back to a conservative width rather than erroring.
 
-Newer OAuth usage responses expose canonical rows through generic `limits[]` and `spend` fields. `claude_statusline` preserves those rows, uses them as fallbacks for session/weekly percentages, renders scoped weekly model rows such as `fable:24%`, and maps `spend` into the extra-usage credit token.
+Newer OAuth usage responses expose canonical rows through generic `limits[]` and `spend` fields. `claude_statusline` preserves those rows, uses them as fallbacks for session/weekly percentages, renders scoped weekly model rows such as `fable:24%`, and maps `spend` into the extra-usage credit token. A row whose `resets_at` has passed keeps its identity but reports a null `percent`, since the window it measured has ended; such a row renders no token until a fetch supplies the new window's figure.
 
 ### Model pricing and colors
 
@@ -370,6 +370,10 @@ The budget is per account, not per machine, and only the fetch lock is machine-l
 The `up:` token reports how stale the figures are, staying hidden until they outlive the TTL above and then colouring from muted through amber to red as further refresh windows are missed. Because both the 5-hour and weekly tokens come from one cached fetch, the age is stated once for the group rather than repeated per token.
 
 While a fetch is locked or backed off, the hook's own `rate_limits` still supply the 5-hour and weekly percentages, but the scoped rows, spend, and extra usage exist only in the OAuth response. Those are carried over from the last response rather than dropped, so `fable:` and `ex:` stay on the line and `up:` reports their age. Discarding them instead made those two tokens blink out for the duration of every lock and every backoff while the tokens beside them stayed put.
+
+A row is carried over only while the window it describes is still running. Once a scoped weekly row's own reset passes, its percentage belongs to a week that ended, and how much of the new one is already spent is unknown until a fetch lands, so the figure is dropped rather than pinned at its last value. This is what keeps `fable:` from sitting at its pre-reset number through a backoff while `usage:` and `7d:` move on.
+
+Dropping applies to the rows only the OAuth response supplies: the scoped weekly rows and the per-model weekly windows. The 5-hour and weekly figures are treated differently because the hook carries them too, so an expired one is kept and marked `~usage:` rather than dropped. One-time credits such as extra usage are untouched either way, since their expiry is not a reset. A row that arrives without a reset time carries no evidence its window ended, so it is left alone.
 
 `CLAUDE_USAGE_CACHE_TTL_SECONDS` will not go below 60 seconds. Overshooting is self-correcting rather than fatal (the `retry-after` backoff parks the statusline on cached numbers until the window reopens), but sustained overshoot means the displayed utilization is persistently stale. `doctor` prints the effective TTL.
 
@@ -639,6 +643,8 @@ Both `workflows` and `remote_tasks` are discovered from the current hook session
 Subagent rows are enriched from the `agent-<id>.meta.json` sidecar Claude Code writes beside each subagent transcript, and every enrichment field is omitted rather than null when the sidecar lacks it. `forked_skill` comes from the separate `agent-<id>.forked-skill.json` scoping record and is the only signal that an agent is a forked skill run: such an agent's `agent_type` reports the type the fork runs as, so a `/tests` fork is otherwise indistinguishable from an agent named "tests". Its `effort` mirrors Claude Code's own union of a named tier or an integer budget.
 
 Full schema includes `provider`, `plan`, `reset_at`, `session.subagents`, `prompt_cache`, `usage_limits.limits`, `usage_limits.spend`, `provenance`, `git.remote_url`, `git.worktree_count`, `git.is_linked_worktree`, `workflows`, `remote_tasks`, nested `workspace.*`, `model.fast_mode`, optional `remote.session_id`, and token breakdowns per window. Fields are added over time; consumers should tolerate unknown keys.
+
+Usage percentages are nullable once their window ends. A `usage_limits.limits[]` row reports `percent: null` while keeping its `kind`, `group`, `scope`, and `resets_at`, so the ended window is still identifiable; `usage_limits.seven_day_opus` and `seven_day_sonnet` report `utilization: null` with `resets_at: null`. `usage_limits.five_hour` and `seven_day` are not nulled this way and instead carry their last value with `window.usage_stale` set.
 
 ---
 

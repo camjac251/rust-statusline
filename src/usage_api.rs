@@ -257,6 +257,18 @@ impl UsageLimit {
             self.resets_at = other.resets_at;
         }
     }
+
+    /// Blank a rolling window whose reset has already passed. The percentage
+    /// belongs to a window that ended, and how much of the new one is spent is
+    /// unknown until a fetch lands, so neither the old number nor a fabricated
+    /// zero can be shown. `resets_at` goes with it: a reset in the past makes
+    /// the countdown freeze at `0m` instead of rolling forward from the window
+    /// anchor.
+    pub fn clear_if_reset_elapsed(&mut self, now: DateTime<Utc>) {
+        if self.resets_at.is_some_and(|reset| reset <= now) {
+            *self = Self::default();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -389,27 +401,92 @@ impl UsageSummary {
         self.window.resets_at.is_some_and(|reset| reset <= now)
     }
 
-    /// True when any rolling usage window's reset has passed, so some cached
-    /// percentage describes an expired window and a refetch is due. Covers the
-    /// five-hour window, every seven-day window, and the scoped weekly rows.
-    /// Deliberately excludes `cinder_cove`: its `resets_at` is a one-time credit
-    /// expiry, not a rolling reset, so checking it would refetch on every call
-    /// once the credit lapsed.
+    /// Every rolling window's reset time. Covers the five-hour window, all the
+    /// seven-day windows, and the scoped weekly rows. Deliberately excludes
+    /// `cinder_cove` and the non-rolling codename slots: their `resets_at` is a
+    /// one-time credit expiry, so treating it as a window boundary would refetch
+    /// on every call once the credit lapsed.
+    fn rolling_resets(&self) -> impl Iterator<Item = DateTime<Utc>> + '_ {
+        [
+            self.window.resets_at,
+            self.seven_day.resets_at,
+            self.seven_day_opus.resets_at,
+            self.seven_day_sonnet.resets_at,
+            self.seven_day_oauth_apps.resets_at,
+            self.seven_day_cowork.resets_at,
+        ]
+        .into_iter()
+        .chain(self.limits.iter().map(|limit| limit.resets_at))
+        .chain(ROLLING_CODENAME_LIMIT_KEYS.iter().map(|key| {
+            self.codename_limits
+                .get(*key)
+                .and_then(|limit| limit.resets_at)
+        }))
+        .flatten()
+    }
+
+    /// True when any rolling usage window's reset has passed, so some percentage
+    /// on this summary describes an expired window.
     pub fn any_window_reset_elapsed(&self, now: DateTime<Utc>) -> bool {
-        let elapsed =
-            |resets_at: Option<DateTime<Utc>>| resets_at.is_some_and(|reset| reset <= now);
-        self.window_reset_elapsed(now)
-            || elapsed(self.seven_day.resets_at)
-            || elapsed(self.seven_day_opus.resets_at)
-            || elapsed(self.seven_day_sonnet.resets_at)
-            || elapsed(self.seven_day_oauth_apps.resets_at)
-            || elapsed(self.seven_day_cowork.resets_at)
-            || self.limits.iter().any(|limit| elapsed(limit.resets_at))
-            || ROLLING_CODENAME_LIMIT_KEYS.iter().any(|key| {
-                self.codename_limits
-                    .get(*key)
-                    .is_some_and(|limit| elapsed(limit.resets_at))
-            })
+        self.rolling_resets().any(|reset| reset <= now)
+    }
+
+    /// True when a rolling window rolled over *after* this response was read,
+    /// which is the case where a refetch has something new to say and the cache
+    /// should be bypassed.
+    ///
+    /// A reset the fetch itself already saw is the endpoint's latest word on
+    /// that window. Bypassing for it would refetch on every invocation and spend
+    /// the account's per-window request budget on an answer that cannot change,
+    /// ending in a 429 that pins the display on the very numbers the bypass was
+    /// meant to replace. A response cached before `fetched_at` existed carries no
+    /// fetch time, so it falls back to the plain elapsed check.
+    pub fn any_window_reset_since_fetch(&self, now: DateTime<Utc>) -> bool {
+        match self.fetched_at {
+            Some(fetched) => self
+                .rolling_resets()
+                .any(|reset| reset <= now && reset > fetched),
+            None => self.any_window_reset_elapsed(now),
+        }
+    }
+
+    /// Drop the percentages that would otherwise render from a window that has
+    /// already rolled over.
+    ///
+    /// The refetch that `any_window_reset_since_fetch` triggers cannot always
+    /// land: a sibling session may hold the fetch lock, a 429 may have armed the
+    /// backoff, or the token may have expired entirely. In each of those the
+    /// last response is served instead, and these rows are the only copy of
+    /// `fable:`/`opus:`/`sonnet:` and friends, so they render on with a figure
+    /// from a week that ended.
+    ///
+    /// Scope is deliberately the rows the OAuth response alone supplies.
+    /// `window` and `seven_day` are excluded because the hook carries them too
+    /// and `main.rs` already judges their staleness: it withholds an expired
+    /// hook snapshot, and where no live value replaces it, keeps the last number
+    /// and sets `stale` so the label renders `~usage:`. Clearing them here would
+    /// delete that marked figure outright on the API-primary path, since the
+    /// restore is gated on hook `rate_limits` that path does not have.
+    ///
+    /// Only the values go. `resets_at` stays on the `limits[]` rows so `--json`
+    /// still reports which window ended and when.
+    pub fn clear_elapsed_windows(&mut self, now: DateTime<Utc>) {
+        self.seven_day_opus.clear_if_reset_elapsed(now);
+        self.seven_day_sonnet.clear_if_reset_elapsed(now);
+        self.seven_day_oauth_apps.clear_if_reset_elapsed(now);
+        self.seven_day_cowork.clear_if_reset_elapsed(now);
+        // A row with no `resets_at` carries no evidence its window ended, so it
+        // is left alone rather than guessed at.
+        for limit in &mut self.limits {
+            if limit.resets_at.is_some_and(|reset| reset <= now) {
+                limit.percent = None;
+            }
+        }
+        for key in ROLLING_CODENAME_LIMIT_KEYS {
+            if let Some(limit) = self.codename_limits.get_mut(key) {
+                limit.clear_if_reset_elapsed(now);
+            }
+        }
     }
 }
 
@@ -591,21 +668,23 @@ pub fn get_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
         return None;
     }
 
+    let now = Utc::now();
+
     // Try to get from persistent SQLite cache first. A cached response whose
-    // five-hour, weekly, or scoped window has already reset is served past its
-    // usefulness: some percentage belongs to an expired window, so fall through
-    // to a refetch that picks up the fresh percentages and next reset times.
+    // five-hour, weekly, or scoped window reset after it was read is serving
+    // percentages from a window that has since rolled over, so fall through to a
+    // refetch that picks up the fresh percentages and next reset times.
     if let Ok(Some(cached_json)) = crate::db::get_api_cache(API_CACHE_KEY) {
         if let Ok(summary) = serde_json::from_str::<UsageSummary>(&cached_json) {
-            if !summary.any_window_reset_elapsed(Utc::now()) {
-                return Some(summary);
+            if !summary.any_window_reset_since_fetch(now) {
+                return Some(without_elapsed_windows(summary, now));
             }
         }
     }
 
     // If API recently failed (429/error), don't retry -- serve stale data
     if let Ok(Some(_)) = crate::db::get_api_cache(NEGATIVE_CACHE_KEY) {
-        return stale_fallback();
+        return stale_fallback(now);
     }
 
     // Acquire fetch lock to prevent concurrent API calls across sessions.
@@ -613,21 +692,25 @@ pub fn get_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
     let got_lock = crate::db::try_set_api_cache(NEGATIVE_CACHE_KEY, "f", FETCH_LOCK_TTL_SECONDS)
         .unwrap_or(false);
     if !got_lock {
-        return stale_fallback();
+        return stale_fallback(now);
     }
 
     // Cache miss or invalid - fetch from API
     match fetch_usage_summary(claude_paths) {
         Ok(mut summary) => {
-            // Stamp before caching so the age describes this fetch, not the
-            // moment a later process happened to read the cache back.
-            summary.fetched_at = Some(Utc::now());
-            // Store in persistent cache; clear the fetch lock
+            // Stamped here, and with the instant the request went out, so a
+            // reset landing mid-flight still counts as new to
+            // `any_window_reset_since_fetch` instead of already-seen.
+            summary.fetched_at = Some(now);
+            // Cache before clearing: a later read compares those reset times
+            // against `fetched_at` to decide whether a window rolled over since.
             if let Ok(json) = serde_json::to_string(&summary) {
                 let _ = crate::db::set_api_cache(API_CACHE_KEY, &json, cache_ttl_seconds());
             }
             let _ = crate::db::set_api_cache(NEGATIVE_CACHE_KEY, "", 0);
-            Some(summary)
+            // Clear against the current instant, not the pre-fetch one, so a
+            // window that rolled over during the call does not slip through.
+            Some(without_elapsed_windows(summary, Utc::now()))
         }
         Err(failure) => {
             // Upgrade fetch lock to full negative cache to prevent retry storm.
@@ -639,7 +722,7 @@ pub fn get_usage_summary(claude_paths: &[PathBuf]) -> Option<UsageSummary> {
                 .map(|seconds| seconds.clamp(1, MAX_RETRY_AFTER_SECONDS))
                 .unwrap_or(NEGATIVE_CACHE_TTL_SECONDS);
             let _ = crate::db::set_api_cache(NEGATIVE_CACHE_KEY, "1", backoff);
-            stale_fallback()
+            stale_fallback(now)
         }
     }
 }
@@ -668,14 +751,24 @@ fn parse_retry_after(raw: &str) -> Option<i64> {
 }
 
 /// Return the last cached API data (even if expired), marked as stale
-fn stale_fallback() -> Option<UsageSummary> {
+fn stale_fallback(now: DateTime<Utc>) -> Option<UsageSummary> {
     if let Ok(Some(json)) = crate::db::get_stale_api_cache(API_CACHE_KEY) {
         if let Ok(mut summary) = serde_json::from_str::<UsageSummary>(&json) {
             summary.stale = true;
-            return Some(summary);
+            return Some(without_elapsed_windows(summary, now));
         }
     }
     None
+}
+
+/// Last gate before a summary reaches a display consumer: no percentage from a
+/// window that has already rolled over leaves this module. The stale path needs
+/// it, since a cached row is served with no age bound whenever the refetch
+/// cannot happen; every path gets it so a fresh response that reports a window
+/// as already reset is covered by the same rule.
+fn without_elapsed_windows(mut summary: UsageSummary, now: DateTime<Utc>) -> UsageSummary {
+    summary.clear_elapsed_windows(now);
+    summary
 }
 
 fn fetch_usage_summary(claude_paths: &[PathBuf]) -> Result<UsageSummary, FetchFailure> {
@@ -1290,6 +1383,199 @@ mod tests {
         // A lapsed one-time promo credit must not force perpetual refetching.
         summary.cinder_cove.resets_at = Some(now - chrono::TimeDelta::hours(72));
         assert!(!summary.any_window_reset_elapsed(now));
+    }
+
+    /// A scoped weekly row that carries a percentage from a window that already
+    /// ended. This is what a session holding no fetch lock, or sitting in a 429
+    /// backoff, is handed when it asks for the usage summary.
+    fn summary_with_elapsed_fable(now: DateTime<Utc>) -> UsageSummary {
+        UsageSummary {
+            limits: vec![UsageApiLimit {
+                kind: Some("weekly_scoped".to_string()),
+                group: Some("weekly".to_string()),
+                percent: Some(24.0),
+                resets_at: Some(now - chrono::TimeDelta::minutes(5)),
+                scope: Some(UsageLimitScope {
+                    model: Some(UsageLimitScopeModel {
+                        id: None,
+                        display_name: Some("Fable".to_string()),
+                    }),
+                    surface: None,
+                }),
+                ..UsageApiLimit::default()
+            }],
+            ..UsageSummary::default()
+        }
+    }
+
+    #[test]
+    fn clear_elapsed_windows_drops_a_scoped_percentage_from_a_rolled_over_week() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut summary = summary_with_elapsed_fable(now);
+        summary.clear_elapsed_windows(now);
+
+        assert_eq!(summary.limits[0].percent, None);
+        // The row itself stays so `--json` still reports which window ended.
+        assert_eq!(
+            summary.limits[0].resets_at,
+            Some(now - chrono::TimeDelta::minutes(5))
+        );
+        assert_eq!(
+            summary.limits[0]
+                .scope
+                .as_ref()
+                .and_then(|scope| scope.model.as_ref())
+                .and_then(|model| model.display_name.as_deref()),
+            Some("Fable")
+        );
+    }
+
+    #[test]
+    fn clear_elapsed_windows_keeps_a_scoped_percentage_whose_week_is_live() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut summary = summary_with_elapsed_fable(now);
+        summary.limits[0].resets_at = Some(now + chrono::TimeDelta::hours(1));
+        summary.clear_elapsed_windows(now);
+
+        assert_eq!(summary.limits[0].percent, Some(24.0));
+    }
+
+    #[test]
+    fn clear_elapsed_windows_blanks_every_rolling_window_it_covers() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let past = Some(now - chrono::TimeDelta::minutes(1));
+        let mut summary = UsageSummary {
+            seven_day_opus: UsageLimit {
+                utilization: Some(31.0),
+                resets_at: past,
+                ..UsageLimit::default()
+            },
+            seven_day_cowork: UsageLimit {
+                utilization: Some(18.0),
+                resets_at: past,
+                ..UsageLimit::default()
+            },
+            ..UsageSummary::default()
+        };
+        summary.codename_limits.insert(
+            "seven_day_omelette".to_string(),
+            UsageLimit {
+                utilization: Some(12.0),
+                resets_at: past,
+                ..UsageLimit::default()
+            },
+        );
+        summary.clear_elapsed_windows(now);
+
+        assert_eq!(summary.seven_day_opus.utilization, None);
+        // The reset goes with the value so the countdown rolls forward from the
+        // window anchor instead of freezing at "0m" against a passed reset.
+        assert_eq!(summary.seven_day_opus.resets_at, None);
+        assert_eq!(summary.seven_day_cowork.utilization, None);
+        assert_eq!(
+            summary.codename_limits["seven_day_omelette"].utilization,
+            None
+        );
+    }
+
+    /// `main.rs` owns the staleness of the two windows the hook also carries: it
+    /// keeps the last number and marks it `~stale` rather than dropping it, and
+    /// the restore is gated on hook data the API-primary path does not have.
+    #[test]
+    fn clear_elapsed_windows_leaves_the_hook_owned_windows_to_main() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let past = Some(now - chrono::TimeDelta::minutes(1));
+        let mut summary = UsageSummary {
+            window: UsageLimit {
+                utilization: Some(88.0),
+                resets_at: past,
+                ..UsageLimit::default()
+            },
+            seven_day: UsageLimit {
+                utilization: Some(55.0),
+                resets_at: past,
+                ..UsageLimit::default()
+            },
+            ..UsageSummary::default()
+        };
+        summary.clear_elapsed_windows(now);
+
+        assert_eq!(summary.window.utilization, Some(88.0));
+        assert_eq!(summary.seven_day.utilization, Some(55.0));
+    }
+
+    /// A row with no reset time carries no evidence its window ended, so it is
+    /// left alone. The scoped rows the endpoint actually sends do carry one.
+    #[test]
+    fn clear_elapsed_windows_cannot_judge_a_row_without_a_reset() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut summary = summary_with_elapsed_fable(now);
+        summary.limits[0].resets_at = None;
+        summary.clear_elapsed_windows(now);
+
+        assert_eq!(summary.limits[0].percent, Some(24.0));
+    }
+
+    #[test]
+    fn clear_elapsed_windows_leaves_one_time_credits_alone() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut summary = UsageSummary {
+            cinder_cove: UsageLimit {
+                utilization: Some(40.0),
+                resets_at: Some(now - chrono::TimeDelta::hours(72)),
+                ..UsageLimit::default()
+            },
+            extra_usage: Some(ExtraUsage {
+                is_enabled: true,
+                used_credits: Some(12.34),
+                ..ExtraUsage::default()
+            }),
+            ..UsageSummary::default()
+        };
+        summary.codename_limits.insert(
+            "tangelo".to_string(),
+            UsageLimit {
+                utilization: Some(9.0),
+                resets_at: Some(now - chrono::TimeDelta::hours(72)),
+                ..UsageLimit::default()
+            },
+        );
+        summary.clear_elapsed_windows(now);
+
+        // An expiry is not a rolling reset: the credit is spent, not renewed.
+        assert_eq!(summary.cinder_cove.utilization, Some(40.0));
+        assert_eq!(summary.codename_limits["tangelo"].utilization, Some(9.0));
+        assert_eq!(
+            summary.extra_usage.as_ref().unwrap().used_credits,
+            Some(12.34)
+        );
+    }
+
+    #[test]
+    fn any_window_reset_since_fetch_true_when_the_window_rolled_after_the_read() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut summary = summary_with_elapsed_fable(now);
+        summary.fetched_at = Some(now - chrono::TimeDelta::minutes(10));
+        assert!(summary.any_window_reset_since_fetch(now));
+    }
+
+    #[test]
+    fn any_window_reset_since_fetch_false_when_the_fetch_already_saw_the_reset() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut summary = summary_with_elapsed_fable(now);
+        // Fetched after the reset the response reports: refetching would spend a
+        // request per invocation on an answer the endpoint has already given.
+        summary.fetched_at = Some(now - chrono::TimeDelta::minutes(1));
+        assert!(!summary.any_window_reset_since_fetch(now));
+        assert!(summary.any_window_reset_elapsed(now));
+    }
+
+    #[test]
+    fn any_window_reset_since_fetch_falls_back_when_the_row_predates_age_stamping() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let summary = summary_with_elapsed_fable(now);
+        assert_eq!(summary.fetched_at, None);
+        assert!(summary.any_window_reset_since_fetch(now));
     }
 
     #[test]

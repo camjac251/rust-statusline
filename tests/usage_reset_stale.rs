@@ -508,6 +508,63 @@ fn stale_api_keeps_scoped_rows_beside_a_fresh_hook_window() {
     assert_eq!(parsed["usage_limits"]["limits"][0]["percent"], json!(24.0));
 }
 
+/// Carrying the scoped rows forward keeps `fable:` on the line, but a row whose
+/// own week has rolled over is describing a window that ended. The refetch meant
+/// to replace it cannot land while a sibling session holds the fetch lock or a
+/// 429 backoff is armed, so without this the pre-reset percentage stays pinned
+/// while the hook-sourced tokens beside it keep moving.
+#[test]
+fn stale_api_drops_a_scoped_percentage_whose_week_already_reset() {
+    let now = Utc::now();
+    let mut summary = fable_summary(now - chrono::TimeDelta::hours(1));
+    summary.limits[0].resets_at = Some(now - chrono::TimeDelta::minutes(10));
+
+    let parsed = run_statusline_with_cached_api(
+        json!({
+            "five_hour": {
+                "used_percentage": 44.0,
+                "resets_at": (now.timestamp() + 3600) as f64
+            }
+        }),
+        summary,
+        0,
+        true,
+    );
+
+    assert_eq!(parsed["usage_limits"]["limits"][0]["percent"], Value::Null);
+    // The row survives with its reset, so `--json` still reports which window
+    // ended and when.
+    assert_eq!(
+        parsed["usage_limits"]["limits"][0]["scope"]["model"]["display_name"],
+        json!("Fable")
+    );
+    // The five-hour figure beside it is unaffected.
+    assert_eq!(window(&parsed)["usage_percent"], json!(44.0));
+}
+
+/// The counterpart: a scoped row inside a live week must still ride out a locked
+/// or backed-off fetch, which is the whole reason stale rows are carried forward.
+#[test]
+fn stale_api_keeps_a_scoped_percentage_whose_week_is_still_running() {
+    let now = Utc::now();
+    let mut summary = fable_summary(now - chrono::TimeDelta::hours(1));
+    summary.limits[0].resets_at = Some(now + chrono::TimeDelta::days(2));
+
+    let parsed = run_statusline_with_cached_api(
+        json!({
+            "five_hour": {
+                "used_percentage": 44.0,
+                "resets_at": (now.timestamp() + 3600) as f64
+            }
+        }),
+        summary,
+        0,
+        true,
+    );
+
+    assert_eq!(parsed["usage_limits"]["limits"][0]["percent"], json!(24.0));
+}
+
 #[test]
 fn stale_api_cannot_replace_elapsed_hook_window() {
     let now = Utc::now();
@@ -588,6 +645,53 @@ fn stale_api_without_hook_remains_available_and_marked_stale() {
         parsed["usage_limits"]["limits"][0]["scope"]["model"]["display_name"],
         json!("Fable")
     );
+}
+
+/// The five-hour and weekly rows have their own degraded contract: keep the last
+/// number and mark it `~stale` rather than drop it. Clearing elapsed windows must
+/// not reach them, or the API-primary path (no hook `rate_limits`) loses the
+/// `usage:` token altogether, since main.rs only restores it from hook data.
+#[test]
+fn stale_api_without_hook_keeps_a_marked_five_hour_figure_past_its_reset() {
+    let now = Utc::now();
+    let mut summary = fable_summary(now - chrono::TimeDelta::hours(1));
+    summary.window.resets_at = Some(now - chrono::TimeDelta::minutes(10));
+    summary.seven_day.resets_at = Some(now - chrono::TimeDelta::minutes(10));
+
+    let parsed = run_statusline_with_cached_api(Value::Null, summary, 0, true);
+
+    assert_eq!(window(&parsed)["usage_percent"], json!(88.0));
+    assert_eq!(window(&parsed)["usage_stale"], json!(true));
+    assert_eq!(
+        parsed["usage_limits"]["seven_day"]["utilization"],
+        json!(55.0)
+    );
+}
+
+/// The positive-cache branch can also serve a dead scoped row: once a response
+/// reports a reset its own fetch already saw, the cache is no longer bypassed and
+/// the clearing pass is the only thing standing between that row and the line.
+#[test]
+fn live_cache_hit_drops_a_scoped_percentage_whose_week_already_reset() {
+    let now = Utc::now();
+    let mut summary = fable_summary(now - chrono::TimeDelta::minutes(1));
+    summary.limits[0].resets_at = Some(now - chrono::TimeDelta::minutes(10));
+
+    let parsed = run_statusline_with_cached_api(
+        json!({
+            "five_hour": {
+                "used_percentage": 44.0,
+                "resets_at": (now.timestamp() + 3600) as f64
+            }
+        }),
+        summary,
+        300,
+        false,
+    );
+
+    // Served from the live cache, so nothing here is marked stale.
+    assert_eq!(window(&parsed)["usage_stale"], json!(false));
+    assert_eq!(parsed["usage_limits"]["limits"][0]["percent"], Value::Null);
 }
 
 #[test]
