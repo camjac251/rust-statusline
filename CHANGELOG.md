@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## [2.12.2](https://github.com/camjac251/rust-statusline/compare/v2.12.1...v2.12.2) - 2026-08-14
+
+### Fixed
+
+- *(usage)* drop a usage percentage once its window has reset
+
+### Other
+
+- Merge pull request #79 from camjac251/renovate/ureq-3.x-lockfile
+- Merge pull request #68 from camjac251/renovate/serial_test-4.x
+- Merge pull request #74 from camjac251/renovate/clap-4.x-lockfile
+- *(deps)* update rust crate rusqlite to v0.40.2
+- *(release)* re-run a release that failed on a transient error
+
 ## [2.12.1](https://github.com/camjac251/rust-statusline/compare/v2.12.0...v2.12.1) - 2026-08-08
 
 ### Fixed
