@@ -302,15 +302,10 @@ fn token_label(token_count: u64, context_window_size: Option<u64>, truecolor: bo
     match context_window_size.filter(|limit| *limit > 0) {
         Some(limit) => {
             let percent = ((token_count as f64 / limit as f64) * 100.0).round() as u64;
-            let pct_text = format!("{percent}%");
-            let pct_token = tokens::gradient(percent as f64, 100.0);
-            // Match the main line: pressure gradient on the percent, bold once it
-            // crosses the danger line.
-            let pct = if percent >= 80 {
-                pct_token.bold(&pct_text, truecolor)
-            } else {
-                pct_token.paint(&pct_text, truecolor)
-            };
+            // The footer's context scale, so one terminal never shows the two
+            // surfaces disagreeing about pressure.
+            let pct = tokens::LimitTier::for_percent(percent as f64)
+                .paint(&format!("{percent}%"), truecolor);
             format!(
                 "{}/{} {}",
                 tokens::PRIMARY_DIM.paint(&format_tokens(token_count), truecolor),
@@ -368,6 +363,25 @@ mod tests {
     /// styling the row now applies.
     fn plain(value: &str) -> String {
         tokens::strip_ansi(value)
+    }
+
+    #[test]
+    fn context_percent_uses_the_footer_limit_scale() {
+        let calm = token_label(400_000, Some(1_000_000), true);
+        let elevated = token_label(800_000, Some(1_000_000), true);
+        let critical = token_label(950_000, Some(1_000_000), true);
+        assert!(
+            calm.ends_with(&tokens::LimitTier::Calm.paint("40%", true)),
+            "{calm:?}"
+        );
+        assert!(
+            elevated.ends_with(&tokens::LimitTier::Elevated.paint("80%", true)),
+            "{elevated:?}"
+        );
+        assert!(
+            critical.ends_with(&tokens::LimitTier::Critical.paint("95%", true)),
+            "{critical:?}"
+        );
     }
 
     fn task() -> SubagentStatusTask {

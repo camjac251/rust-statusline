@@ -126,14 +126,8 @@ fn separator(tc: bool, compact: bool) -> String {
 }
 
 fn colorize_percent(pct: f64, args: &Args) -> String {
-    let formatted = format_pct(pct);
     let tc = is_truecolor_enabled(args);
-    let token = tokens::gradient(pct, 100.0);
-    if pct >= 80.0 {
-        token.bold(&formatted, tc)
-    } else {
-        token.paint(&formatted, tc)
-    }
+    tokens::LimitTier::for_percent(pct).paint(&format_pct(pct), tc)
 }
 
 /// Compact single-unit age, e.g. `8m`, `2h`, `3d`.
@@ -986,7 +980,7 @@ fn render_model_segment_variants(
     let long = max_chars.map_or(base.clone(), |limit| truncate_label(&base, limit));
     let medium = compact_model_label(model_id, &base);
     let tiny = tiny_model_label(model_id, &base);
-    let fast = tokens::WARNING.bold("fast", tc);
+    let fast = tokens::MODE_FAST.paint("fast", tc);
     let render = |label: &str| {
         let colored = model_colored_name(model_id, label, args);
         if is_fast_mode {
@@ -1007,19 +1001,28 @@ fn render_model_segment_variants(
     adaptive_segment(variants, 130)
 }
 
+/// Weight of a cost figure. No cost is measured against a cap, so none takes
+/// the limit scale: the session figure anchors the line and the rest is context
+/// for it. The old dollar ceilings ($10 today, $5 window) painted both red all
+/// day for anyone who actually uses the tool, which is red meaning nothing.
+#[derive(Clone, Copy)]
+enum CostEmphasis {
+    Primary,
+    Secondary,
+}
+
 fn cost_segment_variants(
     long_label: &str,
     short_label: &str,
     value: f64,
-    gradient_max: Option<f64>,
+    emphasis: CostEmphasis,
     tc: bool,
     priority: u8,
 ) -> StatusSegment {
     let cost_str = format_currency(value);
-    let cost_value = if let Some(max) = gradient_max {
-        tokens::gradient(value, max).paint(&cost_str, tc)
-    } else {
-        tokens::PRIMARY.bold(&cost_str, tc)
+    let cost_value = match emphasis {
+        CostEmphasis::Primary => tokens::PRIMARY.bold(&cost_str, tc),
+        CostEmphasis::Secondary => tokens::PRIMARY_DIM.paint(&cost_str, tc),
     };
     let dollar = tokens::MUTED.paint(SYM_DOLLAR, tc);
     adaptive_segment(
@@ -1050,6 +1053,12 @@ fn use_12h_time(args: &Args) -> bool {
     }
 }
 
+/// Time until the five-hour window resets, as a neutral value.
+///
+/// Small is relief here, not danger: the budget refills sooner. Painting it red
+/// put the loudest color on the line beside the usage percent and left the
+/// reader unable to tell which of the two was the alarm. The usage figure owns
+/// the pressure signal (see `five_hour_pace_tier`); the countdown tells time.
 fn render_reset_countdown(remaining_minutes: f64, tc: bool) -> String {
     let rem_h = (remaining_minutes as i64) / 60;
     let rem_m = (remaining_minutes as i64) % 60;
@@ -1058,16 +1067,7 @@ fn render_reset_countdown(remaining_minutes: f64, tc: bool) -> String {
     } else {
         format!("{}m", rem_m)
     };
-
-    if remaining_minutes < 30.0 {
-        tokens::ERROR.bold(&countdown, tc)
-    } else if remaining_minutes < 60.0 {
-        tokens::WARNING.bold(&countdown, tc)
-    } else if remaining_minutes < 180.0 {
-        tokens::WARNING.paint(&countdown, tc)
-    } else {
-        tokens::PRIMARY_DIM.paint(&countdown, tc)
-    }
+    tokens::PRIMARY_DIM.paint(&countdown, tc)
 }
 
 fn render_reset_clock(
@@ -1194,6 +1194,33 @@ struct UsageSegmentLabels<'a> {
     short: &'a str,
 }
 
+/// Minutes in the five-hour usage window.
+const FIVE_HOUR_WINDOW_MINUTES: f64 = 300.0;
+/// Minutes of a window that must have elapsed before its usage is extrapolated.
+const PACE_MIN_ELAPSED_MINUTES: f64 = 60.0;
+
+/// Attention tier for the five-hour figure from its pace rather than its level.
+///
+/// `usage:50%` with four hours left is the case the level thresholds miss: far
+/// from the cap, yet on course to hit it well before the reset. A straight-line
+/// projection of the percent used over the minutes elapsed flags that as
+/// `Elevated`. It never goes further, since the level thresholds own "the wall
+/// is close"; it stays quiet for the first hour of a window, where a turn or
+/// two extrapolates to anything; and with no minutes remaining (window unknown
+/// or over) the projection is the level itself, so it adds nothing.
+fn five_hour_pace_tier(usage_percent: f64, remaining_minutes: f64) -> tokens::LimitTier {
+    let elapsed_minutes =
+        FIVE_HOUR_WINDOW_MINUTES - remaining_minutes.clamp(0.0, FIVE_HOUR_WINDOW_MINUTES);
+    if elapsed_minutes < PACE_MIN_ELAPSED_MINUTES {
+        return tokens::LimitTier::Calm;
+    }
+    if usage_percent * FIVE_HOUR_WINDOW_MINUTES / elapsed_minutes >= 100.0 {
+        tokens::LimitTier::Elevated
+    } else {
+        tokens::LimitTier::Calm
+    }
+}
+
 fn render_usage_segment_variants(
     args: &Args,
     usage_percent: Option<f64>,
@@ -1213,7 +1240,11 @@ fn render_usage_segment_variants(
     } else {
         (labels.long.to_string(), labels.short.to_string())
     };
-    let usage_colored = colorize_percent(usage_value, args);
+    // Level and pace both feed the five-hour figure: the level thresholds say
+    // the wall is close, the pace says it will arrive before the reset.
+    let usage_tier = tokens::LimitTier::for_percent(usage_value)
+        .max(five_hour_pace_tier(usage_value, timing.remaining_minutes));
+    let usage_colored = usage_tier.paint(&format_pct(usage_value), tc);
     let projected_colored = projected_percent.map(|value| colorize_percent(value, args));
     let projected = projected_colored
         .as_ref()
@@ -1276,13 +1307,8 @@ fn render_context_segment_variants(
 
     let show_tokens = !args.no_context_tokens;
     let show_percent = !args.no_context_percent;
-    let pct_text = format!("{}%", pct);
-    let pct_token = tokens::gradient(pct as f64, 100.0);
-    let pct_colored = if pct >= 80 {
-        pct_token.bold(&pct_text, tc)
-    } else {
-        pct_token.paint(&pct_text, tc)
-    };
+    let pct_tier = tokens::LimitTier::for_percent(f64::from(pct));
+    let pct_colored = pct_tier.paint(&format!("{}%", pct), tc);
     let ctx_limit_full = context_limit_override
         .unwrap_or_else(|| context_limit_for_model_display(model_id, model_display_name));
     let ctx_limit_usable =
@@ -1351,7 +1377,7 @@ fn render_context_segment_variants(
         let cushion = crate::utils::auto_compact_headroom_tokens();
         let compact_trigger = usable.saturating_sub(cushion) as f64;
         let headroom_to_compact = (compact_trigger - ctx_tokens as f64).max(0.0);
-        let compact_text = if tpm_indicator > 0.0 && headroom_to_compact > 0.0 {
+        let compact_value = if tpm_indicator > 0.0 && headroom_to_compact > 0.0 {
             let eta_min = headroom_to_compact / tpm_indicator;
             let eta_min_i = eta_min.round() as i64;
             let eta_disp = if eta_min_i >= 120 {
@@ -1361,24 +1387,18 @@ fn render_context_segment_variants(
             } else {
                 format!("~{}m", eta_min_i)
             };
-            format!(
-                "{}@{}K {}",
-                muted_label("compact:", tc),
-                compact_trigger as u64 / 1000,
-                eta_disp
-            )
+            format!("@{}K {}", compact_trigger as u64 / 1000, eta_disp)
         } else {
-            format!(
-                "{}@{}K",
-                muted_label("compact:", tc),
-                compact_trigger as u64 / 1000
-            )
+            format!("@{}K", compact_trigger as u64 / 1000)
         };
+        // An annotation of the percent beside it, so it takes that tier's color
+        // and never shouts on its own.
         let _ = write!(
             long,
-            "{}{}",
+            "{}{}{}",
             separator(tc, false),
-            tokens::WARNING.paint(&compact_text, tc)
+            muted_label("compact:", tc),
+            pct_tier.token().paint(&compact_value, tc)
         );
     }
 
@@ -1861,7 +1881,7 @@ fn render_compact_text_output(
             "session:",
             "s:",
             session_cost,
-            None,
+            CostEmphasis::Primary,
             tc,
             80,
         ));
@@ -2018,7 +2038,7 @@ fn render_rich_text_output(
             session_label,
             "s:",
             session_cost,
-            None,
+            CostEmphasis::Primary,
             tc,
             80,
         ));
@@ -2033,7 +2053,7 @@ fn render_rich_text_output(
             today_label,
             "t:",
             today_cost,
-            Some(10.0),
+            CostEmphasis::Secondary,
             tc,
             30,
         ));
@@ -2050,7 +2070,7 @@ fn render_rich_text_output(
             window_label,
             "w:",
             total_cost,
-            Some(5.0),
+            CostEmphasis::Secondary,
             tc,
             40,
         ));
@@ -2165,17 +2185,17 @@ fn render_rich_text_output(
             let symbol = extra_usage_symbol(extra.currency.as_deref());
             let spent = extra.used_credits.unwrap_or(0.0);
             let limit = extra.monthly_limit.unwrap_or(0.0);
-            let spent_token = if limit > 0.0 {
-                tokens::gradient(spent / limit * 100.0, 100.0)
+            let spent_tier = if limit > 0.0 {
+                tokens::LimitTier::for_percent(spent / limit * 100.0)
             } else {
-                tokens::PRIMARY_DIM
+                tokens::LimitTier::Calm
             };
             let extra_segment = if limit > 0.0 {
                 format!(
                     "{}{}{}/{}",
                     muted_label(label, tc),
                     tokens::MUTED.paint(&symbol, tc),
-                    spent_token.paint(&format!("{:.0}", spent), tc),
+                    spent_tier.paint(&format!("{:.0}", spent), tc),
                     muted_label(&format!("{:.0}", limit), tc)
                 )
             } else {
@@ -2183,7 +2203,7 @@ fn render_rich_text_output(
                     "{}{}{}",
                     muted_label(label, tc),
                     tokens::MUTED.paint(&symbol, tc),
-                    spent_token.paint(&format!("{:.2}", spent), tc)
+                    spent_tier.paint(&format!("{:.2}", spent), tc)
                 )
             };
             segments.push(status_segment(extra_segment, 12));
@@ -2865,6 +2885,200 @@ mod tests {
             assert!(colored.contains(&escape), "{model_id}: {colored:?}");
             assert_eq!(strip_ansi(&colored), display);
         }
+    }
+
+    fn truecolor_args() -> Args {
+        Args::parse_from(["claude_statusline", "--truecolor"])
+    }
+
+    fn truecolor_escape(token: tokens::ColorToken) -> String {
+        let (r, g, b) = token.rgb;
+        format!("\u{1b}[38;2;{r};{g};{b}m")
+    }
+
+    #[test]
+    #[serial]
+    fn reset_countdown_never_reads_as_an_alarm() {
+        let env = terminal_env_guard();
+        env.remove("NO_COLOR");
+        for minutes in [3.0, 23.0, 45.0, 120.0, 240.0] {
+            let painted = render_reset_countdown(minutes, true);
+            assert_eq!(
+                painted,
+                tokens::PRIMARY_DIM.paint(&strip_ansi(&painted), true),
+                "{minutes} minutes: {painted:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "colors")]
+    #[test]
+    #[serial]
+    fn cost_figures_take_no_limit_color() {
+        let env = terminal_env_guard();
+        env.remove("NO_COLOR");
+        let session =
+            cost_segment_variants("session:", "s:", 46.26, CostEmphasis::Primary, true, 80);
+        let today =
+            cost_segment_variants("today:", "t:", 420.20, CostEmphasis::Secondary, true, 30);
+        let window = cost_segment_variants("win:", "w:", 348.12, CostEmphasis::Secondary, true, 40);
+        let alarms = [
+            truecolor_escape(tokens::WARNING),
+            truecolor_escape(tokens::ERROR),
+        ];
+        for variant in [&session, &today, &window]
+            .iter()
+            .flat_map(|segment| segment.variants.iter())
+        {
+            for alarm in &alarms {
+                assert!(!variant.contains(alarm), "{variant:?}");
+            }
+        }
+        // The session figure anchors the line; the others are plain context.
+        assert!(session.variants[0].contains("\u{1b}[1m"));
+        assert!(!today.variants[0].contains("\u{1b}[1m"));
+        assert!(
+            today.variants[0].contains(&format!("{}420.20", truecolor_escape(tokens::PRIMARY_DIM)))
+        );
+    }
+
+    #[test]
+    fn five_hour_pace_escalates_only_when_on_course_to_exhaust_before_reset() {
+        use tokens::LimitTier::{Calm, Elevated};
+        // Half the budget gone with four of five hours left projects to 250%.
+        assert_eq!(five_hour_pace_tier(50.0, 240.0), Elevated);
+        // 60% gone with 100 minutes left projects to 90%: on track.
+        assert_eq!(five_hour_pace_tier(60.0, 100.0), Calm);
+        // 76% used with 23 minutes left projects to 82%: the window will be made.
+        assert_eq!(five_hour_pace_tier(76.0, 23.0), Calm);
+        // Too early to extrapolate: 15% after half an hour.
+        assert_eq!(five_hour_pace_tier(15.0, 270.0), Calm);
+        // Exactly one hour elapsed is enough evidence; 20% projects to 100%.
+        assert_eq!(five_hour_pace_tier(20.0, 240.0), Elevated);
+        // Pace never escalates past Elevated; the level thresholds own Critical.
+        assert_eq!(five_hour_pace_tier(89.0, 120.0), Elevated);
+        // Unknown or finished window: the projection is the level itself.
+        assert_eq!(five_hour_pace_tier(50.0, 0.0), Calm);
+        assert_eq!(five_hour_pace_tier(50.0, f64::NAN), Calm);
+        // Out-of-range remaining clamps instead of inverting the fraction.
+        assert_eq!(five_hour_pace_tier(50.0, 900.0), Calm);
+    }
+
+    #[cfg(feature = "colors")]
+    #[test]
+    #[serial]
+    fn five_hour_figure_warms_on_pace_while_its_neighbors_stay_neutral() {
+        let env = terminal_env_guard();
+        env.force_dimensions("320", "32");
+        env.remove("NO_COLOR");
+        let amber = truecolor_escape(tokens::WARNING);
+        let white = truecolor_escape(tokens::PRIMARY_DIM);
+        let red = truecolor_escape(tokens::ERROR);
+
+        // Half the window's budget gone with four hours still to run.
+        let line = render_rich_text_output(
+            &truecolor_args(),
+            "claude-opus-5",
+            "Opus 5",
+            46.26,
+            420.20,
+            348.12,
+            Some(50.0),
+            None,
+            240.0,
+            None,
+            None,
+            0.0,
+            Some((397_000, 40)),
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            Some(1_000_000),
+            None,
+        );
+        assert!(line.contains(&format!("{amber}50%")), "{line:?}");
+        assert!(line.contains(&format!("{white}4h0m")), "{line:?}");
+        assert!(line.contains(&format!("{white}420.20")), "{line:?}");
+        assert!(line.contains(&format!("{white}348.12")), "{line:?}");
+        assert!(line.contains(&format!("{white}40%")), "{line:?}");
+        assert!(!line.contains(&red), "{line:?}");
+
+        // A higher level that the window will comfortably reach stays calm.
+        let line = render_rich_text_output(
+            &truecolor_args(),
+            "claude-opus-5",
+            "Opus 5",
+            46.26,
+            420.20,
+            348.12,
+            Some(60.0),
+            None,
+            23.0,
+            None,
+            None,
+            0.0,
+            Some((397_000, 40)),
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            Some(1_000_000),
+            None,
+        );
+        assert!(line.contains(&format!("{white}60%")), "{line:?}");
+        assert!(line.contains(&format!("{white}23m")), "{line:?}");
+        assert!(!line.contains(&amber) && !line.contains(&red), "{line:?}");
+    }
+
+    #[cfg(feature = "colors")]
+    #[test]
+    #[serial]
+    fn compact_hint_follows_the_context_tier_instead_of_shouting() {
+        let env = terminal_env_guard();
+        env.remove("NO_COLOR");
+        env.set("CLAUDE_AUTO_COMPACT_ENABLED", "true");
+        let args = truecolor_args();
+        let white = truecolor_escape(tokens::PRIMARY_DIM);
+        let red = truecolor_escape(tokens::ERROR);
+
+        let calm = render_context_segment_variants(
+            "claude-opus-5",
+            "Opus 5",
+            Some((500_000, 50)),
+            Some(1_000_000),
+            &args,
+            0.0,
+            true,
+        );
+        let full = &calm.variants[0];
+        assert!(strip_ansi(full).contains("compact:@"), "{full:?}");
+        assert!(full.contains(&format!("{white}@")), "{full:?}");
+        assert!(
+            !full.contains(&truecolor_escape(tokens::WARNING)),
+            "{full:?}"
+        );
+
+        let critical = render_context_segment_variants(
+            "claude-opus-5",
+            "Opus 5",
+            Some((920_000, 92)),
+            Some(1_000_000),
+            &args,
+            0.0,
+            true,
+        );
+        let full = &critical.variants[0];
+        assert!(
+            full.contains(&tokens::LimitTier::Critical.paint("92%", true)),
+            "{full:?}"
+        );
+        // The hint shares the tier's color but never its weight.
+        assert!(full.contains(&format!("{red}@")), "{full:?}");
     }
 
     #[test]

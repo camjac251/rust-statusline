@@ -145,14 +145,19 @@ pub const MODEL_GPT_TERRA: ColorToken = ColorToken::new((105, 219, 148), Ansi::G
 pub const MODEL_GPT_LUNA: ColorToken = ColorToken::new((125, 170, 255), Ansi::BrightBlue);
 
 // -- Semantic -----------------------------------------------------------------
-pub const SUCCESS: ColorToken = ColorToken::new((134, 239, 172), Ansi::Green);
-pub const WARNING: ColorToken = ColorToken::new((253, 224, 71), Ansi::Yellow);
-pub const ERROR: ColorToken = ColorToken::new((248, 113, 113), Ansi::Red);
-pub const MUTED: ColorToken = ColorToken::new((148, 163, 184), Ansi::BrightBlack);
+// These sit on the same rows as Claude Code's own footer text, so they take the
+// values of its dark theme (`success`, `warning`, `error`, `inactive`) rather
+// than a brighter palette that would read louder than the mode row beside it.
+pub const SUCCESS: ColorToken = ColorToken::new((78, 186, 101), Ansi::Green);
+pub const WARNING: ColorToken = ColorToken::new((255, 193, 7), Ansi::Yellow);
+pub const ERROR: ColorToken = ColorToken::new((255, 107, 128), Ansi::Red);
+pub const MUTED: ColorToken = ColorToken::new((153, 153, 153), Ansi::BrightBlack);
 pub const ACCENT: ColorToken = ColorToken::new((96, 165, 250), Ansi::BrightBlue);
+/// Claude Code's own `fastMode` tone, so the badge reads as a mode, not a warning.
+pub const MODE_FAST: ColorToken = ColorToken::new((255, 120, 20), Ansi::Yellow);
 
 // -- Effort (heat gradient) ---------------------------------------------------
-pub const EFFORT_NONE: ColorToken = ColorToken::new((148, 163, 184), Ansi::BrightBlack);
+pub const EFFORT_NONE: ColorToken = ColorToken::new((153, 153, 153), Ansi::BrightBlack);
 pub const EFFORT_LOW: ColorToken = ColorToken::new((100, 220, 255), Ansi::Cyan);
 pub const EFFORT_MEDIUM: ColorToken = ColorToken::new((255, 255, 255), Ansi::BrightWhite);
 pub const EFFORT_HIGH: ColorToken = ColorToken::new((255, 200, 100), Ansi::Yellow);
@@ -163,13 +168,64 @@ pub const PRIMARY: ColorToken = ColorToken::new((255, 255, 255), Ansi::BrightWhi
 pub const PRIMARY_DIM: ColorToken = ColorToken::new((255, 255, 255), Ansi::White);
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// GRADIENT -- dynamic color from value/max
+// LIMIT TIERS -- one attention scale for values measured against a hard cap
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Gradient endpoint colors (green -> yellow -> red)
-const GRADIENT_LOW: (u8, u8, u8) = (134, 239, 172);
-const GRADIENT_MID: (u8, u8, u8) = (253, 224, 71);
-const GRADIENT_HIGH: (u8, u8, u8) = (248, 113, 113);
+/// Percent of a hard limit at which a value starts asking for attention.
+pub const LIMIT_ELEVATED_PERCENT: f64 = 75.0;
+/// Percent of a hard limit at which a value is about to be cut off.
+pub const LIMIT_CRITICAL_PERCENT: f64 = 90.0;
+
+/// How loudly a limit-relative value should read.
+///
+/// Only quantities with a ceiling that stops the session belong on this scale:
+/// the five-hour and weekly windows, scoped weekly rows, the extra-usage credit,
+/// and context pressure. Costs, the reset countdown, cache and token counts have
+/// no such ceiling and stay neutral, so color on the line always means
+/// "approaching a wall" and never "large number". The scale is stepped on
+/// purpose: a smooth green-to-red gradient left orange and red competing for the
+/// reader's worry on adjacent tokens, which is the ambiguity the tiers remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LimitTier {
+    /// Plenty of headroom; painted like any other value.
+    Calm,
+    /// Heads up: past `LIMIT_ELEVATED_PERCENT`, or on pace to exhaust the window.
+    Elevated,
+    /// About to hit the cap: past `LIMIT_CRITICAL_PERCENT`.
+    Critical,
+}
+
+impl LimitTier {
+    /// Tier for a value expressed as a percent of its cap. A non-finite percent
+    /// carries no evidence of pressure and reads as calm.
+    pub fn for_percent(percent: f64) -> Self {
+        if percent >= LIMIT_CRITICAL_PERCENT {
+            Self::Critical
+        } else if percent >= LIMIT_ELEVATED_PERCENT {
+            Self::Elevated
+        } else {
+            Self::Calm
+        }
+    }
+
+    /// The tier's color without weight, for annotations beside a tiered value.
+    pub fn token(self) -> ColorToken {
+        match self {
+            Self::Calm => PRIMARY_DIM,
+            Self::Elevated => WARNING,
+            Self::Critical => ERROR,
+        }
+    }
+
+    /// Paint a value on the shared scale. Only `Critical` is bold, so weight is
+    /// reserved for the one state that needs acting on.
+    pub fn paint(self, text: &str, truecolor: bool) -> String {
+        match self {
+            Self::Critical => ERROR.bold(text, truecolor),
+            tier => tier.token().paint(text, truecolor),
+        }
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // EFFORT -- one tier scale shared by the footer and the agent panel
@@ -315,49 +371,48 @@ pub fn truncate_to_width(text: &str, max_width: usize) -> String {
     out
 }
 
-/// Interpolate between semantic gradient colors: green -> yellow -> red.
-/// Identical to the former `color_scale_rgb` in display.rs.
-fn color_scale_rgb(value: f64, max: f64) -> (u8, u8, u8) {
-    let ratio = (value / max).clamp(0.0, 1.0);
-
-    if ratio < 0.5 {
-        // Green to Yellow
-        let t = ratio * 2.0;
-        let r = (GRADIENT_LOW.0 as f64 + (GRADIENT_MID.0 as f64 - GRADIENT_LOW.0 as f64) * t) as u8;
-        let g = (GRADIENT_LOW.1 as f64 + (GRADIENT_MID.1 as f64 - GRADIENT_LOW.1 as f64) * t) as u8;
-        let b = (GRADIENT_LOW.2 as f64 + (GRADIENT_MID.2 as f64 - GRADIENT_LOW.2 as f64) * t) as u8;
-        (r, g, b)
-    } else {
-        // Yellow to Red
-        let t = (ratio - 0.5) * 2.0;
-        let r =
-            (GRADIENT_MID.0 as f64 + (GRADIENT_HIGH.0 as f64 - GRADIENT_MID.0 as f64) * t) as u8;
-        let g =
-            (GRADIENT_MID.1 as f64 + (GRADIENT_HIGH.1 as f64 - GRADIENT_MID.1 as f64) * t) as u8;
-        let b =
-            (GRADIENT_MID.2 as f64 + (GRADIENT_HIGH.2 as f64 - GRADIENT_MID.2 as f64) * t) as u8;
-        (r, g, b)
-    }
-}
-
-/// Build a dynamic `ColorToken` from a value/max ratio with smooth RGB
-/// interpolation for truecolor and stepped green/yellow/red for ANSI.
-pub fn gradient(value: f64, max: f64) -> ColorToken {
-    let (r, g, b) = color_scale_rgb(value, max);
-    let normalized = (value / max).clamp(0.0, 1.0);
-    let ansi = if normalized >= 0.66 {
-        Ansi::Red
-    } else if normalized >= 0.33 {
-        Ansi::Yellow
-    } else {
-        Ansi::Green
-    };
-    ColorToken::new((r, g, b), ansi)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limit_tiers_step_at_the_documented_thresholds() {
+        for pct in [0.0, 40.0, 74.9] {
+            assert_eq!(LimitTier::for_percent(pct), LimitTier::Calm, "{pct}");
+        }
+        for pct in [75.0, 82.0, 89.9] {
+            assert_eq!(LimitTier::for_percent(pct), LimitTier::Elevated, "{pct}");
+        }
+        for pct in [90.0, 100.0, 250.0] {
+            assert_eq!(LimitTier::for_percent(pct), LimitTier::Critical, "{pct}");
+        }
+        // No evidence of pressure is not pressure.
+        assert_eq!(LimitTier::for_percent(f64::NAN), LimitTier::Calm);
+        assert!(LimitTier::Calm < LimitTier::Elevated && LimitTier::Elevated < LimitTier::Critical);
+    }
+
+    #[test]
+    fn only_the_critical_tier_carries_weight() {
+        assert_eq!(
+            LimitTier::Calm.paint("40%", true),
+            PRIMARY_DIM.paint("40%", true)
+        );
+        assert_eq!(
+            LimitTier::Elevated.paint("80%", true),
+            WARNING.paint("80%", true)
+        );
+        assert_eq!(
+            LimitTier::Critical.paint("95%", true),
+            ERROR.bold("95%", true)
+        );
+        assert!(!LimitTier::Elevated.paint("80%", true).contains("\u{1b}[1m"));
+        assert!(
+            !LimitTier::Critical
+                .token()
+                .paint("95%", true)
+                .contains("\u{1b}[1m")
+        );
+    }
 
     #[test]
     fn strips_osc_hyperlinks_with_either_terminator() {

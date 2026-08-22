@@ -173,13 +173,29 @@ Model names use a stable identity palette independent of cost, context pressure,
 
 Truecolor is auto-detected from common terminal environment variables, and `--truecolor` or `CLAUDE_TRUECOLOR=1` forces it. [`NO_COLOR`](https://no-color.org/) disables all ANSI and truecolor styling. The footer and the agent panel resolve the palette from the same signals, so one terminal never renders the two surfaces differently.
 
+### Attention tiers
+
+Color on the line means one thing: a value is approaching a cap that would stop the session. Only the five-hour and weekly percentages, the scoped weekly rows (`fable:` and friends), the extra-usage credit, and the context percent are measured against such a cap, and they share one stepped scale on both the footer and the agent panel:
+
+| Tier | Threshold | Rendering |
+|------|-----------|-----------|
+| calm | below 75% | plain white, like any other value |
+| elevated | 75% to 89% | amber |
+| critical | 90% and above | bold red |
+
+The five-hour figure also rises to *elevated* when its pace rather than its level is the problem. Once at least an hour of the window has elapsed, a straight-line projection of the percent used so far that reaches 100% before the reset is the early warning the level thresholds cannot give: `usage:50%` with four hours left is on course to hit the cap. Pace never escalates past elevated; only the level itself reaches critical.
+
+Everything else is deliberately neutral. Session, today, and window costs have no ceiling, so they render as plain figures (the session cost bold, as the line's anchor). The reset countdown is time, not pressure: a short countdown means the budget refills soon, and painting it red left it competing with the usage percent for the reader's worry. Cache state and token counts are plain, and the compaction hint takes the tier of the context percent beside it rather than a color of its own. Identity colors (model names, effort tiers, the workspace path) stay distinct from the attention scale.
+
+The semantic palette uses Claude Code's own dark-theme tones (amber `#FFC107`, red `#FF6B80`, green `#4EBA65`, gray `#999999`), so the footer sits level with the mode row Claude Code draws beneath it instead of reading brighter than it. Claude Code re-parses the statusline's ANSI and paints any uncolored run in that same gray; it never dims what the statusline colored, so the color you see is the color chosen here.
+
 ### Effort tiers
 
 The effort chip uses one scale across the footer and the agent panel:
 
 | Tier | Color |
 |------|-------|
-| `none` | muted grey |
+| `none` | muted gray |
 | `low` | cyan |
 | `medium` | white |
 | `high` | amber |
@@ -367,7 +383,7 @@ The budget is per account, not per machine, and only the fetch lock is machine-l
 | 3 | 3 | 100s |
 | 5 | 5 (at budget) | 300s, leave at default |
 
-The `up:` token reports how stale the figures are, staying hidden until they outlive the TTL above and then colouring from muted through amber to red as further refresh windows are missed. Because both the 5-hour and weekly tokens come from one cached fetch, the age is stated once for the group rather than repeated per token.
+The `up:` token reports how stale the figures are, staying hidden until they outlive the TTL above and then coloring from muted through amber to red as further refresh windows are missed. Because both the 5-hour and weekly tokens come from one cached fetch, the age is stated once for the group rather than repeated per token.
 
 While a fetch is locked or backed off, the hook's own `rate_limits` still supply the 5-hour and weekly percentages, but the scoped rows, spend, and extra usage exist only in the OAuth response. Those are carried over from the last response rather than dropped, so `fable:` and `ex:` stay on the line and `up:` reports their age. Discarding them instead made those two tokens blink out for the duration of every lock and every backoff while the tokens beside them stayed put.
 
