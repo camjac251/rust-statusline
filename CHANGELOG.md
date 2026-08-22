@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [2.13.0](https://github.com/camjac251/rust-statusline/compare/v2.12.2...v2.13.0) - 2026-08-22
+
+### Added
+
+- *(display)* reserve color for limit pressure and quiet everything else
+
 ## [2.12.2](https://github.com/camjac251/rust-statusline/compare/v2.12.1...v2.12.2) - 2026-08-14
 
 ### Fixed
