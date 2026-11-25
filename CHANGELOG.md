@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## [2.13.1](https://github.com/camjac251/rust-statusline/compare/v2.13.0...v2.13.1) - 2026-11-25
+
+### Fixed
+
+- *(deps)* update rust crate rusqlite to 0.43
+- *(deps)* update rust crate gix to 0.91
+- *(deps)* update rust crate sha2 to 0.11
+
+### Other
+
+- name v2.13.1 as the final release
+- Merge pull request #92 from camjac251/renovate/anyhow-1.x-lockfile
+- Merge remote-tracking branch 'origin/main' into fix-rusqlite
+- Merge remote-tracking branch 'origin/main' into fix-gix
+- *(deps)* update rust crate anyhow to v1.0.105
+- Merge pull request #90 from camjac251/renovate/walkdir-2.x-lockfile
+- Merge pull request #89 from camjac251/renovate/unicode-width-0.x-lockfile
+- Merge pull request #87 from camjac251/renovate/rustls-native-certs-0.x-lockfile
+- Merge pull request #86 from camjac251/renovate/serde_json-1.x-lockfile
+- Merge pull request #85 from camjac251/renovate/clap-4.x-lockfile
+- Merge pull request #84 from camjac251/renovate/ureq-3.x-lockfile
+- Merge pull request #83 from camjac251/renovate/owo-colors-4.x-lockfile
+- list the reset-state file in the removal steps
+- mark claude_statusline as discontinued
+
 ## [2.13.0](https://github.com/camjac251/rust-statusline/compare/v2.12.2...v2.13.0) - 2026-08-22
 
 ### Added
