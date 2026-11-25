@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## [2.13.1](https://github.com/camjac251/rust-statusline/compare/v2.13.0...v2.13.1) - 2026-11-25
+
+### Fixed
+
+- *(deps)* update rust crate sha2 to 0.11
+
+### Other
+
+- list the reset-state file in the removal steps
+- mark claude_statusline as discontinued
+
 ## [2.13.0](https://github.com/camjac251/rust-statusline/compare/v2.12.2...v2.13.0) - 2026-08-22
 
 ### Added
