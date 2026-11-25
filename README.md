@@ -7,6 +7,7 @@
 [![CI](https://github.com/camjac251/rust-statusline/actions/workflows/ci.yml/badge.svg)](https://github.com/camjac251/rust-statusline/actions/workflows/ci.yml)
 [![Release](https://github.com/camjac251/rust-statusline/actions/workflows/release.yml/badge.svg)](https://github.com/camjac251/rust-statusline/actions/workflows/release.yml)
 [![Rust](https://img.shields.io/badge/rust-1.95+-orange.svg)](https://www.rust-lang.org/)
+![Discontinued](https://img.shields.io/badge/maintenance-discontinued-dc2626)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A fast, single-binary statusline for [Claude Code](https://code.claude.com/docs). Parses session transcripts and the OAuth usage API to show real-time metrics in one line. Provider-qualified `clodex:` model identifiers are normalized for display and embedded cost calculation, including GPT-5.6 Sol, Terra, and Luna.
@@ -16,6 +17,10 @@ A fast, single-binary statusline for [Claude Code](https://code.claude.com/docs)
 <img src="assets/preview.svg" alt="claude_statusline output preview" width="1000">
 
 </div>
+
+> [!WARNING]
+>
+> **claude_statusline is discontinued; v2.13.0 is the final release.** Its replacement is the status line in [cc-enhanced](https://github.com/camjac251/cc-enhanced), a Claude Code plugin; see [status line](https://github.com/camjac251/cc-enhanced/blob/main/docs/configuration.md#status-line). Claude Code 2.1.323 removed the `subagentStatusLine` setting that fed this tool's agent-panel rows, and Claude Code 2.1.332 lets a plugin draw the footer and each agent row itself. The plugin reads context, cost, effort, and rate limits straight from Claude Code, so there is no transcript parsing, no embedded pricing table to keep current, and no process to spawn on every refresh. Existing binaries still work as a `statusLine` command, but they receive no further fixes or pricing updates. To remove it, delete the `statusLine` entry from your Claude Code settings, then run `brew uninstall claude-statusline` or delete the downloaded binary, and optionally remove `~/.claude/statusline.db` and `~/.cache/claude-statusline/`.
 
 ---
 
